@@ -213,7 +213,16 @@ st.set_page_config(
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-    
+
+    /* Remove Streamlit default top padding */
+    .block-container {
+        padding-top: 1rem !important;
+    }
+    header[data-testid="stHeader"] {
+        height: 2.5rem !important;
+        min-height: 0 !important;
+    }
+
     * {
         font-family: 'Inter', sans-serif;
     }
@@ -233,10 +242,9 @@ st.markdown("""
     }
     
     .hero-section {
-        background: #74e504;
-        padding: 3rem;
+        background: #9EF04D;
+        padding: 2.0rem 3rem;
         border-radius: 1rem;
-        color: white;
         text-align: center;
         margin-bottom: 2rem;
         box-shadow: 0 10px 40px rgba(116, 229, 4, 0.3);
@@ -245,12 +253,13 @@ st.markdown("""
     .hero-title {
         font-size: 2.5rem;
         font-weight: 700;
-        margin-bottom: 1rem;
+        margin-bottom: 0.5rem;
+        color: #222222;
     }
     
     .hero-subtitle {
         font-size: 1.2rem;
-        opacity: 0.9;
+        color: #525252;
     }
     
     /* Custom chat message styling with solid color */
@@ -749,7 +758,37 @@ print(f"📊 Session state - Messages: {len(st.session_state.messages)}, Stock: 
 
 # Sidebar
 with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/000000/shark.png", width=80)
+    # Theme-aware logo: dark logo on light theme, light logo on dark theme
+    import base64
+
+    def img_to_base64(path):
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+
+    try:
+        dark_b64  = img_to_base64("static/tradingwize-logo-dark.png")
+        light_b64 = img_to_base64("static/tradingwize-logo-light.png")
+        st.markdown(f"""
+        <style>
+            /* light theme → show dark logo, hide light logo */
+            [data-theme="light"] .logo-for-dark  {{ display: none !important; }}
+            [data-theme="light"] .logo-for-light {{ display: block !important; }}
+            /* dark theme → show light logo, hide dark logo */
+            [data-theme="dark"]  .logo-for-light {{ display: none !important; }}
+            [data-theme="dark"]  .logo-for-dark  {{ display: block !important; }}
+            /* default fallback (no attribute yet) → show dark logo */
+            .logo-for-dark  {{ display: block; }}
+            .logo-for-light {{ display: none; }}
+            .sidebar-logo img {{ max-width: 270px; width: 100%; height: auto; margin-bottom: 0.25rem; }}
+        </style>
+        <div class="sidebar-logo">
+            <img class="logo-for-dark"  src="data:image/png;base64,{dark_b64}" />
+            <img class="logo-for-light" src="data:image/png;base64,{light_b64}" />
+        </div>
+        """, unsafe_allow_html=True)
+    except Exception as e:
+        print(f"Logo load error: {e}")
+
     st.title("Stock Analysis")
     st.markdown("---")
     
@@ -1168,7 +1207,7 @@ if view_option == "💬 Chat":
     if len(st.session_state.messages) == 0:
         st.markdown("""
         <div style="
-            background-color: #d4f4aa;
+            background-color: #E1FDC6;
             color: #2E590E;
             padding: 1rem 1.5rem;
             border-radius: 0.75rem;
