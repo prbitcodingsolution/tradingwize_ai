@@ -1,0 +1,10 @@
+.env
+__pycache__
+*.pyc
+.DS_Store
+.env.local
+.env.*.local
+venv/
+
+# Generated AI narration scripts
+generated_ai_scripts/

@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Supply & Demand Voice Tutor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: #0a0a0a;
+            color: #fff;
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        
+        .chart-area {
+            flex: 1;
+            background: #1a1a1a;
+            padding: 20px;
+            border-right: 3px solid #667eea;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .chart-title {
+            color: #ffd700;
+            font-size: 1.3em;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+        
+        .canvas-container {
+            flex: 1;
+            background: #0d0d0d;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            display: block;
+        }
+        
+        .control-area {
+            width: 380px;
+            background: #0d0d0d;
+            border-left: 3px solid #764ba2;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+        
+        .title {
+            font-size: 1.5em;
+            color: #ffd700;
+            margin-bottom: 20px;
+            text-align: center;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 15px;
+        }
+        
+        .status-display {
+            background: linear-gradient(135deg, rgba(102, 126, 234, 0.2) 0%, rgba(118, 75, 162, 0.2) 100%);
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            min-height: 80px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
+        
+        .status-text {
+            color: #ffd700;
+            font-weight: bold;
+            font-size: 0.95em;
+            line-height: 1.5;
+        }
+        
+        .input-box {
+            margin-bottom: 15px;
+        }
+        
+        .input-box label {
+            display: block;
+            color: #bbb;
+            margin-bottom: 8px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            background: #1a1a1a;
+            border: 2px solid #667eea;
+            border-radius: 5px;
+            color: #fff;
+            font-size: 0.95em;
+        }
+        
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #764ba2;
+            box-shadow: 0 0 10px rgba(118, 75, 162, 0.4);
+        }
+        
+        .button-group {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .btn {
+            padding: 12px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 0.95em;
+            transition: all 0.3s;
+        }
+        
+        .btn:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn:active {
+            transform: translateY(0);
+        }
+        
+        .btn.loading {
+            background: #ffd700;
+            color: #000;
+            pointer-events: none;
+        }
+        
+        .btn.small {
+            padding: 10px;
+            font-size: 0.85em;
+        }
+        
+        .quick-buttons {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 15px;
+        }
+        
+        .quick-btn {
+            padding: 10px;
+            background: #2a2a2a;
+            border: 2px solid #667eea;
+            color: #667eea;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 0.85em;
+            transition: all 0.3s;
+        }
+        
+        .quick-btn:hover {
+            background: #667eea;
+            color: white;
+            transform: translateY(-2px);
+        }
+        
+        .voice-section {
+            background: #1a1a1a;
+            border: 2px solid #51cf66;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .voice-label {
+            color: #51cf66;
+            font-weight: bold;
+            margin-bottom: 10px;
+            font-size: 0.95em;
+        }
+        
+        .voice-btn {
+            width: 100%;
+            padding: 12px;
+            background: #51cf66;
+            color: #000;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 0.95em;
+            transition: all 0.3s;
+        }
+        
+        .voice-btn:hover {
+            background: #51cf66;
+            transform: scale(1.02);
+        }
+        
+        .voice-btn.off {
+            background: #666;
+            color: #fff;
+        }
+        
+        .settings {
+            background: #1a1a1a;
+            border: 2px solid #999;
+            border-radius: 8px;
+            padding: 15px;
+            font-size: 0.9em;
+        }
+        
+        .setting-item {
+            margin-bottom: 12px;
+        }
+        
+        .setting-item label {
+            display: block;
+            color: #bbb;
+            margin-bottom: 5px;
+        }
+        
+        .setting-item select {
+            width: 100%;
+            padding: 8px;
+            background: #2a2a2a;
+            border: 1px solid #667eea;
+            color: #fff;
+            border-radius: 4px;
+        }
+        
+        .info-text {
+            font-size: 0.85em;
+            color: #888;
+            margin-top: 10px;
+            text-align: center;
+        }
+        
+        .animation-indicator {
+            text-align: center;
+            color: #ffd700;
+            font-weight: bold;
+            margin-top: 10px;
+            animation: pulse 1s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Chart Area -->
+        <div class="chart-area">
+            <div class="chart-title">📊 Price Chart with Supply & Demand Zones</div>
+            <div class="canvas-container">
+                <canvas id="mainCanvas"></canvas>
+            </div>
+        </div>
+
+        <!-- Control Area -->
+        <div class="control-area">
+            <div class="title">🎓 AI Tutor</div>
+
+            <!-- Status Display -->
+            <div class="status-display">
+                <div class="status-text" id="statusText">Ready to teach! Click a button or type what you want to learn.</div>
+            </div>
+
+            <!-- Input -->
+            <div class="input-box">
+                <label for="userInput">What do you want to learn?</label>
+                <input 
+                    type="text" 
+                    id="userInput" 
+                    placeholder="e.g., supply and demand"
+                    onkeypress="if(event.key === 'Enter') teach()"
+                >
+            </div>
+
+            <!-- Quick Buttons -->
+            <div style="margin-bottom: 15px;">
+                <label style="color: #bbb; font-size: 0.9em; display: block; margin-bottom: 8px; font-weight: bold;">Quick Tutorials:</label>
+                <div class="quick-buttons">
+                    <button class="quick-btn" onclick="teach('supply and demand')">Supply & Demand</button>
+                    <button class="quick-btn" onclick="teach('supply zones')">Supply Zones</button>
+                    <button class="quick-btn" onclick="teach('demand zones')">Demand Zones</button>
+                    <button class="quick-btn" onclick="teach('how to trade')">How to Trade</button>
+                </div>
+            </div>
+
+            <!-- Teach Button -->
+            <div class="button-group">
+                <button class="btn" id="teachBtn" onclick="teach()">🎓 Teach Me!</button>
+                <button class="btn small" onclick="clearCanvas()">🗑️ Clear Chart</button>
+            </div>
+
+            <!-- Voice Section -->
+            <div class="voice-section">
+                <div class="voice-label">🎙️ Voice Narration</div>
+                <button class="voice-btn" id="voiceToggle" onclick="toggleVoice()">Enable Voice</button>
+                <div class="info-text">Click to enable AI voice explanation</div>
+            </div>
+
+            <!-- Settings -->
+            <div class="settings">
+                <div class="setting-item">
+                    <label for="voiceSpeed">Voice Speed:</label>
+                    <select id="voiceSpeed">
+                        <option value="0.8">Slow</option>
+                        <option value="1" selected>Normal</option>
+                        <option value="1.2">Fast</option>
+                    </select>
+                </div>
+                <div class="setting-item">
+                    <label for="voiceGender">Voice:</label>
+                    <select id="voiceGender">
+                        <option value="male">Male</option>
+                        <option value="female" selected>Female</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('mainCanvas');
+        const ctx = canvas.getContext('2d');
+        let voiceEnabled = false;
+        let isTeaching = false;
+
+        // Resize canvas
+        function resizeCanvas() {
+            const container = canvas.parentElement;
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Generate candlestick data
+        function generateCandleData() {
+            let candles = [];
+            let price = 65000;
+
+            for (let i = 0; i < 50; i++) {
+                const volatility = Math.random() * 1500;
+                const open = price;
+                const close = price + (Math.random() - 0.45) * 2000;
+                const high = Math.max(open, close) + Math.random() * 500;
+                const low = Math.min(open, close) - Math.random() * 500;
+
+                candles.push({ open, close, high, low });
+                price = close;
+            }
+
+            return candles;
+        }
+
+        let candleData = generateCandleData();
+
+        // Draw candlesticks
+        function drawCandles() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const chartWidth = canvas.width - 2 * padding;
+            const chartHeight = canvas.height - 2 * padding;
+
+            const prices = candleData.flatMap(c => [c.high, c.low]);
+            const minPrice = Math.min(...prices);
+            const maxPrice = Math.max(...prices);
+            const priceRange = maxPrice - minPrice;
+
+            // Draw grid
+            ctx.strokeStyle = '#222';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 5; i++) {
+                const y = padding + (chartHeight / 5) * i;
+                ctx.beginPath();
+                ctx.moveTo(padding, y);
+                ctx.lineTo(canvas.width - padding, y);
+                ctx.stroke();
+            }
+
+            // Draw candles
+            const candleWidth = chartWidth / (candleData.length * 1.5);
+
+            candleData.forEach((candle, idx) => {
+                const x = padding + (idx * (chartWidth / candleData.length)) + (chartWidth / candleData.length) / 2;
+
+                // Normalize prices
+                const openY = padding + chartHeight - ((candle.open - minPrice) / priceRange) * chartHeight;
+                const closeY = padding + chartHeight - ((candle.close - minPrice) / priceRange) * chartHeight;
+                const highY = padding + chartHeight - ((candle.high - minPrice) / priceRange) * chartHeight;
+                const lowY = padding + chartHeight - ((candle.low - minPrice) / priceRange) * chartHeight;
+
+                // Color: green if close > open, red otherwise
+                const color = candle.close >= candle.open ? '#51cf66' : '#ff6b6b';
+
+                // Draw wick
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x, highY);
+                ctx.lineTo(x, lowY);
+                ctx.stroke();
+
+                // Draw body
+                ctx.fillStyle = color;
+                ctx.fillRect(
+                    x - candleWidth / 2,
+                    Math.min(openY, closeY),
+                    candleWidth,
+                    Math.abs(openY - closeY)
+                );
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(
+                    x - candleWidth / 2,
+                    Math.min(openY, closeY),
+                    candleWidth,
+                    Math.abs(openY - closeY)
+                );
+            });
+
+            // Draw axes
+            ctx.strokeStyle = '#667eea';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(padding, padding);
+            ctx.lineTo(padding, canvas.height - padding);
+            ctx.lineTo(canvas.width - padding, canvas.height - padding);
+            ctx.stroke();
+        }
+
+        // Draw supply zone
+        function drawSupplyZone() {
+            const padding = 50;
+            const chartHeight = canvas.height - 2 * padding;
+
+            const supplyY = padding + chartHeight * 0.2;
+            const supplyHeight = chartHeight * 0.12;
+            const supplyX = padding + (canvas.width - 2 * padding) * 0.65;
+            const supplyWidth = (canvas.width - 2 * padding) * 0.25;
+
+            // Draw zone
+            ctx.fillStyle = 'rgba(255, 107, 107, 0.3)';
+            ctx.fillRect(supplyX, supplyY, supplyWidth, supplyHeight);
+
+            // Draw border
+            ctx.strokeStyle = '#ff6b6b';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(supplyX, supplyY, supplyWidth, supplyHeight);
+
+            // Draw label
+            ctx.fillStyle = '#ff6b6b';
+            ctx.font = 'bold 16px Arial';
+            ctx.fillText('SUPPLY ZONE', supplyX + 10, supplyY - 12);
+            ctx.font = '12px Arial';
+            ctx.fillStyle = '#ff9999';
+            ctx.fillText('(Sellers pushed down)', supplyX + 10, supplyY - 28);
+        }
+
+        // Draw demand zone
+        function drawDemandZone() {
+            const padding = 50;
+            const chartHeight = canvas.height - 2 * padding;
+
+            const demandY = padding + chartHeight * 0.65;
+            const demandHeight = chartHeight * 0.12;
+            const demandX = padding + (canvas.width - 2 * padding) * 0.1;
+            const demandWidth = (canvas.width - 2 * padding) * 0.25;
+
+            // Draw zone
+            ctx.fillStyle = 'rgba(81, 207, 102, 0.3)';
+            ctx.fillRect(demandX, demandY, demandWidth, demandHeight);
+
+            // Draw border
+            ctx.strokeStyle = '#51cf66';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(demandX, demandY, demandWidth, demandHeight);
+
+            // Draw label
+            ctx.fillStyle = '#51cf66';
+            ctx.font = 'bold 16px Arial';
+            ctx.fillText('DEMAND ZONE', demandX + 10, demandY + demandHeight + 20);
+            ctx.font = '12px Arial';
+            ctx.fillStyle = '#99ff99';
+            ctx.fillText('(Buyers pushed up)', demandX + 10, demandY + demandHeight + 35);
+        }
+
+        // Text to Speech
+        function speak(text) {
+            return new Promise((resolve) => {
+                if (!voiceEnabled) {
+                    resolve();
+                    return;
+                }
+
+                const synth = window.speechSynthesis;
+                synth.cancel();
+
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.rate = parseFloat(document.getElementById('voiceSpeed').value);
+                utterance.pitch = 1;
+                utterance.volume = 1;
+
+                utterance.onend = () => resolve();
+                utterance.onerror = () => resolve();
+
+                synth.speak(utterance);
+            });
+        }
+
+        // Teach Supply and Demand
+        async function teachSupplyDemand() {
+            updateStatus('🎓 Teaching Supply and Demand... Listen for explanation!');
+
+            // Draw candles
+            drawCandles();
+            await new Promise(r => setTimeout(r, 500));
+
+            // Draw supply zone
+            drawSupplyZone();
+            updateStatus('Drawing SUPPLY ZONE... (Red area at top)');
+            await speak('This is a SUPPLY ZONE, shown in red at the top. Here, sellers came in with strong selling pressure and pushed the price DOWN. When price returns to this level, sellers come back to sell. That is why this is called SUPPLY ZONE or RESISTANCE.');
+            await new Promise(r => setTimeout(r, 500));
+
+            // Draw demand zone
+            drawDemandZone();
+            updateStatus('Drawing DEMAND ZONE... (Green area at bottom)');
+            await speak('This is a DEMAND ZONE, shown in green at the bottom. Here, buyers came in with strong buying pressure and pushed the price UP. When price falls back to this level, buyers come back to buy. That is why this is called DEMAND ZONE or SUPPORT.');
+            await new Promise(r => setTimeout(r, 500));
+
+            // Trading explanation
+            updateStatus('✓ Complete! Now you understand Supply and Demand!');
+            await speak('This is how professional traders make money. They mark these zones on their charts. Then they wait for price to touch a zone with a rejection signal. At the demand zone, the price bounces up, so you BUY. At the supply zone, the price bounces down, so you SELL. The zones give you clear entry points and the zone itself is your stop loss. This is the foundation of technical analysis trading.');
+        }
+
+        // Main teach function
+        async function teach(query = null) {
+            if (isTeaching) return;
+            isTeaching = true;
+
+            const userQuery = query || document.getElementById('userInput').value.toLowerCase();
+
+            if (!userQuery) {
+                alert('Please enter what you want to learn!');
+                isTeaching = false;
+                return;
+            }
+
+            document.getElementById('teachBtn').classList.add('loading');
+            document.getElementById('teachBtn').textContent = '⏳ Teaching...';
+
+            try {
+                await teachSupplyDemand();
+            } catch (error) {
+                console.error('Error:', error);
+                updateStatus('Error occurred. Please try again.');
+            }
+
+            document.getElementById('teachBtn').classList.remove('loading');
+            document.getElementById('teachBtn').textContent = '🎓 Teach Me!';
+            isTeaching = false;
+        }
+
+        function clearCanvas() {
+            drawCandles();
+            updateStatus('Chart cleared. Ready to learn!');
+            document.getElementById('userInput').value = '';
+        }
+
+        function toggleVoice() {
+            voiceEnabled = !voiceEnabled;
+            const btn = document.getElementById('voiceToggle');
+            
+            if (voiceEnabled) {
+                btn.textContent = '🔊 Voice Enabled';
+                btn.style.background = '#51cf66';
+                btn.style.color = '#000';
+                updateStatus('✓ Voice is ON! Now click "Teach Me!" to listen.');
+            } else {
+                btn.textContent = '🔇 Voice Off';
+                btn.style.background = '#666';
+                btn.style.color = '#fff';
+                updateStatus('Voice OFF. You can still see the drawings!');
+            }
+        }
+
+        function updateStatus(text) {
+            document.getElementById('statusText').textContent = text;
+        }
+
+        // Initialize
+        drawCandles();
+        updateStatus('Ready! Enable voice, then click "Teach Me!" or select a tutorial.');
+    </script>
+</body>
+</html>

@@ -1,0 +1,134 @@
+COMPREHENSIVE FINANCIAL ANALYSIS: ONGC
+Generated: 2026-02-13 12:25:52
+Number of PDFs Analyzed: 3
+
+================================================================================
+TOKEN USAGE & COST ANALYSIS
+================================================================================
+Total API Calls: 4
+Input Tokens: 43,222
+Output Tokens: 1,910
+Total Tokens: 45,132
+Cost (GPT-3.5-turbo): $0.0245 USD
+
+Cost Estimates for Other Models:
+  - GPT-4: $1.4113 USD
+  - GPT-4-Turbo: $0.4895 USD
+  - Claude-3-Sonnet: $0.1583 USD
+  - Claude-3-Opus: $0.7916 USD
+  - Claude-3-Haiku: $0.0132 USD
+
+================================================================================
+
+PDF 1: ONGC_quarterly_1770965247_1.pdf
+Word Count: 381 words
+--------------------------------------------------------------------------------
+**Financial Summary**
+
+**Financial Performance:**
+- ONGC's revenue for the quarter and half-year ended September 30, 2025, stood at ₹33,030.56 crore, showing a slight increase from the previous quarter.
+- The company reported a profit before tax of ₹12,544.71 crore, reflecting a decrease compared to the previous quarter.
+- ONGC's net profit for the period was ₹9,847.97 crore, indicating a decline from the previous quarter.
+- The company's operating margin was 41.34%, showcasing a slight decrease from the previous quarter.
+- ONGC's net profit margin was 29.81%, showing a decrease compared to the previous quarter.
+
+**Business Highlights:**
+- ONGC declared a 1st interim dividend of ₹6 per equity share for the financial year 2025-26, demonstrating a 120% dividend rate.
+- The appointment of Shri Shashi Bhushan Singh as Company Secretary and Compliance Officer was approved by the Board.
+- The company invested up to ₹421.50 crore in its wholly-owned subsidiary, ONGC Green Limited (OGL), engaged in renewable energy business.
+- ONGC ventured into two joint venture companies with M/s Mitsui O.S.K. Lines Ltd. to expand into the transportation of petroleum resources, focusing on ethane transportation business.
+
+**Financial Health:**
+- ONGC's debt equity ratio was 0.02, indicating a strong financial position with minimal debt.
+- The company's debt service coverage ratio was 311.32, showcasing a robust ability to cover its debt obligations.
+- ONGC's current ratio was 1.94, indicating healthy liquidity to meet short-term obligations.
+- The total debts to total assets ratio was 0.01, reflecting a strong asset base compared to its debt levels.
+
+**Future Outlook:**
+- ONGC faces contingent liabilities related to Service Tax/GST on royalty, with provisions made towards disputed taxes.
+- The company's investment in renewable energy and transportation sectors signifies a strategic diversification approach.
+- ONGC's focus on renewable energy and joint ventures indicates a shift towards sustainable and diversified business operations.
+- Legal disputes regarding Service Tax/GST on royalty remain unresolved, posing potential financial risks.
+
+**Conclusion:**
+ONGC's financial performance in the recent quarter showed stability in revenue and profitability, albeit with slight declines. The company's strategic investments in renewable energy and transportation sectors reflect a forward-looking approach. However, unresolved legal disputes regarding Service Tax/GST on royalty present potential challenges. ONGC's strong financial health, minimal debt levels, and strategic initiatives position it well for future growth and sustainability.
+
+================================================================================
+
+PDF 2: ONGC_quarterly_1770965247_2.pdf
+Word Count: 301 words
+--------------------------------------------------------------------------------
+**Financial Summary**
+
+**Financial Performance:**
+- ONGC reported a revenue of ₹32,002.89 Crore for the quarter ended June 30, 2025, showing a decrease from the previous quarter.
+- The company's profit before tax stood at ₹10,744.33 Crore, reflecting a positive trend compared to the previous quarter.
+- ONGC's net profit for the period was ₹8,024.23 Crore, indicating a healthy bottom line performance.
+- The operating margin was 37.08%, showcasing strong operational efficiency.
+
+**Business Highlights:**
+- ONGC's Board of Directors approved a ₹4,963.06 Crore investment for a 0.6GW renewable energy project by 2028, aiming for operational savings and ESG compliance.
+- The company is involved in various joint ventures and subsidiaries, including ONGC Videsh Limited and Mangalore Refinery and Petrochemicals Limited, diversifying its portfolio.
+
+**Financial Health:**
+- ONGC's debt equity ratio was 0.02, indicating a strong financial position with low leverage.
+- The company's interest service coverage ratio was 215.57, highlighting its ability to cover interest payments comfortably.
+- ONGC's current ratio of 1.74 suggests a healthy liquidity position to meet short-term obligations.
+
+**Future Outlook:**
+- ONGC faces contingent liabilities related to pending arbitration awards and disputed tax demands, which could impact its financials.
+- The company's provision towards disputed taxes on royalty and ongoing legal battles with tax authorities pose risks to its financial stability.
+- ONGC's strategic investment in renewable energy projects aligns with ESG goals and presents growth opportunities in the sustainable energy sector.
+
+**Overall Assessment:**
+ONGC's financial performance in the quarter demonstrated resilience with a notable profit margin and efficient operations. The company's foray into renewable energy projects signals a strategic shift towards sustainability and cost savings. However, contingent liabilities and legal disputes pose challenges that require careful management. Investors should monitor ONGC's progress in resolving these issues while considering the potential growth opportunities in the renewable energy sector.
+
+================================================================================
+
+PDF 3: ONGC_quarterly_1770965247_3.pdf
+Word Count: 329 words
+--------------------------------------------------------------------------------
+**Financial Summary:**
+
+**Financial Performance:**
+- ONGC reported a total revenue of ₹137,846.29 crores for the financial year ended March 31, 2025, showing stability compared to the previous year.
+- The company's profit before tax stood at ₹46,759.81 crores, reflecting a slight decrease from the previous year's performance.
+- ONGC's net profit margin for the year was 25.83%, indicating a decline from the previous year's 29.28%.
+
+**Business Highlights:**
+- ONGC approved a final dividend of ₹1.25 per equity share for the financial year 2024-25, showcasing the company's commitment to rewarding shareholders.
+- The Board supported ONGC Petro addition Limited by extending corporate guarantee support of up to ₹20,000 crores for raising debts, demonstrating strategic investment in subsidiaries.
+- The appointment of Shri Ajit Singh as Chief Internal Audit reflects the company's focus on strengthening internal controls and governance.
+
+**Financial Health:**
+- ONGC's debt equity ratio remained low at 0.03, indicating a healthy balance between debt and equity financing.
+- The company's interest service coverage ratio of 222.33 highlights its ability to cover interest payments comfortably.
+- ONGC's current ratio of 1.40 suggests good short-term liquidity to meet current obligations.
+
+**Future Outlook:**
+- The contingent liability of ₹13,915 crores related to Service Tax/GST on royalty poses a financial risk that could impact the company's profitability if not resolved favorably.
+- ONGC's increased equity shareholding in OPaL signifies strategic expansion and potential synergies within the group.
+- The ongoing legal disputes regarding Service Tax/GST on royalty require close monitoring for potential financial implications and resolution.
+
+**Overall Assessment:**
+ONGC's financial performance remained stable, with a focus on rewarding shareholders through dividends and strategic investments in subsidiaries. The company maintains a healthy financial position with low debt levels and strong liquidity. However, the contingent liability related to Service Tax/GST disputes poses a significant risk that requires resolution for long-term financial stability. ONGC's future outlook appears positive, supported by strategic initiatives and investments, but vigilance is needed to mitigate legal uncertainties and optimize financial performance.
+
+================================================================================
+
+MAIN CONSOLIDATED SUMMARY
+Word Count: 381 words
+--------------------------------------------------------------------------------
+Executive Overview:
+Over the three quarters analyzed, ONGC demonstrated a mixed financial performance with varying revenue figures and profitability margins. The company showcased stability in revenue generation but experienced fluctuations in profit margins. Strategic investments in renewable energy and transportation sectors, along with a focus on sustainable operations, indicate a forward-looking approach. However, unresolved legal disputes regarding Service Tax/GST on royalty pose potential financial risks that need to be addressed for sustained growth.
+
+Financial Performance Analysis:
+ONGC's revenue fluctuated across quarters, with a slight increase in the first quarter, a decrease in the second quarter, and stability in the financial year's total revenue. Profitability margins showed a declining trend, with net profit margins decreasing from the first to the third quarter. Despite this, the company maintained a healthy operating margin in the second quarter, reflecting strong operational efficiency. Profit before tax figures varied, with a decrease in the first quarter and a slight decline in the financial year's performance.
+
+Business Development & Strategy:
+ONGC's strategic initiatives included investments in renewable energy projects, joint ventures in transportation, and support for subsidiaries like ONGC Green Limited and ONGC Petro addition Limited. The company's diversification efforts and focus on sustainable energy solutions align with ESG goals and present growth opportunities in emerging sectors. The commitment to rewarding shareholders through dividends and strategic expansions within the group indicate a balanced approach to business development.
+
+Financial Health & Stability:
+ONGC maintained a strong financial position with minimal debt levels and healthy liquidity ratios across all quarters. The debt equity ratio remained low, highlighting the company's prudent financial management. Strong interest service coverage ratios underscored ONGC's ability to comfortably cover interest payments, ensuring financial stability. The company's current ratio indicated good short-term liquidity to meet current obligations, further reinforcing its financial health and stability.
+
+Future Outlook & Investment Perspective:
+ONGC's future outlook appears positive, supported by strategic investments, sustainable operations, and a focus on shareholder value. The company's expansion into renewable energy projects and increased equity shareholding in subsidiaries indicate a growth trajectory aligned with industry trends. However, contingent liabilities related to Service Tax/GST disputes pose financial risks that require resolution for long-term stability. Investors should monitor ONGC's progress in mitigating legal uncertainties and optimizing financial performance to capitalize on growth opportunities while managing potential risks effectively.

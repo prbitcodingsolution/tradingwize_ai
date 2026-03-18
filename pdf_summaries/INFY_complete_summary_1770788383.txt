@@ -1,0 +1,103 @@
+COMPREHENSIVE FINANCIAL ANALYSIS: INFY
+Generated: 2026-02-11 11:09:43
+Number of PDFs Analyzed: 2
+
+================================================================================
+TOKEN USAGE & COST ANALYSIS
+================================================================================
+Total API Calls: 3
+Input Tokens: 24,813
+Output Tokens: 1,368
+Total Tokens: 26,181
+Cost (GPT-3.5-turbo): $0.0145 USD
+
+Cost Estimates for Other Models:
+  - GPT-4: $0.8265 USD
+  - GPT-4-Turbo: $0.2892 USD
+  - Claude-3-Sonnet: $0.0950 USD
+  - Claude-3-Opus: $0.4748 USD
+  - Claude-3-Haiku: $0.0079 USD
+
+================================================================================
+
+PDF 1: INFY_quarterly_1770788022_1.pdf
+Word Count: 365 words
+--------------------------------------------------------------------------------
+**Financial Summary**
+
+**Financial Performance:**
+- Infosys reported Q3 revenues of $5.099 billion, showing a 1.7% YoY growth and 0.6% QoQ growth in constant currency.
+- The operating margin was 18.4% reported and 21.2% adjusted, reflecting operational efficiency improvements.
+- Free cash flow was robust at $915 million, with adjusted free cash flow reaching $965 million, representing 112.8% of adjusted net profit.
+- Year-to-date revenues for December 2025 grew by 2.8% YoY in constant currency.
+
+**Business Highlights:**
+- Infosys showcased strong performance in Q3, driven by differentiated value propositions in enterprise AI through Infosys Topaz.
+- The company's AI expertise, innovation capabilities, and delivery credentials positioned it as a preferred AI partner for clients.
+- Significant large deal wins of $4.8 billion, with 57% net new, underscored Infosys' market competitiveness and growth trajectory.
+- Strategic collaborations with Metro Bank, Lufthansa Systems, NHS Business Services Authority, and Telenor Shared Services highlighted Infosys' impact across diverse industries.
+
+**Financial Health:**
+- The balance sheet reflected a strong financial position with total assets of ₹143,384 crore and total equity of ₹83,453 crore.
+- Operating profit for the quarter was ₹8,355 crore, with an operating margin of 18.4% reported and 21.2% adjusted.
+- Net profit after non-controlling interests stood at ₹6,654 crore, demonstrating profitability and sustainable growth.
+- Infosys maintained a healthy cash position with cash and cash equivalents of ₹19,915 crore and current investments of ₹6,911 crore.
+
+**Future Outlook:**
+- Infosys provided guidance for FY26, anticipating revenue growth of 3.0%-3.5% in constant currency and an operating margin of 20%-22%.
+- The company's commitment to reskilling, transforming, and empowering its workforce aligns with its vision for success in an AI-augmented world.
+- Continued focus on innovation, strategic partnerships, and digital transformation initiatives positions Infosys for sustained growth and value creation.
+- Despite economic uncertainties and regulatory changes, Infosys remains agile in navigating market challenges and leveraging opportunities for expansion.
+
+In conclusion, Infosys' strong financial performance, strategic business initiatives, solid financial health, and forward-looking guidance underscore its position as a leading global player in digital services and consulting. The company's focus on innovation, AI capabilities, and client partnerships bodes well for its future growth and value proposition in the competitive market landscape.
+
+================================================================================
+
+PDF 4: INFY_quarterly_1770788022_4.pdf
+Word Count: 288 words
+--------------------------------------------------------------------------------
+**Financial Summary**
+
+**Financial Performance:**
+- Infosys reported a 3.6% year-over-year revenue growth for the fourth quarter of fiscal 2025, with a 4.8% sequential growth.
+- Operating margin increased by 0.5% for the fiscal year, reaching 21.0% in Q4.
+- The company achieved an EPS increase in ₹ terms, with a reported large deal Total Contract Value (TCV) of $2.6 billion for Q4.
+
+**Business Highlights:**
+- Infosys announced the acquisition of MRE Consulting Ltd., enhancing its energy trading and risk management capabilities.
+- The acquisition of The Missing Link strengthened Infosys' cybersecurity services and expanded its presence in Australia and Asia.
+- Mitsubishi Heavy Industries invested in Infosys-led joint venture HIPUS, aiming to accelerate business process transformation in Japan.
+
+**Financial Health:**
+- Infosys reported a free cash flow of $848 million for Q4, with consolidated cash and investments totaling $7,032 million.
+- The company's voluntary attrition rate for IT services was 12.6%, with 39.0% women employees.
+- Effort and utilization rates for IT services stood at 24.2% onsite and 75.8% offshore, with a total employee count of 323,578.
+
+**Future Outlook:**
+- Despite a 9.3% decline in net profit for the fiscal year, Infosys remains committed to digital transformation and global expansion.
+- The company's focus on acquisitions in energy consulting and cybersecurity indicates a strategic shift towards industry-specific solutions.
+- With a strong cash position and a diverse client base, Infosys is poised to capitalize on emerging opportunities in digital services.
+
+In conclusion, Infosys demonstrated resilience in revenue growth, operational efficiency, and strategic acquisitions in the face of evolving market dynamics. The company's focus on enhancing capabilities in energy consulting, cybersecurity, and business process transformation positions it well for sustained growth and value creation in the digital services landscape.
+
+================================================================================
+
+MAIN CONSOLIDATED SUMMARY
+Word Count: 319 words
+--------------------------------------------------------------------------------
+**Executive Overview:**
+Infosys exhibited consistent growth and resilience across the quarters, showcasing a strong financial performance, strategic business initiatives, and solid financial health. The company's focus on innovation, AI capabilities, and strategic partnerships positioned it as a leading global player in digital services and consulting.
+
+**Financial Performance Analysis:**
+Revenue growth for Infosys showed an improving trend, with year-over-year growth ranging from 1.7% to 3.6% across the quarters. Operating margins demonstrated stability and improvement, reaching 21.2% adjusted in Q3 and 21.0% in Q4. The company maintained robust free cash flow levels, with a focus on operational efficiency and profitability.
+
+**Business Development & Strategy:**
+Infosys' business highlights included strong performance driven by enterprise AI solutions, significant large deal wins, and strategic collaborations across diverse industries. Strategic acquisitions like MRE Consulting Ltd. and The Missing Link enhanced the company's capabilities in energy trading, risk management, and cybersecurity, positioning it for industry-specific solutions and global expansion.
+
+**Financial Health & Stability:**
+The company maintained a strong financial position with healthy cash reserves, total assets, and equity. Despite a decline in net profit for the fiscal year, Infosys demonstrated resilience and commitment to digital transformation. The voluntary attrition rate, effort, and utilization rates reflected operational efficiency and workforce management strategies.
+
+**Future Outlook & Investment Perspective:**
+Infosys provided guidance for sustained revenue growth and operating margins, emphasizing reskilling, innovation, and digital transformation initiatives. The company's focus on acquisitions in energy consulting, cybersecurity, and strategic partnerships indicates a proactive approach to capturing emerging opportunities in the digital services landscape. While economic uncertainties and regulatory changes pose risks, Infosys' agility and market positioning offer a promising outlook for future growth and value creation.
+
+In conclusion, Infosys' performance across the quarters underscores its ability to navigate market challenges, drive innovation, and deliver value to clients. The company's strategic initiatives, financial stability, and forward-looking approach position it favorably for long-term growth and investment opportunities in the dynamic digital services sector.

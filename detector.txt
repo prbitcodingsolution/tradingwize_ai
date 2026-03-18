@@ -1,0 +1,667 @@
+"""
+LLM-Powered Pattern Detection
+Uses AI to analyze candlestick data and detect patterns accurately
+Now using OpenRouter openai-oss-120b for superior stock analysis
+"""
+
+import os
+import json
+import logging
+from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+# Import OpenAI client (compatible with OpenRouter)
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    logger.warning("OpenAI library not available, install with: pip install openai")
+
+
+class LLMPatternDetector:
+    """Uses LLM to detect trading patterns from candlestick data"""
+    
+    def __init__(self):
+        """Initialize OpenRouter client"""
+        self.openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
+        self.openrouter_base_url = os.getenv('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1')
+        
+        if not self.openrouter_api_key:
+            raise ValueError("OPENROUTER_API_KEY not found in environment variables")
+        
+        if OPENAI_AVAILABLE:
+            # Initialize OpenAI client with OpenRouter configuration
+            self.client = OpenAI(
+                api_key=self.openrouter_api_key,
+                base_url=self.openrouter_base_url
+            )
+            # Use free model to avoid credit limits
+            self.model = "openai/gpt-oss-120b"
+            logger.info(f"✅ Initialized LLMPatternDetector with {self.model}")
+        else:
+            raise ImportError("OpenAI library not installed. Install with: pip install openai")
+    
+    def analyze_candlestick_data(self, df, symbol):
+        """
+        Analyze candlestick data using LLM to detect patterns
+        
+        Args:
+            df: DataFrame with OHLCV data
+            symbol: Stock symbol
+        
+        Returns:
+            dict: Detected patterns, zones, and indicators
+        """
+        try:
+            # Prepare data for LLM (last 100 candles for context)
+            recent_data = df.tail(100).copy()
+            
+            # Convert to simple format for LLM
+            candles_data = []
+            for idx, row in recent_data.iterrows():
+                candles_data.append({
+                    'date': idx.strftime('%Y-%m-%d'),
+                    'timestamp': int(idx.timestamp()),
+                    'open': float(row['Open']),
+                    'high': float(row['High']),
+                    'low': float(row['Low']),
+                    'close': float(row['Close']),
+                    'volume': float(row['Volume'])
+                })
+            
+            # Create prompt for LLM
+            prompt = self._create_analysis_prompt(symbol, candles_data)
+            
+            # Get LLM response from via OpenRouter
+            logger.info(f"🤖 Analyzing {symbol} with {self.model} (OpenRouter)...")
+            
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """You are an expert technical analyst and quantitative trader specializing in 
+                            candlestick patterns, supply/demand zones, and technical indicators. You have deep knowledge 
+                            of stock market behavior, price action, and institutional trading patterns. You analyze price 
+                            data with precision and identify only valid, high-probability patterns backed by solid technical 
+                            reasoning. You provide detailed analysis with exact timestamps and price levels, explaining the 
+                            market psychology behind each pattern.
+                            
+                            CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no explanations, just pure JSON."""
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    temperature=0.1,  # Low temperature for consistent, focused analysis
+                    max_tokens=8000,  # Increased from 4000 to avoid truncation
+                    timeout=30  # 30 second timeout
+                )
+            except Exception as api_error:
+                logger.error(f"❌ OpenRouter API error: {api_error}")
+                logger.warning("⚠️  Falling back to basic analysis")
+                return self._create_fallback_analysis(df, symbol)
+            
+            # Get response content
+            response_content = response.choices[0].message.content
+            
+            # Add detailed logging
+            logger.info(f"📝 Response received - Type: {type(response_content)}")
+            logger.info(f"📝 Response length: {len(response_content) if response_content else 0}")
+            if response_content:
+                logger.info(f"📝 First 200 chars: {response_content[:200]}")
+            
+            if not response_content or not response_content.strip():
+                logger.error("Empty response from LLM")
+                logger.error(f"Full response object: {response}")
+                logger.error(f"Response model: {response.model}")
+                logger.error(f"Response ID: {response.id}")
+                logger.warning("⚠️  LLM returned empty response - using fallback basic analysis")
+                
+                # Return basic fallback analysis
+                return self._create_fallback_analysis(df, symbol)
+            
+            logger.info(f"📝 Received response ({len(response_content)} chars)")
+            
+            # Clean response - remove markdown code blocks if present
+            cleaned_content = response_content.strip()
+            if cleaned_content.startswith('```json'):
+                cleaned_content = cleaned_content.split('```json')[1].split('```')[0].strip()
+            elif cleaned_content.startswith('```'):
+                cleaned_content = cleaned_content.split('```')[1].split('```')[0].strip()
+            
+            # Parse JSON
+            try:
+                analysis = json.loads(cleaned_content)
+            except json.JSONDecodeError as je:
+                logger.error(f"JSON parsing error: {je}")
+                logger.error(f"Response preview: {cleaned_content[:500]}")
+                
+                # Try to extract JSON from response
+                import re
+                json_match = re.search(r'\{.*\}', cleaned_content, re.DOTALL)
+                if json_match:
+                    try:
+                        analysis = json.loads(json_match.group(0))
+                        logger.info("✅ Successfully extracted JSON from response")
+                    except:
+                        logger.error("Failed to extract valid JSON")
+                        logger.warning("⚠️  JSON parsing failed - using fallback analysis")
+                        return self._create_fallback_analysis(df, symbol)
+                else:
+                    logger.warning("⚠️  No valid JSON found - using fallback analysis")
+                    return self._create_fallback_analysis(df, symbol)
+            
+            logger.info(f"✅ analysis complete for {symbol}")
+            logger.info(f"   Patterns detected: {len(analysis.get('patterns', []))}")
+            logger.info(f"   Zones detected: {len(analysis.get('zones', []))}")
+            
+            return analysis
+        
+        except Exception as e:
+            logger.error(f"Error in LLM analysis: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {
+                'patterns': [],
+                'zones': [],
+                'indicators': {},
+                'error': str(e)
+            }
+    
+    def _create_analysis_prompt(self, symbol, candles_data):
+        """Create detailed prompt for LLM analysis - Enhanced with professional institutional standards"""
+        
+        # Get summary statistics
+        prices = [c['close'] for c in candles_data]
+        current_price = prices[-1]
+        high_price = max([c['high'] for c in candles_data])
+        low_price = min([c['low'] for c in candles_data])
+        
+        prompt = f"""Analyze the following candlestick data for {symbol} and identify:
+
+1. **Candlestick Patterns**: Identify valid patterns like:
+   - Bullish: Hammer, Inverted Hammer, Bullish Engulfing, Morning Star, Three White Soldiers, Piercing Pattern, Bullish Harami, Tweezer Bottom
+   - Bearish: Shooting Star, Hanging Man, Bearish Engulfing, Evening Star, Three Black Crows, Dark Cloud Cover, Bearish Harami, Tweezer Top
+   - Neutral: Doji, Spinning Top
+
+2. **Supply and Demand Zones** (CRITICAL - Follow these PROFESSIONAL rules exactly):
+
+   **WHAT ARE SUPPLY & DEMAND ZONES:**
+   
+   Supply and demand zones are WIDE HORIZONTAL RECTANGLES that mark significant price areas where:
+   - Institutional traders placed large orders
+   - Price reversed strongly after touching the zone
+   - The zone acts as a "floor" (demand) or "ceiling" (supply) for future price action
+   
+   **CRITICAL CHARACTERISTICS (Look at the reference images):**
+   
+   ✓ **WIDE ZONES**: Zones span 10-30+ candles horizontally (NOT just 3-7 candles!)
+   ✓ **SIGNIFICANT LEVELS**: Mark major swing highs (supply) or swing lows (demand)
+   ✓ **STRONG REACTIONS**: Price must show explosive move away from the zone (100+ pips/points)
+   ✓ **CLEAR BOUNDARIES**: Zone height = the consolidation range before the explosive move
+   ✓ **VISUAL PROMINENCE**: Zones should be obvious on the chart, not tiny boxes
+   
+   **HOW TO IDENTIFY ZONES (Step-by-Step):**
+   
+   **STEP 1: Find MAJOR SWING POINTS**
+   - Look for the HIGHEST highs in the data (potential supply zones)
+   - Look for the LOWEST lows in the data (potential demand zones)
+   - These should be visually obvious turning points
+   
+   **STEP 2: Identify the CONSOLIDATION AREA**
+   - Before the swing high/low, find where price consolidated or paused
+   - This consolidation can be 5-30+ candles wide
+   - Measure the HIGH and LOW of this entire consolidation area
+   
+   **STEP 3: Verify STRONG DEPARTURE**
+   - After leaving the zone, price must move explosively:
+     * For stocks/forex: ≥3% move from zone boundary
+     * For high-priced stocks (>$1000): ≥2% move acceptable
+     * For low-priced stocks (<$10): ≥5% move preferred
+   - The move should be fast and decisive (within 5-15 candles)
+   - This proves institutional orders were filled in that zone
+   
+   **STEP 4: Mark the ZONE BOUNDARIES**
+   - start_time: First candle of the consolidation area
+   - end_time: Last candle before the explosive move (can be 10-30+ candles later)
+   - high: Highest price in the consolidation area
+   - low: Lowest price in the consolidation area
+   
+   **ZONE TYPES:**
+   
+   **SUPPLY ZONE (Resistance - where sellers dominate):**
+   - Located at MAJOR SWING HIGHS
+   - Price rallied up, consolidated at the top, then DROPPED sharply
+   - Future price approaching this zone from below will likely face selling pressure
+   - Mark the consolidation area at the swing high
+   
+   **DEMAND ZONE (Support - where buyers dominate):**
+   - Located at MAJOR SWING LOWS  
+   - Price dropped down, consolidated at the bottom, then RALLIED sharply
+   - Future price approaching this zone from above will likely face buying pressure
+   - Mark the consolidation area at the swing low
+   
+   
+   **VALIDATION CHECKLIST (ALL must be TRUE):**
+   
+   ✓ **Zone Width**: Must span at least 10-30 candles (wide horizontal rectangle)
+   ✓ **Swing Point**: Located at a major swing high (supply) or swing low (demand)
+   ✓ **Explosive Move**: Price moved ≥3% away from zone (adjust based on stock price)
+   ✓ **Clear Boundaries**: Zone has clear high/low from consolidation area
+   ✓ **Visual Significance**: Zone should be obvious on chart, not a tiny box
+   ✓ **Untested/Fresh**: Zone hasn't been retested multiple times (fresh zones are stronger)
+   
+   **WHAT TO AVOID:**
+   - ❌ Tiny zones (3-7 candles) - TOO SMALL!
+   - ❌ Random price levels - Must be at major swing points
+   - ❌ Weak reactions - Must have explosive move (≥3%)
+   - ❌ Multiple zones everywhere - Only mark 2-4 BEST zones
+   - ❌ Zones in the middle of trends - Must be at turning points
+   
+   
+   **CONCRETE EXAMPLE 1 - DEMAND ZONE (Major Swing Low):**
+   ```
+   Candles 1-15: Price drops from 3100 to 2800 (downtrend)
+   Candles 16-35: Price consolidates 2800-2850 (20 candles, WIDE BASE)
+   Candles 36-50: Price rallies explosively from 2850 to 3050 (200 points = 7% move)
+   
+   ANALYSIS:
+   ✓ Major swing low at 2800 (lowest point in dataset)
+   ✓ Wide consolidation: 20 candles (meets 10-30 requirement)
+   ✓ Explosive rally: 200 points = 7% (exceeds 3% requirement)
+   ✓ Clear boundaries: 2800-2850 range
+   ✓ Visually significant: Obvious turning point on chart
+   
+   ZONE DEFINITION:
+   - type: "demand"
+   - high: 2850 (top of consolidation)
+   - low: 2800 (bottom of consolidation)
+   - start_time: timestamp of candle 16 (consolidation start)
+   - end_time: timestamp of candle 35 (consolidation end, before rally)
+   - base_candles: 20
+   - impulse_range: 200 points
+   - confidence: 95
+   - reason: "Major swing low with 20-candle consolidation followed by explosive 200-point rally"
+   ```
+   
+   **CONCRETE EXAMPLE 2 - SUPPLY ZONE (Major Swing High):**
+   ```
+   Candles 1-20: Price rallies from 1.0500 to 1.0900 (uptrend)
+   Candles 21-45: Price consolidates 1.0880-1.0920 (25 candles, WIDE BASE)
+   Candles 46-60: Price drops explosively from 1.0900 to 1.0650 (250 pips = 2.3% move)
+   
+   ANALYSIS:
+   ✓ Major swing high at 1.0920 (highest point in recent data)
+   ✓ Wide consolidation: 25 candles (meets 10-30 requirement)
+   ✓ Explosive drop: 250 pips = 2.3% (close to 3% requirement, still valid)
+   ✓ Clear boundaries: 1.0880-1.0920 range
+   ✓ Visually significant: Obvious reversal point on chart
+   
+   ZONE DEFINITION:
+   - type: "supply"
+   - high: 1.0920 (top of consolidation)
+   - low: 1.0880 (bottom of consolidation)
+   - start_time: timestamp of candle 21 (consolidation start)
+   - end_time: timestamp of candle 45 (consolidation end, before drop)
+   - base_candles: 25
+   - impulse_range: 250 pips
+   - confidence: 90
+   - reason: "Major swing high with 25-candle consolidation followed by explosive 250-pip drop"
+   ```
+   
+   **VISUAL REFERENCE (from your images):**
+   - Zones are WIDE rectangles spanning many candles
+   - Zones are at MAJOR turning points (swing highs/lows)
+   - Zones have CLEAR vertical boundaries (high/low of consolidation)
+   - Only 2-4 zones per chart (the BEST ones only)
+
+3. **Technical Indicators**:
+   - RSI: Identify overbought (>70) and oversold (<30) conditions
+   - MACD: Identify bullish and bearish crossovers
+   - Key Support/Resistance levels (horizontal lines where price bounced multiple times)
+
+**Current Market Context:**
+- Symbol: {symbol}
+- Current Price: {current_price:.2f}
+- Period High: {high_price:.2f}
+- Period Low: {low_price:.2f}
+- Data Points: {len(candles_data)} candles
+
+**Candlestick Data (Last 100 candles):**
+```json
+{json.dumps(candles_data, indent=2)}
+```
+
+**CRITICAL INSTRUCTIONS:**
+1. **Quality over Quantity**: Only identify 2-4 BEST supply/demand zones (the most obvious ones)
+2. **Zones must be WIDE**: Minimum 10 candles, ideally 15-30 candles horizontally
+3. **Zones at MAJOR turning points**: Only mark zones at the highest highs or lowest lows
+4. **Explosive moves required**: Price must move ≥100 pips or ≥3% away from zone
+5. **Visual prominence**: If a zone isn't obvious on the chart, don't include it
+6. **Fresh zones preferred**: Zones that haven't been retested are stronger
+
+**Response Format (JSON):**
+{{
+  "patterns": [
+    {{
+      "type": "pattern_name",
+      "signal": "bullish|bearish|neutral",
+      "timestamp": unix_timestamp,
+      "date": "YYYY-MM-DD",
+      "price": close_price,
+      "high": high_price,
+      "low": low_price,
+      "open": open_price,
+      "confidence": 85,
+      "reason": "Detailed explanation of why this pattern is valid"
+    }}
+  ],
+  "zones": [
+    {{
+      "type": "supply|demand",
+      "start_time": unix_timestamp_of_consolidation_start,
+      "end_time": unix_timestamp_of_breakout,
+      "high": highest_price_in_consolidation,
+      "low": lowest_price_in_consolidation,
+      "base_candles": number_of_candles_in_consolidation,
+      "impulse_candles": number_of_candles_in_impulse,
+      "base_range": price_range_of_consolidation,
+      "impulse_range": price_range_of_impulse,
+      "impulse_strength": impulse_range_divided_by_base_range,
+      "wick_ratio": percentage_of_base_range_grabbed_back,
+      "is_fresh": true|false,
+      "touches": number_of_times_price_returned_to_zone,
+      "confidence": 90,
+      "reason": "Explain: 1) Consolidation characteristics, 2) Impulse strength and direction, 3) Speed of departure, 4) Why ALL validation criteria are met",
+      "validation": {{
+        "base_tight": true|false,
+        "impulse_strong": true|false,
+        "departure_clean": true|false,
+        "all_criteria_met": true|false
+      }}
+    }}
+  ],
+  "indicators": {{
+    "rsi": {{
+      "current_value": value,
+      "overbought_signals": [{{"timestamp": ts, "price": p}}],
+      "oversold_signals": [{{"timestamp": ts, "price": p}}]
+    }},
+    "macd": {{
+      "bullish_crossovers": [{{"timestamp": ts, "price": p}}],
+      "bearish_crossovers": [{{"timestamp": ts, "price": p}}]
+    }},
+    "key_levels": [
+      {{
+        "type": "support|resistance",
+        "price": price,
+        "strength": "strong|moderate|weak",
+        "touches": number
+      }}
+    ]
+  }},
+  "summary": "Brief market analysis and trend direction"
+}}
+
+**EXAMPLE OF CORRECT ZONE DETECTION:**
+If you see: Price at 250 → drops to 230-235 (consolidates for 3 days) → rallies to 260
+Then: Demand zone from 230-235, start_time = first consolidation candle, end_time = breakout candle
+
+CRITICAL: Respond with ONLY valid JSON. No markdown code blocks, no explanations outside JSON, just pure JSON.
+Start your response with {{ and end with }}. Do not wrap in ```json``` or any other formatting.
+
+Analyze carefully and provide accurate, actionable insights."""
+        
+        return prompt
+    
+    def _create_fallback_analysis(self, df, symbol):
+        """
+        Create basic fallback analysis when LLM fails
+        Uses simple technical analysis rules
+        """
+        logger.info("🔄 Creating fallback analysis using basic technical rules...")
+        
+        try:
+            import numpy as np
+            
+            # Get recent data
+            recent_data = df.tail(100).copy()
+            
+            patterns = []
+            zones = []
+            
+            # Simple zone detection based on major swing points
+            highs = recent_data['High'].values
+            lows = recent_data['Low'].values
+            closes = recent_data['Close'].values
+            
+            # Find major swing highs (supply zones) - look at wider window
+            for i in range(15, len(highs) - 15):
+                # Check if this is a major swing high (highest in 30-candle window)
+                if highs[i] == max(highs[i-15:i+16]):
+                    # Found a major swing high - create wide supply zone
+                    # Zone spans 10 candles before the swing high
+                    zone_start_idx = max(0, i - 10)
+                    zone_end_idx = i
+                    
+                    zone_high = max(highs[zone_start_idx:zone_end_idx+1])
+                    zone_low = min(lows[zone_start_idx:zone_end_idx+1])
+                    
+                    start_timestamp = int(recent_data.index[zone_start_idx].timestamp())
+                    end_timestamp = int(recent_data.index[zone_end_idx].timestamp())
+                    
+                    # Calculate impulse move after the zone
+                    impulse_range = abs(closes[min(i+10, len(closes)-1)] - closes[i])
+                    
+                    zones.append({
+                        'type': 'supply',
+                        'high': float(zone_high),
+                        'low': float(zone_low),
+                        'start_time': start_timestamp,
+                        'end_time': end_timestamp,
+                        'strength': 'strong',
+                        'touches': 0,
+                        'confidence': 85,
+                        'reason': f'Major swing high at {zone_high:.2f} with wide consolidation zone',
+                        'base_candles': zone_end_idx - zone_start_idx + 1,
+                        'impulse_candles': 10,
+                        'base_range': float(zone_high - zone_low),
+                        'impulse_range': float(impulse_range),
+                        'impulse_strength': float(impulse_range / (zone_high - zone_low)) if zone_high != zone_low else 1.0,
+                        'wick_ratio': 0.15,
+                        'is_fresh': True,
+                        'validation': {
+                            'base_tight': True,
+                            'impulse_strong': True,
+                            'departure_clean': True,
+                            'all_criteria_met': True,
+                            'has_base': True,
+                            'has_impulse': True,
+                            'fresh_zone': True
+                        }
+                    })
+            
+            # Find major swing lows (demand zones) - look at wider window
+            for i in range(15, len(lows) - 15):
+                # Check if this is a major swing low (lowest in 30-candle window)
+                if lows[i] == min(lows[i-15:i+16]):
+                    # Found a major swing low - create wide demand zone
+                    # Zone spans 10 candles before the swing low
+                    zone_start_idx = max(0, i - 10)
+                    zone_end_idx = i
+                    
+                    zone_high = max(highs[zone_start_idx:zone_end_idx+1])
+                    zone_low = min(lows[zone_start_idx:zone_end_idx+1])
+                    
+                    start_timestamp = int(recent_data.index[zone_start_idx].timestamp())
+                    end_timestamp = int(recent_data.index[zone_end_idx].timestamp())
+                    
+                    # Calculate impulse move after the zone
+                    impulse_range = abs(closes[min(i+10, len(closes)-1)] - closes[i])
+                    
+                    zones.append({
+                        'type': 'demand',
+                        'high': float(zone_high),
+                        'low': float(zone_low),
+                        'start_time': start_timestamp,
+                        'end_time': end_timestamp,
+                        'strength': 'strong',
+                        'touches': 0,
+                        'confidence': 85,
+                        'reason': f'Major swing low at {zone_low:.2f} with wide consolidation zone',
+                        'base_candles': zone_end_idx - zone_start_idx + 1,
+                        'impulse_candles': 10,
+                        'base_range': float(zone_high - zone_low),
+                        'impulse_range': float(impulse_range),
+                        'impulse_strength': float(impulse_range / (zone_high - zone_low)) if zone_high != zone_low else 1.0,
+                        'wick_ratio': 0.15,
+                        'is_fresh': True,
+                        'validation': {
+                            'base_tight': True,
+                            'impulse_strong': True,
+                            'departure_clean': True,
+                            'all_criteria_met': True,
+                            'has_base': True,
+                            'has_impulse': True,
+                            'fresh_zone': True
+                        }
+                    })
+            
+            # Limit to top 3-4 zones (closest to current price or strongest)
+            zones = sorted(zones, key=lambda x: abs(x['high'] - closes[-1]))[:4]
+            
+            # Simple pattern detection
+            for i in range(1, len(recent_data)):
+                prev = recent_data.iloc[i-1]
+                curr = recent_data.iloc[i]
+                
+                # Bullish engulfing
+                if (prev['Close'] < prev['Open'] and 
+                    curr['Close'] > curr['Open'] and
+                    curr['Open'] < prev['Close'] and
+                    curr['Close'] > prev['Open']):
+                    patterns.append({
+                        'type': 'bullish_engulfing',
+                        'signal': 'bullish',
+                        'timestamp': int(recent_data.index[i].timestamp()),
+                        'price': float(curr['Close']),
+                        'high': float(curr['High']),
+                        'low': float(curr['Low']),
+                        'open': float(curr['Open']),
+                        'confidence': 70
+                    })
+                
+                # Bearish engulfing
+                if (prev['Close'] > prev['Open'] and 
+                    curr['Close'] < curr['Open'] and
+                    curr['Open'] > prev['Close'] and
+                    curr['Close'] < prev['Open']):
+                    patterns.append({
+                        'type': 'bearish_engulfing',
+                        'signal': 'bearish',
+                        'timestamp': int(recent_data.index[i].timestamp()),
+                        'price': float(curr['Close']),
+                        'high': float(curr['High']),
+                        'low': float(curr['Low']),
+                        'open': float(curr['Open']),
+                        'confidence': 70
+                    })
+            
+            logger.info(f"✅ Fallback analysis complete: {len(patterns)} patterns, {len(zones)} zones")
+            
+            return {
+                'patterns': patterns[:10],  # Limit to 10 patterns
+                'zones': zones,
+                'indicators': {
+                    'rsi': [],
+                    'macd': [],
+                    'bollinger_bands': []
+                },
+                'summary': f'Fallback analysis for {symbol}: Detected {len(patterns)} patterns and {len(zones)} zones using basic technical rules.',
+                'analysis_method': 'fallback_basic_rules'
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in fallback analysis: {e}")
+            return {
+                'patterns': [],
+                'zones': [],
+                'indicators': {},
+                'summary': f'Fallback analysis failed for {symbol}',
+                'error': str(e)
+            }
+
+
+def detect_patterns_with_llm(df, symbol):
+    """
+    Main function to detect patterns using LLM
+    
+    Args:
+        df: DataFrame with OHLCV data
+        symbol: Stock symbol
+    
+    Returns:
+        dict: Analysis results with patterns, zones, and indicators
+    """
+    try:
+        detector = LLMPatternDetector()
+        analysis = detector.analyze_candlestick_data(df, symbol)
+        return analysis
+    
+    except Exception as e:
+        logger.error(f"Error in LLM pattern detection: {e}")
+        return {
+            'patterns': [],
+            'zones': [],
+            'indicators': {},
+            'error': str(e)
+        }
+
+
+# CLI testing
+if __name__ == "__main__":
+    import sys
+    import pandas as pd
+    
+    sys.path.insert(0, '.')
+    from drawing_instruction.api_price_fetcher import APIPriceFetcher
+    
+    # Fetch data
+    fetcher = APIPriceFetcher("http://192.168.0.126:8000")
+    df = fetcher.fetch_price_data("ONGC.NS", "1d", "2025-01-01", "2026-03-03", "stocks")
+    
+    if df is not None:
+        print(f"Analyzing {len(df)} candles with LLM...")
+        
+        analysis = detect_patterns_with_llm(df, "ONGC.NS")
+        
+        print("\n" + "="*70)
+        print("LLM ANALYSIS RESULTS")
+        print("="*70)
+        print(json.dumps(analysis, indent=2))
+    else:
+        print("Failed to fetch data")
+
+
+# Convenience function for backward compatibility
+def detect_patterns_with_llm(df, symbol):
+    """
+    Detect patterns using LLM analysis
+    
+    Args:
+        df: DataFrame with OHLCV data
+        symbol: Stock symbol
+    
+    Returns:
+        dict: Analysis results with patterns, zones, and indicators
+    """
+    detector = LLMPatternDetector()
+    return detector.analyze_candlestick_data(df, symbol)

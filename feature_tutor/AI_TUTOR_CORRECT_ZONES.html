@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Supply & Demand Tutor - Fixed Zones</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: #0a0a0a;
+            color: #fff;
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        
+        .chart-area {
+            flex: 1;
+            background: #1a1a1a;
+            padding: 20px;
+            border-right: 3px solid #667eea;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .chart-title {
+            color: #ffd700;
+            font-size: 1.3em;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+        
+        .canvas-container {
+            flex: 1;
+            background: #0d0d0d;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        canvas {
+            max-width: 100%;
+            max-height: 100%;
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        
+        .control-area {
+            width: 380px;
+            background: #0d0d0d;
+            border-left: 3px solid #764ba2;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+        
+        .title {
+            font-size: 1.5em;
+            color: #ffd700;
+            margin-bottom: 20px;
+            text-align: center;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 15px;
+        }
+        
+        .status-display {
+            background: linear-gradient(135deg, rgba(102, 126, 234, 0.2) 0%, rgba(118, 75, 162, 0.2) 100%);
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            min-height: 80px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
+        
+        .status-text {
+            color: #ffd700;
+            font-weight: bold;
+            font-size: 0.95em;
+            line-height: 1.5;
+        }
+        
+        .input-box {
+            margin-bottom: 15px;
+        }
+        
+        .input-box label {
+            display: block;
+            color: #bbb;
+            margin-bottom: 8px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            background: #1a1a1a;
+            border: 2px solid #667eea;
+            border-radius: 5px;
+            color: #fff;
+            font-size: 0.95em;
+        }
+        
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #764ba2;
+            box-shadow: 0 0 10px rgba(118, 75, 162, 0.4);
+        }
+        
+        .button-group {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .btn {
+            padding: 12px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 0.95em;
+            transition: all 0.3s;
+        }
+        
+        .btn:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn:active {
+            transform: translateY(0);
+        }
+        
+        .btn.loading {
+            background: #ffd700;
+            color: #000;
+            pointer-events: none;
+        }
+        
+        .btn.small {
+            padding: 10px;
+            font-size: 0.85em;
+        }
+        
+        .quick-buttons {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 15px;
+        }
+        
+        .quick-btn {
+            padding: 10px;
+            background: #2a2a2a;
+            border: 2px solid #667eea;
+            color: #667eea;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 0.85em;
+            transition: all 0.3s;
+        }
+        
+        .quick-btn:hover {
+            background: #667eea;
+            color: white;
+            transform: translateY(-2px);
+        }
+        
+        .voice-section {
+            background: #1a1a1a;
+            border: 2px solid #51cf66;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .voice-label {
+            color: #51cf66;
+            font-weight: bold;
+            margin-bottom: 10px;
+            font-size: 0.95em;
+        }
+        
+        .voice-btn {
+            width: 100%;
+            padding: 12px;
+            background: #51cf66;
+            color: #000;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 0.95em;
+            transition: all 0.3s;
+        }
+        
+        .voice-btn:hover {
+            background: #51cf66;
+            transform: scale(1.02);
+        }
+        
+        .voice-btn.off {
+            background: #666;
+            color: #fff;
+        }
+        
+        .settings {
+            background: #1a1a1a;
+            border: 2px solid #999;
+            border-radius: 8px;
+            padding: 15px;
+            font-size: 0.9em;
+        }
+        
+        .setting-item {
+            margin-bottom: 12px;
+        }
+        
+        .setting-item label {
+            display: block;
+            color: #bbb;
+            margin-bottom: 5px;
+        }
+        
+        .setting-item select {
+            width: 100%;
+            padding: 8px;
+            background: #2a2a2a;
+            border: 1px solid #667eea;
+            color: #fff;
+            border-radius: 4px;
+        }
+        
+        .info-text {
+            font-size: 0.85em;
+            color: #888;
+            margin-top: 10px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Chart Area -->
+        <div class="chart-area">
+            <div class="chart-title">📊 Price Chart with Real Supply & Demand Zones</div>
+            <div class="canvas-container">
+                <canvas id="mainCanvas"></canvas>
+            </div>
+        </div>
+
+        <!-- Control Area -->
+        <div class="control-area">
+            <div class="title">🎓 AI Tutor</div>
+
+            <!-- Status Display -->
+            <div class="status-display">
+                <div class="status-text" id="statusText">Ready! Enable voice and click "Teach Me!"</div>
+            </div>
+
+            <!-- Input -->
+            <div class="input-box">
+                <label for="userInput">What do you want to learn?</label>
+                <input 
+                    type="text" 
+                    id="userInput" 
+                    placeholder="e.g., supply and demand"
+                    onkeypress="if(event.key === 'Enter') teach()"
+                >
+            </div>
+
+            <!-- Quick Buttons -->
+            <div style="margin-bottom: 15px;">
+                <label style="color: #bbb; font-size: 0.9em; display: block; margin-bottom: 8px; font-weight: bold;">Quick Tutorials:</label>
+                <div class="quick-buttons">
+                    <button class="quick-btn" onclick="teach('supply and demand')">Supply & Demand</button>
+                    <button class="quick-btn" onclick="teach('find zones')">Find Zones</button>
+                    <button class="quick-btn" onclick="teach('identify')">Identify Zones</button>
+                    <button class="quick-btn" onclick="teach('how to trade')">How to Trade</button>
+                </div>
+            </div>
+
+            <!-- Teach Button -->
+            <div class="button-group">
+                <button class="btn" id="teachBtn" onclick="teach()">🎓 Teach Me!</button>
+                <button class="btn small" onclick="clearCanvas()">🗑️ Clear Chart</button>
+            </div>
+
+            <!-- Voice Section -->
+            <div class="voice-section">
+                <div class="voice-label">🎙️ Voice Narration</div>
+                <button class="voice-btn" id="voiceToggle" onclick="toggleVoice()">Enable Voice</button>
+                <div class="info-text">Click to enable AI voice explanation</div>
+            </div>
+
+            <!-- Settings -->
+            <div class="settings">
+                <div class="setting-item">
+                    <label for="voiceSpeed">Voice Speed:</label>
+                    <select id="voiceSpeed">
+                        <option value="0.8">Slow</option>
+                        <option value="1" selected>Normal</option>
+                        <option value="1.2">Fast</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('mainCanvas');
+        const ctx = canvas.getContext('2d');
+        let voiceEnabled = false;
+        let isTeaching = false;
+        let candleData = [];
+        let zones = [];
+
+        // Resize canvas
+        function resizeCanvas() {
+            const container = canvas.parentElement;
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+        }
+
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Generate candlestick data with clear patterns
+        function generateCandleData() {
+            let candles = [];
+            let price = 65000;
+
+            for (let i = 0; i < 50; i++) {
+                const volatility = Math.random() * 1500;
+                const open = price;
+                const close = price + (Math.random() - 0.45) * 2000;
+                const high = Math.max(open, close) + Math.random() * 500;
+                const low = Math.min(open, close) - Math.random() * 500;
+
+                candles.push({ open, close, high, low });
+                price = close;
+            }
+
+            return candles;
+        }
+
+        // Find actual supply and demand zones
+        function analyzeZones() {
+            zones = [];
+            const prices = candleData.map(c => c.high);
+            
+            // Find peaks (supply zones)
+            for (let i = 2; i < prices.length - 2; i++) {
+                if (prices[i] > prices[i-1] && prices[i] > prices[i+1] && 
+                    prices[i] > prices[i-2] && prices[i] > prices[i+2]) {
+                    zones.push({
+                        type: 'supply',
+                        index: i,
+                        price: prices[i],
+                        range: 500
+                    });
+                }
+            }
+
+            // Find troughs (demand zones)
+            const lowPrices = candleData.map(c => c.low);
+            for (let i = 2; i < lowPrices.length - 2; i++) {
+                if (lowPrices[i] < lowPrices[i-1] && lowPrices[i] < lowPrices[i+1] && 
+                    lowPrices[i] < lowPrices[i-2] && lowPrices[i] < lowPrices[i+2]) {
+                    zones.push({
+                        type: 'demand',
+                        index: i,
+                        price: lowPrices[i],
+                        range: 500
+                    });
+                }
+            }
+
+            // Sort by index
+            zones.sort((a, b) => a.index - b.index);
+            
+            // Keep last 4 zones
+            zones = zones.slice(-4);
+        }
+
+        // Draw candlesticks
+        function drawCandles() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 60;
+            const chartWidth = canvas.width - 2 * padding;
+            const chartHeight = canvas.height - 2 * padding;
+
+            const prices = candleData.flatMap(c => [c.high, c.low]);
+            const minPrice = Math.min(...prices);
+            const maxPrice = Math.max(...prices);
+            const priceRange = maxPrice - minPrice;
+
+            // Draw grid
+            ctx.strokeStyle = '#222';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 5; i++) {
+                const y = padding + (chartHeight / 5) * i;
+                ctx.beginPath();
+                ctx.moveTo(padding, y);
+                ctx.lineTo(canvas.width - padding, y);
+                ctx.stroke();
+            }
+
+            // Draw candles
+            const candleWidth = (chartWidth / candleData.length) * 0.6;
+
+            candleData.forEach((candle, idx) => {
+                const x = padding + (idx * (chartWidth / candleData.length)) + (chartWidth / candleData.length) / 2;
+
+                // Normalize prices
+                const openY = padding + chartHeight - ((candle.open - minPrice) / priceRange) * chartHeight;
+                const closeY = padding + chartHeight - ((candle.close - minPrice) / priceRange) * chartHeight;
+                const highY = padding + chartHeight - ((candle.high - minPrice) / priceRange) * chartHeight;
+                const lowY = padding + chartHeight - ((candle.low - minPrice) / priceRange) * chartHeight;
+
+                // Color: green if close > open, red otherwise
+                const color = candle.close >= candle.open ? '#51cf66' : '#ff6b6b';
+
+                // Draw wick
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x, highY);
+                ctx.lineTo(x, lowY);
+                ctx.stroke();
+
+                // Draw body
+                ctx.fillStyle = color;
+                ctx.fillRect(
+                    x - candleWidth / 2,
+                    Math.min(openY, closeY),
+                    candleWidth,
+                    Math.abs(openY - closeY) || 2
+                );
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(
+                    x - candleWidth / 2,
+                    Math.min(openY, closeY),
+                    candleWidth,
+                    Math.abs(openY - closeY) || 2
+                );
+            });
+
+            // Draw axes
+            ctx.strokeStyle = '#667eea';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(padding, padding);
+            ctx.lineTo(padding, canvas.height - padding);
+            ctx.lineTo(canvas.width - padding, canvas.height - padding);
+            ctx.stroke();
+
+            // Store for zone drawing
+            window.chartParams = { padding, chartWidth, chartHeight, minPrice, maxPrice, priceRange };
+        }
+
+        // Draw zones on the chart
+        function drawZonesOnChart() {
+            if (!window.chartParams || zones.length === 0) return;
+
+            const { padding, chartWidth, chartHeight, minPrice, maxPrice, priceRange } = window.chartParams;
+
+            zones.forEach(zone => {
+                const x = padding + (zone.index * (chartWidth / candleData.length));
+                const y = padding + chartHeight - ((zone.price - minPrice) / priceRange) * chartHeight;
+                const width = (chartWidth / candleData.length) * 3;
+                const height = 60;
+
+                if (zone.type === 'supply') {
+                    // Draw red supply zone
+                    ctx.fillStyle = 'rgba(255, 107, 107, 0.25)';
+                    ctx.fillRect(x - width/2, y - height/2, width, height);
+                    
+                    ctx.strokeStyle = '#ff6b6b';
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(x - width/2, y - height/2, width, height);
+
+                    ctx.fillStyle = '#ff6b6b';
+                    ctx.font = 'bold 12px Arial';
+                    ctx.fillText('SUPPLY', x - width/2 + 8, y - height/2 - 8);
+                } else {
+                    // Draw green demand zone
+                    ctx.fillStyle = 'rgba(81, 207, 102, 0.25)';
+                    ctx.fillRect(x - width/2, y - height/2, width, height);
+                    
+                    ctx.strokeStyle = '#51cf66';
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(x - width/2, y - height/2, width, height);
+
+                    ctx.fillStyle = '#51cf66';
+                    ctx.font = 'bold 12px Arial';
+                    ctx.fillText('DEMAND', x - width/2 + 8, y + height/2 + 15);
+                }
+            });
+        }
+
+        // Text to Speech
+        function speak(text) {
+            return new Promise((resolve) => {
+                if (!voiceEnabled) {
+                    resolve();
+                    return;
+                }
+
+                const synth = window.speechSynthesis;
+                synth.cancel();
+
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.rate = parseFloat(document.getElementById('voiceSpeed').value);
+                utterance.pitch = 1;
+                utterance.volume = 1;
+
+                utterance.onend = () => resolve();
+                utterance.onerror = () => resolve();
+
+                synth.speak(utterance);
+            });
+        }
+
+        // Teach Supply and Demand
+        async function teachSupplyDemand() {
+            updateStatus('Analyzing chart for zones...');
+
+            // Clear and redraw
+            drawCandles();
+            analyzeZones();
+
+            let supplyZones = zones.filter(z => z.type === 'supply');
+            let demandZones = zones.filter(z => z.type === 'demand');
+
+            // Draw all zones
+            drawZonesOnChart();
+
+            updateStatus('✓ Zones identified! Explaining...');
+            
+            if (supplyZones.length > 0) {
+                await speak(`I found ${supplyZones.length} supply zone on this chart. This is where the price pushed up very high, then sellers came in with strong selling pressure and pushed the price down. The red rectangle shows this exact area. When price returns to this level, sellers typically come back to sell.`);
+            }
+
+            await new Promise(r => setTimeout(r, 500));
+
+            if (demandZones.length > 0) {
+                await speak(`I found ${demandZones.length} demand zone on this chart. This is where the price dropped down very low, then buyers came in with strong buying pressure and pushed the price back up. The green rectangle shows this exact area. When price falls back to this level, buyers typically come back to buy.`);
+            }
+
+            await new Promise(r => setTimeout(r, 500));
+
+            await speak('Professional traders use these zones to trade. When price comes down and touches a demand zone, you place a buy order because buyers are expected to push price up. When price goes up and touches a supply zone, you place a sell order because sellers are expected to push price down. The zones themselves are your stop loss levels. This is the most important principle in technical trading.');
+
+            updateStatus('✓ Tutorial Complete! Study the zones on the chart.');
+        }
+
+        // Main teach function
+        async function teach(query = null) {
+            if (isTeaching) return;
+            isTeaching = true;
+
+            document.getElementById('teachBtn').classList.add('loading');
+            document.getElementById('teachBtn').textContent = '⏳ Teaching...';
+
+            try {
+                await teachSupplyDemand();
+            } catch (error) {
+                console.error('Error:', error);
+                updateStatus('Error occurred. Please try again.');
+            }
+
+            document.getElementById('teachBtn').classList.remove('loading');
+            document.getElementById('teachBtn').textContent = '🎓 Teach Me!';
+            isTeaching = false;
+        }
+
+        function clearCanvas() {
+            candleData = generateCandleData();
+            drawCandles();
+            updateStatus('Chart cleared. Ready to learn!');
+            document.getElementById('userInput').value = '';
+        }
+
+        function toggleVoice() {
+            voiceEnabled = !voiceEnabled;
+            const btn = document.getElementById('voiceToggle');
+            
+            if (voiceEnabled) {
+                btn.textContent = '🔊 Voice Enabled';
+                btn.style.background = '#51cf66';
+                btn.style.color = '#000';
+                updateStatus('✓ Voice is ON! Now click "Teach Me!" to listen.');
+            } else {
+                btn.textContent = '🔇 Voice Off';
+                btn.style.background = '#666';
+                btn.style.color = '#fff';
+                updateStatus('Voice OFF. You can still see the zones!');
+            }
+        }
+
+        function updateStatus(text) {
+            document.getElementById('statusText').textContent = text;
+        }
+
+        // Initialize
+        candleData = generateCandleData();
+        drawCandles();
+        updateStatus('Ready! Enable voice, then click "Teach Me!"');
+    </script>
+</body>
+</html>

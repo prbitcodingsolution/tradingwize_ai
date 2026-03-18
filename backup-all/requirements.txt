@@ -1,0 +1,49 @@
+# Simplified requirements without version pinning for easier installation
+pydantic-ai
+groq  # Added for Groq API support
+python-dotenv
+yfinance
+requests
+httpx  # For async HTTP requests
+beautifulsoup4
+pandas
+streamlit
+plotly
+matplotlib  # For pandas styling with background_gradient
+nest-asyncio
+reportlab
+google-generativeai
+fastapi
+tavily-python
+plotly
+trio
+PyPDF2 
+pdfplumber 
+PyMuPDF
+
+# Core dependencies (already in main requirements.txt)
+requests>=2.31.0
+python-dotenv>=1.0.0
+beautifulsoup4>=4.12.0
+
+# Optional: For better text processing
+nltk>=3.8.1
+textstat>=0.7.3
+
+# LangChain dependencies
+langchain
+langchain-google-genai
+langchain-community
+langchain-groq
+langsmith
+# langchain-tavily-search
+
+# Twitter/X scraping and sentiment analysis
+# For Python 3.12+, use ntscraper (snscrape is incompatible)
+ntscraper>=0.3.0  # Python 3.12+ compatible
+# snscrape>=0.7.0  # Only for Python 3.8-3.11 (commented out due to compatibility)
+vaderSentiment>=3.3.2
+transformers>=4.30.0
+torch>=2.0.0
+
+psycopg2-binary  # PostgreSQL database adapter

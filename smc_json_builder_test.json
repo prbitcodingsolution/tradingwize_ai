@@ -1,0 +1,480 @@
+[
+  {
+    "id": "9YIaVr",
+    "type": "LineToolHorzLine",
+    "state": {
+      "symbol": "TCS.NS",
+      "interval": "1D",
+      "frozen": false,
+      "visible": true,
+      "linecolor": "#089981",
+      "linewidth": 2,
+      "linestyle": 0,
+      "showLabel": true,
+      "text": "\ud83d\udfe2 BOS",
+      "textcolor": "#089981",
+      "fontsize": 11,
+      "bold": true,
+      "italic": false,
+      "horzLabelsAlign": "right",
+      "vertLabelsAlign": "middle",
+      "zOrderVersion": 2,
+      "symbolStateVersion": 2,
+      "intervalsVisibilities": {
+        "ticks": true,
+        "seconds": true,
+        "secondsFrom": 1,
+        "secondsTo": 59,
+        "minutes": true,
+        "minutesFrom": 1,
+        "minutesTo": 59,
+        "hours": true,
+        "hoursFrom": 1,
+        "hoursTo": 24,
+        "days": true,
+        "daysFrom": 1,
+        "daysTo": 366,
+        "weeks": true,
+        "weeksFrom": 1,
+        "weeksTo": 52,
+        "months": true,
+        "monthsFrom": 1,
+        "monthsTo": 12,
+        "ranges": true
+      }
+    },
+    "points": [
+      {
+        "price": 3000.0,
+        "time_t": 1736553600,
+        "offset": 0
+      }
+    ],
+    "zorder": -6500,
+    "linkKey": "3f53ZHwUXsfX",
+    "ownerSource": "_seriesId",
+    "userEditEnabled": false,
+    "isSelectionEnabled": true,
+    "metadata": {
+      "smc_type": "structure",
+      "structure_type": "BOS",
+      "structure_bias": "bullish",
+      "full_reason": "BOS - \ud83d\udfe2 BOS"
+    }
+  },
+  {
+    "id": "E3L9pH",
+    "type": "LineToolHorzLine",
+    "state": {
+      "symbol": "TCS.NS",
+      "interval": "1D",
+      "frozen": false,
+      "visible": true,
+      "linecolor": "#F23645",
+      "linewidth": 1,
+      "linestyle": 2,
+      "showLabel": true,
+      "text": "\ud83d\udd34 CHoCH",
+      "textcolor": "#F23645",
+      "fontsize": 11,
+      "bold": true,
+      "italic": false,
+      "horzLabelsAlign": "right",
+      "vertLabelsAlign": "middle",
+      "zOrderVersion": 2,
+      "symbolStateVersion": 2,
+      "intervalsVisibilities": {
+        "ticks": true,
+        "seconds": true,
+        "secondsFrom": 1,
+        "secondsTo": 59,
+        "minutes": true,
+        "minutesFrom": 1,
+        "minutesTo": 59,
+        "hours": true,
+        "hoursFrom": 1,
+        "hoursTo": 24,
+        "days": true,
+        "daysFrom": 1,
+        "daysTo": 366,
+        "weeks": true,
+        "weeksFrom": 1,
+        "weeksTo": 52,
+        "months": true,
+        "monthsFrom": 1,
+        "monthsTo": 12,
+        "ranges": true
+      }
+    },
+    "points": [
+      {
+        "price": 2950.0,
+        "time_t": 1736985600,
+        "offset": 0
+      }
+    ],
+    "zorder": -6500,
+    "linkKey": "szEZwDuujhrQ",
+    "ownerSource": "_seriesId",
+    "userEditEnabled": false,
+    "isSelectionEnabled": true,
+    "metadata": {
+      "smc_type": "structure",
+      "structure_type": "Internal CHoCH",
+      "structure_bias": "bearish",
+      "full_reason": "CHoCH - \ud83d\udd34 CHoCH"
+    }
+  },
+  {
+    "id": "e7KmJ7",
+    "type": "LineToolRectangle",
+    "state": {
+      "symbol": "TCS.NS",
+      "interval": "1D",
+      "frozen": false,
+      "visible": true,
+      "fillBackground": true,
+      "backgroundColor": "rgba(24, 72, 204, 0.3)",
+      "backgroundTransparency": 70,
+      "linecolor": "#1848cc",
+      "linewidth": 1,
+      "linestyle": 0,
+      "extendLeft": false,
+      "extendRight": true,
+      "showLabel": true,
+      "text": "\ud83d\udfe6 Bull OB",
+      "textcolor": "#FFFFFF",
+      "fontsize": 10,
+      "bold": false,
+      "italic": false,
+      "zOrderVersion": 2,
+      "symbolStateVersion": 2,
+      "intervalsVisibilities": {
+        "ticks": true,
+        "seconds": true,
+        "secondsFrom": 1,
+        "secondsTo": 59,
+        "minutes": true,
+        "minutesFrom": 1,
+        "minutesTo": 59,
+        "hours": true,
+        "hoursFrom": 1,
+        "hoursTo": 24,
+        "days": true,
+        "daysFrom": 1,
+        "daysTo": 366,
+        "weeks": true,
+        "weeksFrom": 1,
+        "weeksTo": 52,
+        "months": true,
+        "monthsFrom": 1,
+        "monthsTo": 12,
+        "ranges": true
+      }
+    },
+    "points": [
+      {
+        "price": 3050.0,
+        "time_t": 1737417600,
+        "offset": 0
+      },
+      {
+        "price": 3020.0,
+        "time_t": 1739923200,
+        "offset": 0
+      }
+    ],
+    "zorder": -5500,
+    "linkKey": "n9aNZjDkDS7S",
+    "ownerSource": "_seriesId",
+    "userEditEnabled": false,
+    "isSelectionEnabled": true,
+    "metadata": {
+      "smc_type": "order_block",
+      "order_block_type": "swing",
+      "order_block_bias": "bullish",
+      "full_reason": "\ud83d\udfe6 Bull OB"
+    }
+  },
+  {
+    "id": "pCwFrd",
+    "type": "LineToolRectangle",
+    "state": {
+      "symbol": "TCS.NS",
+      "interval": "1D",
+      "frozen": false,
+      "visible": true,
+      "fillBackground": true,
+      "backgroundColor": "rgba(247, 124, 128, 0.3)",
+      "backgroundTransparency": 70,
+      "linecolor": "#f77c80",
+      "linewidth": 1,
+      "linestyle": 0,
+      "extendLeft": false,
+      "extendRight": true,
+      "showLabel": true,
+      "text": "\ud83d\udd34 Internal Bear OB",
+      "textcolor": "#FFFFFF",
+      "fontsize": 10,
+      "bold": false,
+      "italic": false,
+      "zOrderVersion": 2,
+      "symbolStateVersion": 2,
+      "intervalsVisibilities": {
+        "ticks": true,
+        "seconds": true,
+        "secondsFrom": 1,
+        "secondsTo": 59,
+        "minutes": true,
+        "minutesFrom": 1,
+        "minutesTo": 59,
+        "hours": true,
+        "hoursFrom": 1,
+        "hoursTo": 24,
+        "days": true,
+        "daysFrom": 1,
+        "daysTo": 366,
+        "weeks": true,
+        "weeksFrom": 1,
+        "weeksTo": 52,
+        "months": true,
+        "monthsFrom": 1,
+        "monthsTo": 12,
+        "ranges": true
+      }
+    },
+    "points": [
+      {
+        "price": 2980.0,
+        "time_t": 1737849600,
+        "offset": 0
+      },
+      {
+        "price": 2950.0,
+        "time_t": 1739923200,
+        "offset": 0
+      }
+    ],
+    "zorder": -5500,
+    "linkKey": "rb9xL6jUzi9a",
+    "ownerSource": "_seriesId",
+    "userEditEnabled": false,
+    "isSelectionEnabled": true,
+    "metadata": {
+      "smc_type": "order_block",
+      "order_block_type": "internal",
+      "order_block_bias": "bearish",
+      "full_reason": "\ud83d\udd34 Internal Bear OB"
+    }
+  },
+  {
+    "id": "SxTeDT",
+    "type": "LineToolRectangle",
+    "state": {
+      "symbol": "TCS.NS",
+      "interval": "1D",
+      "frozen": false,
+      "visible": true,
+      "fillBackground": true,
+      "backgroundColor": "rgba(242, 54, 69, 0.06)",
+      "backgroundTransparency": 94,
+      "linecolor": "#F23645",
+      "linewidth": 0,
+      "linestyle": 0,
+      "extendLeft": true,
+      "extendRight": true,
+      "showLabel": true,
+      "text": "\ud83d\udd34 Premium",
+      "textcolor": "#F23645",
+      "fontsize": 10,
+      "bold": false,
+      "italic": false,
+      "zOrderVersion": 1,
+      "symbolStateVersion": 2,
+      "intervalsVisibilities": {
+        "ticks": true,
+        "seconds": true,
+        "secondsFrom": 1,
+        "secondsTo": 59,
+        "minutes": true,
+        "minutesFrom": 1,
+        "minutesTo": 59,
+        "hours": true,
+        "hoursFrom": 1,
+        "hoursTo": 24,
+        "days": true,
+        "daysFrom": 1,
+        "daysTo": 366,
+        "weeks": true,
+        "weeksFrom": 1,
+        "weeksTo": 52,
+        "months": true,
+        "monthsFrom": 1,
+        "monthsTo": 12,
+        "ranges": true
+      }
+    },
+    "points": [
+      {
+        "price": 3100.0,
+        "time_t": 0,
+        "offset": 0
+      },
+      {
+        "price": 3025.0,
+        "time_t": 315360000,
+        "offset": 0
+      }
+    ],
+    "zorder": -8000,
+    "linkKey": "Zlt98fInAFeN",
+    "ownerSource": "_seriesId",
+    "userEditEnabled": false,
+    "isSelectionEnabled": true,
+    "metadata": {
+      "smc_type": "premium_discount",
+      "zone_type": "premium",
+      "full_reason": "\ud83d\udd34 Premium zone - Premium area"
+    }
+  },
+  {
+    "id": "0YVxnE",
+    "type": "LineToolRectangle",
+    "state": {
+      "symbol": "TCS.NS",
+      "interval": "1D",
+      "frozen": false,
+      "visible": true,
+      "fillBackground": true,
+      "backgroundColor": "rgba(8, 153, 129, 0.06)",
+      "backgroundTransparency": 94,
+      "linecolor": "#089981",
+      "linewidth": 0,
+      "linestyle": 0,
+      "extendLeft": true,
+      "extendRight": true,
+      "showLabel": true,
+      "text": "\ud83d\udfe2 Discount",
+      "textcolor": "#089981",
+      "fontsize": 10,
+      "bold": false,
+      "italic": false,
+      "zOrderVersion": 1,
+      "symbolStateVersion": 2,
+      "intervalsVisibilities": {
+        "ticks": true,
+        "seconds": true,
+        "secondsFrom": 1,
+        "secondsTo": 59,
+        "minutes": true,
+        "minutesFrom": 1,
+        "minutesTo": 59,
+        "hours": true,
+        "hoursFrom": 1,
+        "hoursTo": 24,
+        "days": true,
+        "daysFrom": 1,
+        "daysTo": 366,
+        "weeks": true,
+        "weeksFrom": 1,
+        "weeksTo": 52,
+        "months": true,
+        "monthsFrom": 1,
+        "monthsTo": 12,
+        "ranges": true
+      }
+    },
+    "points": [
+      {
+        "price": 2875.0,
+        "time_t": 0,
+        "offset": 0
+      },
+      {
+        "price": 2800.0,
+        "time_t": 315360000,
+        "offset": 0
+      }
+    ],
+    "zorder": -8000,
+    "linkKey": "JbTLXxpFD89H",
+    "ownerSource": "_seriesId",
+    "userEditEnabled": false,
+    "isSelectionEnabled": true,
+    "metadata": {
+      "smc_type": "premium_discount",
+      "zone_type": "discount",
+      "full_reason": "\ud83d\udfe2 Discount zone - Discount area"
+    }
+  },
+  {
+    "id": "TNCZGI",
+    "type": "LineToolRectangle",
+    "state": {
+      "symbol": "TCS.NS",
+      "interval": "1D",
+      "frozen": false,
+      "visible": true,
+      "fillBackground": true,
+      "backgroundColor": "rgba(135, 139, 148, 0.05)",
+      "backgroundTransparency": 94,
+      "linecolor": "#878b94",
+      "linewidth": 0,
+      "linestyle": 0,
+      "extendLeft": true,
+      "extendRight": true,
+      "showLabel": true,
+      "text": "\u26aa EQ",
+      "textcolor": "#878b94",
+      "fontsize": 10,
+      "bold": false,
+      "italic": false,
+      "zOrderVersion": 1,
+      "symbolStateVersion": 2,
+      "intervalsVisibilities": {
+        "ticks": true,
+        "seconds": true,
+        "secondsFrom": 1,
+        "secondsTo": 59,
+        "minutes": true,
+        "minutesFrom": 1,
+        "minutesTo": 59,
+        "hours": true,
+        "hoursFrom": 1,
+        "hoursTo": 24,
+        "days": true,
+        "daysFrom": 1,
+        "daysTo": 366,
+        "weeks": true,
+        "weeksFrom": 1,
+        "weeksTo": 52,
+        "months": true,
+        "monthsFrom": 1,
+        "monthsTo": 12,
+        "ranges": true
+      }
+    },
+    "points": [
+      {
+        "price": 2957.5,
+        "time_t": 0,
+        "offset": 0
+      },
+      {
+        "price": 2942.5,
+        "time_t": 315360000,
+        "offset": 0
+      }
+    ],
+    "zorder": -8000,
+    "linkKey": "2fUGKxkCzYlJ",
+    "ownerSource": "_seriesId",
+    "userEditEnabled": false,
+    "isSelectionEnabled": true,
+    "metadata": {
+      "smc_type": "premium_discount",
+      "zone_type": "equilibrium",
+      "full_reason": "\u26aa EQ zone - Equilibrium area"
+    }
+  }
+]
