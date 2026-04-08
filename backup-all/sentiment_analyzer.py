@@ -192,7 +192,7 @@ Return ONLY valid JSON:
             
             try:
                 response = self.client.chat.completions.create(
-                    model="openai/gpt-4o-mini",
+                    model="openai/gpt-oss-20b",
                     messages=[
                         {"role": "system", "content": "You are a financial sentiment analysis expert. Analyze news sentiment and return ONLY valid JSON."},
                         {"role": "user", "content": sentiment_prompt}
@@ -262,7 +262,7 @@ Return ONLY valid JSON:
             
             try:
                 response = self.client.chat.completions.create(
-                    model="openai/gpt-4o-mini",
+                    model="openai/gpt-oss-20b",
                     messages=[
                         {"role": "system", "content": "You are a financial analyst expert. Extract sentiment data and return ONLY valid JSON."},
                         {"role": "user", "content": sentiment_prompt}
@@ -662,7 +662,7 @@ Return ONLY valid JSON:
         
         try:
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-20b",
                 messages=[
                     {"role": "system", "content": "You are a social media sentiment analyst. Analyze retail investor sentiment from news articles and return ONLY valid JSON."},
                     {"role": "user", "content": sentiment_prompt}
@@ -751,7 +751,7 @@ Return as JSON array of strings:
         
         try:
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-20b",
                 messages=[
                     {"role": "system", "content": "You are a social media sentiment analyst. Extract key insights and return ONLY a JSON array."},
                     {"role": "user", "content": insight_prompt}
@@ -911,7 +911,7 @@ Write in a professional, balanced tone. Be specific and actionable."""
         
         try:
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-20b",
                 messages=[
                     {"role": "system", "content": "You are a senior financial analyst writing sentiment reports."},
                     {"role": "user", "content": analysis_prompt}

@@ -16,6 +16,8 @@ import time
 
 load_dotenv()
 
+USE_FINBERT = os.getenv("FINBERT_ENABLED", "true").lower() == "true"
+
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 RAPID_API_KEY = os.getenv("RAPID_API_KEY")
 RAPID_API_HOST = os.getenv("RAPID_API_HOST")
@@ -142,197 +144,126 @@ class RapidAPISentimentAnalyzer:
         for source, count in news_count_by_source.items():
             print(f"   • {source}: {count}")
         
-        # Analyze sentiment using VADER (objective, unbiased) + LLM (for context)
+        # Analyze sentiment using FinBERT (primary) or LLM fallback
         if all_news:
-            # First, use VADER for objective sentiment scoring
-            try:
-                from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-                vader_analyzer = SentimentIntensityAnalyzer()
-                
-                print(f"\n🔍 Analyzing sentiment with VADER (objective, unbiased)...")
-                
-                # Analyze each article with VADER
-                article_sentiments = []
-                for article in all_news:
-                    text = f"{article['title']} {article['content']}"
-                    vader_scores = vader_analyzer.polarity_scores(text)
-                    
-                    article_sentiments.append({
-                        'compound': vader_scores['compound'],  # -1 to +1
-                        'pos': vader_scores['pos'],
-                        'neg': vader_scores['neg'],
-                        'neu': vader_scores['neu'],
-                        'title': article['title'],
-                        'source': article['source']
-                    })
-                
-                # Calculate average VADER scores
-                avg_compound = sum(a['compound'] for a in article_sentiments) / len(article_sentiments)
-                avg_pos = sum(a['pos'] for a in article_sentiments) / len(article_sentiments)
-                avg_neg = sum(a['neg'] for a in article_sentiments) / len(article_sentiments)
-                avg_neu = sum(a['neu'] for a in article_sentiments) / len(article_sentiments)
-                
-                # Convert VADER compound score (-1 to +1) to 0-100 scale
-                vader_sentiment_score = (avg_compound + 1) * 50
-                
-                # Determine sentiment label based on VADER score (0-100 scale)
-                if vader_sentiment_score >= 70:
-                    sentiment_label = "Strongly Bullish"
-                elif vader_sentiment_score >= 60:
-                    sentiment_label = "Bullish"
-                elif vader_sentiment_score >= 40:
-                    sentiment_label = "Neutral"
-                elif vader_sentiment_score >= 30:
-                    sentiment_label = "Bearish"
-                else:
-                    sentiment_label = "Strongly Bearish"
-                
-                # Count positive, negative, neutral articles
-                positive_count = sum(1 for a in article_sentiments if a['compound'] > 0.05)
-                negative_count = sum(1 for a in article_sentiments if a['compound'] < -0.05)
-                neutral_count = len(article_sentiments) - positive_count - negative_count
-                
-                print(f"   ✅ VADER Analysis Complete:")
-                print(f"      Score: {vader_sentiment_score:.1f}/100")
-                print(f"      Positive: {positive_count}/{len(article_sentiments)} articles")
-                print(f"      Negative: {negative_count}/{len(article_sentiments)} articles")
-                print(f"      Neutral: {neutral_count}/{len(article_sentiments)} articles")
-                
-                # Now use LLM only for extracting key points and context (not for scoring)
-                news_text = "\n\n".join([
-                    f"Source: {item['source']}\nTitle: {item['title']}\nContent: {item['content'][:300]}"
-                    for item in all_news[:15]
-                ])
-                
-                sentiment_prompt = f"""Analyze the following news articles about {stock_name} ({stock_symbol}).
+            news_text = "\n\n".join([
+                f"Source: {item['source']}\nTitle: {item['title']}\nContent: {item['content'][:300]}"
+                for item in all_news[:15]
+            ])
 
-OBJECTIVE SENTIMENT SCORE (from VADER analysis): {vader_sentiment_score:.1f}/100
-This score is calculated objectively based on the text content.
+            sentiment_data = None
 
-News Articles:
+            # --- FinBERT path ---
+            if USE_FINBERT:
+                try:
+                    from .finbert_sentiment import FinBERTSentimentAnalyzer
+                    texts = [
+                        f"{a['title']} {a['content']}"
+                        for a in all_news
+                        if (a.get('title') or a.get('content', '')).strip()
+                    ]
+                    finbert = FinBERTSentimentAnalyzer.get_instance()
+                    fb_result = finbert.analyze_texts(texts)
+                    finbert_score = fb_result["score"]
+                    article_count = len(texts)
+
+                    if finbert_score >= 70:
+                        sentiment_label = "Strongly Bullish"
+                    elif finbert_score >= 60:
+                        sentiment_label = "Bullish"
+                    elif finbert_score >= 40:
+                        sentiment_label = "Neutral"
+                    elif finbert_score >= 30:
+                        sentiment_label = "Bearish"
+                    else:
+                        sentiment_label = "Strongly Bearish"
+
+                    print(f"\n   FinBERT News Score: {finbert_score:.1f}/100  ({sentiment_label})")
+
+                    # LLM for key points only
+                    key_prompt = f"""Analyze these news articles about {stock_name} ({stock_symbol}).
+FinBERT sentiment score: {finbert_score:.1f}/100
+
+Articles:
 {news_text}
 
-Based on the articles, provide:
-1. Key Positive Points (3-5 specific bullet points from the articles)
-2. Key Negative Points (3-5 specific bullet points from the articles)
-3. Market Mood Summary (2-3 sentences explaining the overall sentiment)
-
-DO NOT change the sentiment score. Just extract the key points and context.
-
-Return ONLY valid JSON:
+DO NOT change the score. Return ONLY valid JSON:
 {{
-  "positive_points": ["specific positive point 1", "specific positive point 2", ...],
-  "negative_points": ["specific negative point 1", "specific negative point 2", ...],
+  "positive_points": ["point1", "point2"],
+  "negative_points": ["point1", "point2"],
   "market_mood": "<2-3 sentence summary>"
 }}"""
-                
-                try:
-                    response = self.client.chat.completions.create(
-                        model="openai/gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": "You are a financial analyst extracting key points from news articles. Do not change the sentiment score, just extract facts."},
-                            {"role": "user", "content": sentiment_prompt}
-                        ],
-                        temperature=0.1,
-                        max_tokens=800
-                    )
-                    
-                    result_text = response.choices[0].message.content.strip()
-                    
-                    # Clean JSON
-                    if "```json" in result_text:
-                        result_text = result_text.split("```json")[1].split("```")[0].strip()
-                    elif "```" in result_text:
-                        result_text = result_text.split("```")[1].split("```")[0].strip()
-                    
-                    llm_data = json.loads(result_text)
-                    
-                    # Combine VADER scores with LLM context
-                    sentiment_data = {
-                        'sentiment_score': round(vader_sentiment_score, 1),
-                        'sentiment_label': sentiment_label,
-                        'positive_points': llm_data.get('positive_points', ['Positive market indicators']),
-                        'negative_points': llm_data.get('negative_points', ['Some concerns noted']),
-                        'market_mood': llm_data.get('market_mood', f'Market sentiment is {sentiment_label.lower()} based on recent news coverage.'),
-                        'confidence': 'High' if len(article_sentiments) >= 20 else 'Medium' if len(article_sentiments) >= 10 else 'Low',
-                        'news_count': len(all_news)
-                    }
-                    
-                    print(f"   📊 News Sentiment: {sentiment_data['sentiment_score']}/100 ({sentiment_data['sentiment_label']})")
-                    
-                except Exception as e:
-                    print(f"   ⚠️ LLM context extraction failed: {e}, using VADER scores only")
-                    sentiment_data = {
-                        'sentiment_score': round(vader_sentiment_score, 1),
-                        'sentiment_label': sentiment_label,
-                        'positive_points': [f'Positive sentiment detected in {positive_count} articles'],
-                        'negative_points': [f'Negative sentiment detected in {negative_count} articles'],
-                        'market_mood': f'Based on {len(article_sentiments)} articles, market sentiment is {sentiment_label.lower()}.',
-                        'confidence': 'High' if len(article_sentiments) >= 20 else 'Medium' if len(article_sentiments) >= 10 else 'Low',
-                        'news_count': len(all_news)
-                    }
-                    
-                    print(f"   📊 News Sentiment: {sentiment_data['sentiment_score']}/100 ({sentiment_data['sentiment_label']})")
-                
-            except ImportError:
-                print(f"   ⚠️ VADER not installed, falling back to LLM-only analysis")
-                print(f"   💡 Install VADER for unbiased sentiment: pip install vaderSentiment")
-                
-                # Fallback to LLM-only (original method)
-                news_text = "\n\n".join([
-                    f"Source: {item['source']}\nTitle: {item['title']}\nContent: {item['content'][:300]}"
-                    for item in all_news[:15]
-                ])
-                
-                sentiment_prompt = f"""Analyze the sentiment of the following news articles about {stock_name} ({stock_symbol}).
+                    try:
+                        resp = self.client.chat.completions.create(
+                            model="openai/gpt-oss-120b",
+                            messages=[
+                                {"role": "system", "content": "Financial analyst extracting key points. Do not change the sentiment score."},
+                                {"role": "user", "content": key_prompt}
+                            ],
+                            temperature=0.1,
+                            max_tokens=800,
+                        )
+                        rt = resp.choices[0].message.content.strip()
+                        if "```json" in rt:
+                            rt = rt.split("```json")[1].split("```")[0].strip()
+                        elif "```" in rt:
+                            rt = rt.split("```")[1].split("```")[0].strip()
+                        llm_data = json.loads(rt)
+                    except Exception as e:
+                        print(f"   LLM key-points extraction failed: {e}")
+                        llm_data = {}
 
-News Articles:
+                    sentiment_data = {
+                        'sentiment_score': round(finbert_score, 1),
+                        'sentiment_label': sentiment_label,
+                        'positive_points': llm_data.get('positive_points', ['Positive indicators noted']),
+                        'negative_points': llm_data.get('negative_points', ['Some concerns noted']),
+                        'market_mood': llm_data.get('market_mood', f'Market sentiment is {sentiment_label.lower()} based on news analysis.'),
+                        'confidence': 'High' if article_count >= 20 else 'Medium' if article_count >= 10 else 'Low',
+                        'news_count': len(all_news),
+                        'finbert_result': fb_result,
+                    }
+
+                except Exception as e:
+                    print(f"   FinBERT news scoring failed: {e} — falling back to LLM")
+                    sentiment_data = None
+
+            # --- LLM-only fallback ---
+            if sentiment_data is None:
+                print(f"   Using LLM-only analysis for news sentiment")
+                sentiment_prompt = f"""Analyze the sentiment of these news articles about {stock_name} ({stock_symbol}).
+
+Articles:
 {news_text}
 
-BE OBJECTIVE AND UNBIASED. Base your score ONLY on the actual content, not assumptions.
-
-Provide a comprehensive sentiment analysis with:
-1. Overall Sentiment Score (0 to 100, where 0 is extremely bearish, 50 is neutral, 100 is extremely bullish)
-2. Sentiment Label (Strongly Bullish, Bullish, Neutral, Bearish, Strongly Bearish)
-3. Key Positive Points (3-5 bullet points)
-4. Key Negative Points (3-5 bullet points)
-5. Market Mood Summary (2-3 sentences)
-6. Confidence Level (High/Medium/Low)
-
-Return ONLY valid JSON:
+BE OBJECTIVE. Return ONLY valid JSON:
 {{
-  "sentiment_score": <number between 0 and 100>,
-  "sentiment_label": "<label>",
-  "positive_points": ["point1", "point2", ...],
-  "negative_points": ["point1", "point2", ...],
-  "market_mood": "<summary>",
-  "confidence": "<High/Medium/Low>",
-  "news_count": <number>
+  "sentiment_score": <0-100>,
+  "sentiment_label": "<Strongly Bullish|Bullish|Neutral|Bearish|Strongly Bearish>",
+  "positive_points": ["point1", "point2"],
+  "negative_points": ["point1", "point2"],
+  "market_mood": "<2-3 sentence summary>",
+  "confidence": "<High|Medium|Low>",
+  "news_count": {len(all_news)}
 }}"""
-                
                 try:
                     response = self.client.chat.completions.create(
-                        model="openai/gpt-4o-mini",
+                        model="openai/gpt-oss-120b",
                         messages=[
-                            {"role": "system", "content": "You are an objective financial sentiment analyst. Analyze sentiment based ONLY on the actual content without bias. Be accurate and fair."},
+                            {"role": "system", "content": "Objective financial sentiment analyst."},
                             {"role": "user", "content": sentiment_prompt}
                         ],
                         temperature=0.1,
-                        max_tokens=1000
+                        max_tokens=1000,
                     )
-                    
                     result_text = response.choices[0].message.content.strip()
-                    
-                    # Clean JSON
                     if "```json" in result_text:
                         result_text = result_text.split("```json")[1].split("```")[0].strip()
                     elif "```" in result_text:
                         result_text = result_text.split("```")[1].split("```")[0].strip()
-                    
                     sentiment_data = json.loads(result_text)
-                    
                 except Exception as e:
-                    print(f"❌ Error analyzing news sentiment: {e}")
+                    print(f"Error analyzing news sentiment: {e}")
                     return self._get_default_sentiment()
             
             # Add statistics
@@ -513,66 +444,94 @@ Return ONLY valid JSON:
         except Exception as e:
             print(f"   ⚠️ Error using yfinance: {e}, trying Tavily...")
         
-        # Fallback to Tavily search + LLM analysis
+        # Fallback to Tavily search + FinBERT scoring
         print(f"   🔄 Trying Tavily search as fallback...")
         query = f"{stock_name} {stock_symbol} site:finance.yahoo.com analyst rating recommendation"
         results, answer = self._search_tavily(query, domains=["finance.yahoo.com"], max_results=5)
-        
+
         if results or answer:
+            # Collect text snippets for FinBERT
+            snippets = []
+            if answer:
+                snippets.append(answer)
+            for r in results:
+                title = r.get('title', '')
+                content = r.get('content', '')
+                if title or content:
+                    snippets.append(f"{title} {content}")
+
             content = answer + "\n\n" + "\n\n".join([
                 f"{r.get('title', '')}\n{r.get('content', '')}"
                 for r in results
             ])
-            
-            sentiment_prompt = f"""Analyze Yahoo Finance sentiment for {stock_name} ({stock_symbol}).
+
+            # --- FinBERT for scoring ---
+            yahoo_finbert_score = 50.0
+            if USE_FINBERT and snippets:
+                try:
+                    from .finbert_sentiment import FinBERTSentimentAnalyzer
+                    finbert = FinBERTSentimentAnalyzer.get_instance()
+                    fb = finbert.analyze_texts(snippets)
+                    yahoo_finbert_score = fb['score']
+                    print(f"   ✅ Yahoo Finance FinBERT Score: {yahoo_finbert_score:.1f}/100")
+                except Exception as e:
+                    print(f"   ⚠️ FinBERT for Yahoo Tavily failed: {e}")
+
+            # --- LLM for structured fields only (analyst counts, price target, insights) ---
+            struct_prompt = f"""From this Yahoo Finance content about {stock_name} ({stock_symbol}), extract ONLY:
+- analyst_rating (Buy/Hold/Sell)
+- buy_recommendations (integer)
+- hold_recommendations (integer)
+- sell_recommendations (integer)
+- average_price_target (number or null)
+- institutional_sentiment (Positive/Neutral/Negative)
+- key_insights (list of 2-3 strings)
 
 Content:
 {content[:3000]}
 
-Extract and analyze:
-1. Analyst Ratings (Buy/Hold/Sell recommendations)
-2. Price Targets
-3. Institutional Sentiment
-4. Overall Yahoo Finance Sentiment Score (-100 to +100)
-5. Key Insights
-
 Return ONLY valid JSON:
 {{
-  "sentiment_score": <number>,
   "analyst_rating": "<Buy/Hold/Sell>",
   "buy_recommendations": <number>,
   "hold_recommendations": <number>,
   "sell_recommendations": <number>,
   "average_price_target": <number or null>,
   "institutional_sentiment": "<Positive/Neutral/Negative>",
-  "key_insights": ["insight1", "insight2", ...]
+  "key_insights": ["insight1", "insight2"]
 }}"""
-            
-            try: 
+
+            try:
                 response = self.client.chat.completions.create(
-                    model="openai/gpt-4o-mini",
+                    model="openai/gpt-oss-120b",
                     messages=[
-                        {"role": "system", "content": "You are a financial analyst expert. Extract sentiment data and return ONLY valid JSON."},
-                        {"role": "user", "content": sentiment_prompt}
+                        {"role": "system", "content": "You are a financial analyst. Extract structured fields and return ONLY valid JSON."},
+                        {"role": "user", "content": struct_prompt},
                     ],
                     temperature=0.1,
-                    max_tokens=800
+                    max_tokens=500,
                 )
-                
                 result_text = response.choices[0].message.content.strip()
-                
-                # Clean JSON
                 if "```json" in result_text:
                     result_text = result_text.split("```json")[1].split("```")[0].strip()
                 elif "```" in result_text:
                     result_text = result_text.split("```")[1].split("```")[0].strip()
-                
-                result = json.loads(result_text)
-                print(f"   ✅ Yahoo Finance sentiment (Tavily): {result.get('sentiment_score', 0)}/100 ({result.get('analyst_rating', 'N/A')})")
+                struct = json.loads(result_text)
+                result = {
+                    'sentiment_score': round(yahoo_finbert_score, 1),
+                    'analyst_rating': struct.get('analyst_rating', 'Hold'),
+                    'buy_recommendations': struct.get('buy_recommendations', 0),
+                    'hold_recommendations': struct.get('hold_recommendations', 0),
+                    'sell_recommendations': struct.get('sell_recommendations', 0),
+                    'average_price_target': struct.get('average_price_target'),
+                    'institutional_sentiment': struct.get('institutional_sentiment', 'Neutral'),
+                    'key_insights': struct.get('key_insights', []),
+                    'data_source': 'tavily_finbert',
+                }
+                print(f"   ✅ Yahoo Finance sentiment (Tavily+FinBERT): {result['sentiment_score']}/100 ({result['analyst_rating']})")
                 return result
-                
             except Exception as e:
-                print(f"   ⚠️ Error analyzing Yahoo Finance sentiment with LLM: {e}")
+                print(f"   ⚠️ Error extracting Yahoo Finance structured fields: {e}")
         
         print(f"   ⚠️ Returning default Yahoo Finance sentiment")
         return self._get_default_yahoo_sentiment()
@@ -694,289 +653,178 @@ Return ONLY valid JSON:
             traceback.print_exc()
             return self._get_default_social_sentiment("twitter")
     
-    def _analyze_tweets_sentiment(self, combined_text: str, stock_symbol: str, 
+    def _analyze_tweets_sentiment(self, combined_text: str, stock_symbol: str,
                                   stock_name: str, tweets_data: List[Dict]) -> Dict:
         """
-        Analyze sentiment of combined tweet texts using VADER (objective) + LLM (context)
-        
-        Args:
-            combined_text: Combined text from all tweets
-            stock_symbol: Stock ticker
-            stock_name: Company name
-            tweets_data: List of tweet data dictionaries
-            
-        Returns:
-            Dictionary with sentiment analysis results
+        Analyze sentiment of tweet texts using FinBERT (primary) + LLM for theme extraction.
+        FinBERT is domain-specific to finance and more accurate than VADER for stock tweets.
         """
-        print(f"   🤖 Analyzing sentiment of {len(tweets_data)} tweets...")
-        
-        # Try VADER first for objective, unbiased sentiment scoring
-        try:
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-            vader_analyzer = SentimentIntensityAnalyzer()
-            
-            print(f"   🔍 Using VADER for objective sentiment analysis...")
-            
-            # Analyze each tweet with VADER
-            tweet_sentiments = []
-            for tweet in tweets_data:
-                text = tweet.get('text', '')
-                if text:
-                    vader_scores = vader_analyzer.polarity_scores(text)
-                    tweet_sentiments.append({
-                        'compound': vader_scores['compound'],  # -1 to +1
-                        'pos': vader_scores['pos'],
-                        'neg': vader_scores['neg'],
-                        'neu': vader_scores['neu'],
-                        'text': text[:100],
-                        'screen_name': tweet.get('screen_name', '')
-                    })
-            
-            if not tweet_sentiments:
-                print(f"   ⚠️ No valid tweets to analyze")
-                return self._get_default_social_sentiment("twitter")
-            
-            # Calculate average VADER scores
-            avg_compound = sum(t['compound'] for t in tweet_sentiments) / len(tweet_sentiments)
-            avg_pos = sum(t['pos'] for t in tweet_sentiments) / len(tweet_sentiments)
-            avg_neg = sum(t['neg'] for t in tweet_sentiments) / len(tweet_sentiments)
-            avg_neu = sum(t['neu'] for t in tweet_sentiments) / len(tweet_sentiments)
-            
-            # Convert VADER compound score (-1 to +1) to 0-100 scale
-            vader_sentiment_score = (avg_compound + 1) * 50
-            
-            # Determine sentiment label based on VADER score (0-100 scale)
-            if vader_sentiment_score >= 70:
-                sentiment_label = "Strongly Bullish"
-            elif vader_sentiment_score >= 60:
-                sentiment_label = "Bullish"
-            elif vader_sentiment_score >= 40:
-                sentiment_label = "Neutral"
-            elif vader_sentiment_score >= 30:
-                sentiment_label = "Bearish"
-            else:
-                sentiment_label = "Strongly Bearish"
-            
-            # Count positive, negative, neutral tweets
-            positive_count = sum(1 for t in tweet_sentiments if t['compound'] > 0.05)
-            negative_count = sum(1 for t in tweet_sentiments if t['compound'] < -0.05)
-            neutral_count = len(tweet_sentiments) - positive_count - negative_count
-            
-            # Calculate percentages
-            positive_percentage = (positive_count / len(tweet_sentiments) * 100) if tweet_sentiments else 0
-            negative_percentage = (negative_count / len(tweet_sentiments) * 100) if tweet_sentiments else 0
-            neutral_percentage = (neutral_count / len(tweet_sentiments) * 100) if tweet_sentiments else 0
-            
-            print(f"   ✅ VADER Analysis Complete:")
-            print(f"      Score: {vader_sentiment_score:.1f}/100")
-            print(f"      Positive: {positive_count}/{len(tweet_sentiments)} tweets ({positive_percentage:.1f}%)")
-            print(f"      Negative: {negative_count}/{len(tweet_sentiments)} tweets ({negative_percentage:.1f}%)")
-            print(f"      Neutral: {neutral_count}/{len(tweet_sentiments)} tweets ({neutral_percentage:.1f}%)")
-            
-            # Now use LLM only for extracting key themes (not for scoring)
-            sentiment_prompt = f"""Analyze Twitter/X discussions about {stock_name} ({stock_symbol}).
+        print(f"   🤖 Analyzing sentiment of {len(tweets_data)} tweets with FinBERT...")
 
-OBJECTIVE SENTIMENT SCORE (from VADER analysis): {vader_sentiment_score:.1f}/100
-This score is calculated objectively based on the tweet content.
+        tweet_texts = [t.get('text', '') for t in tweets_data if t.get('text', '').strip()]
+        if not tweet_texts:
+            print(f"   ⚠️ No valid tweet texts to analyze")
+            return self._get_default_social_sentiment("twitter")
+
+        # --- FinBERT scoring (primary) ---
+        finbert_score = 50.0
+        breakdown = {'positive': 0, 'negative': 0, 'neutral': 0}
+        finbert_ok = False
+
+        if USE_FINBERT:
+            try:
+                from .finbert_sentiment import FinBERTSentimentAnalyzer
+                finbert = FinBERTSentimentAnalyzer.get_instance()
+                fb_result = finbert.analyze_texts(tweet_texts)
+                finbert_score = fb_result['score']
+                breakdown = fb_result['breakdown']
+                finbert_ok = True
+                print(f"   ✅ FinBERT Twitter Score: {finbert_score:.1f}/100")
+                print(f"      Positive: {breakdown.get('positive', 0)} | "
+                      f"Negative: {breakdown.get('negative', 0)} | "
+                      f"Neutral: {breakdown.get('neutral', 0)}")
+            except Exception as e:
+                print(f"   ⚠️ FinBERT failed for Twitter: {e}")
+
+        # Fallback to VADER if FinBERT unavailable
+        if not finbert_ok:
+            try:
+                from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+                vader = SentimentIntensityAnalyzer()
+                compounds = [vader.polarity_scores(t)['compound'] for t in tweet_texts]
+                avg_compound = sum(compounds) / len(compounds)
+                finbert_score = (avg_compound + 1) * 50
+                breakdown = {
+                    'positive': sum(1 for c in compounds if c > 0.05),
+                    'negative': sum(1 for c in compounds if c < -0.05),
+                    'neutral': sum(1 for c in compounds if -0.05 <= c <= 0.05),
+                }
+                print(f"   ✅ VADER fallback Twitter Score: {finbert_score:.1f}/100")
+            except Exception as e:
+                print(f"   ⚠️ VADER fallback also failed: {e} — using LLM scoring")
+                # Final fallback: LLM for scoring
+                try:
+                    resp = self.client.chat.completions.create(
+                        model="openai/gpt-oss-120b",
+                        messages=[
+                            {"role": "system", "content": "You are an objective financial tweet sentiment analyst. Return ONLY valid JSON."},
+                            {"role": "user", "content": (
+                                f"Score Twitter sentiment for {stock_name} ({stock_symbol}) "
+                                f"from these tweets (0=bearish, 50=neutral, 100=bullish).\n\n"
+                                f"TWEETS:\n{combined_text[:3000]}\n\n"
+                                f'Return: {{"sentiment_score": <0-100>, "positive_pct": <0-100>, '
+                                f'"negative_pct": <0-100>, "neutral_pct": <0-100>}}'
+                            )},
+                        ],
+                        temperature=0.1,
+                        max_tokens=200,
+                    )
+                    raw = resp.choices[0].message.content.strip()
+                    if "```" in raw:
+                        raw = raw.split("```")[1].split("```")[0].strip()
+                        if raw.startswith("json"):
+                            raw = raw[4:].strip()
+                    llm_scores = json.loads(raw)
+                    finbert_score = float(llm_scores.get('sentiment_score', 50))
+                    n = len(tweet_texts)
+                    breakdown = {
+                        'positive': int(llm_scores.get('positive_pct', 33) * n / 100),
+                        'negative': int(llm_scores.get('negative_pct', 33) * n / 100),
+                        'neutral': int(llm_scores.get('neutral_pct', 34) * n / 100),
+                    }
+                except Exception:
+                    pass  # keep defaults
+
+        # Determine label from score
+        n_total = len(tweet_texts)
+        pos = breakdown.get('positive', 0)
+        neg = breakdown.get('negative', 0)
+        neu = breakdown.get('neutral', 0)
+        positive_pct = (pos / n_total * 100) if n_total else 0
+        negative_pct = (neg / n_total * 100) if n_total else 0
+        neutral_pct  = (neu / n_total * 100) if n_total else 0
+
+        if finbert_score >= 70:
+            sentiment_label = "Strongly Bullish"
+        elif finbert_score >= 60:
+            sentiment_label = "Bullish"
+        elif finbert_score >= 40:
+            sentiment_label = "Neutral"
+        elif finbert_score >= 30:
+            sentiment_label = "Bearish"
+        else:
+            sentiment_label = "Strongly Bearish"
+
+        # --- LLM for theme/mood extraction only (not scoring) ---
+        theme_prompt = f"""Analyze Twitter/X discussions about {stock_name} ({stock_symbol}).
+
+FinBERT Sentiment Score: {finbert_score:.1f}/100 ({sentiment_label})
 
 Sample Tweets:
 {combined_text[:3000]}
 
-Based on the tweets, provide:
+Extract ONLY:
 1. Key Themes (3-5 main topics being discussed)
-2. Market Mood Summary (2-3 sentences explaining the overall Twitter sentiment)
-
-DO NOT change the sentiment score. Just extract the key themes and context.
+2. Market Mood Summary (2-3 sentences)
 
 Return ONLY valid JSON:
 {{
-  "key_themes": ["theme1", "theme2", "theme3", ...],
+  "key_themes": ["theme1", "theme2", "theme3"],
   "market_mood": "<2-3 sentence summary>"
 }}"""
-            
-            try:
-                response = self.client.chat.completions.create(
-                    model="openai/gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "You are a social media analyst extracting key themes from tweets. Do not change the sentiment score, just extract themes."},
-                        {"role": "user", "content": sentiment_prompt}
-                    ],
-                    temperature=0.1,
-                    max_tokens=500
-                )
-                
-                result_text = response.choices[0].message.content.strip()
-                
-                # Clean JSON
-                if "```json" in result_text:
-                    result_text = result_text.split("```json")[1].split("```")[0].strip()
-                elif "```" in result_text:
-                    result_text = result_text.split("```")[1].split("```")[0].strip()
-                
-                llm_data = json.loads(result_text)
-                key_themes = llm_data.get('key_themes', ['Market discussions', 'Stock performance'])
-                market_mood = llm_data.get('market_mood', f'Twitter sentiment is {sentiment_label.lower()} based on {len(tweet_sentiments)} tweets.')
-                
-            except Exception as e:
-                print(f"   ⚠️ LLM theme extraction failed: {e}, using defaults")
-                key_themes = ['Market discussions', 'Stock performance', 'Investor sentiment']
-                market_mood = f'Based on {len(tweet_sentiments)} tweets, Twitter sentiment is {sentiment_label.lower()}.'
-            
-            # Calculate total engagement
-            total_engagement = sum(
-                tweet.get('favorites', 0) + 
-                tweet.get('retweets', 0) + 
-                tweet.get('replies', 0) + 
-                tweet.get('quotes', 0)
-                for tweet in tweets_data
-            )
-            
-            # Get top tweets by engagement
-            sorted_tweets = sorted(
-                tweets_data, 
-                key=lambda x: x.get('favorites', 0) + x.get('retweets', 0),
-                reverse=True
-            )[:5]
-            
-            return {
-                'sentiment_score': round(vader_sentiment_score, 1),
-                'sentiment_label': sentiment_label,
-                'tweet_count': len(tweets_data),
-                'positive_percentage': round(positive_percentage, 1),
-                'negative_percentage': round(negative_percentage, 1),
-                'neutral_percentage': round(neutral_percentage, 1),
-                'total_engagement': total_engagement,
-                'key_themes': key_themes,
-                'market_mood': market_mood,
-                'top_tweets': [
-                    {
-                        'text': tweet['text'][:200],
-                        'screen_name': tweet['screen_name'],
-                        'engagement': tweet.get('favorites', 0) + tweet.get('retweets', 0)
-                    }
-                    for tweet in sorted_tweets
+
+        try:
+            resp = self.client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[
+                    {"role": "system", "content": "Extract key themes from tweets. Do not change the sentiment score."},
+                    {"role": "user", "content": theme_prompt},
                 ],
-                'confidence': 'High' if len(tweet_sentiments) >= 30 else 'Medium' if len(tweet_sentiments) >= 15 else 'Low',
-                'source': 'rapidapi_twitter_vader'
-            }
-            
-            print(f"   🐦 Social Sentiment: {round(vader_sentiment_score, 1)}/100 ({sentiment_label})")
-            
-        except ImportError:
-            print(f"   ⚠️ VADER not installed, falling back to LLM-only analysis")
-            print(f"   💡 Install VADER for unbiased sentiment: pip install vaderSentiment")
-            
-            # Fallback to LLM-only (original method)
-            sentiment_prompt = f"""Analyze the Twitter/X sentiment for {stock_name} ({stock_symbol}) based on these recent tweets.
+                temperature=0.1,
+                max_tokens=400,
+            )
+            raw = resp.choices[0].message.content.strip()
+            if "```json" in raw:
+                raw = raw.split("```json")[1].split("```")[0].strip()
+            elif "```" in raw:
+                raw = raw.split("```")[1].split("```")[0].strip()
+            llm_data = json.loads(raw)
+            key_themes = llm_data.get('key_themes', ['Market discussions', 'Stock performance'])
+            market_mood = llm_data.get('market_mood', f'Twitter sentiment is {sentiment_label.lower()} based on {n_total} tweets.')
+        except Exception as e:
+            print(f"   ⚠️ LLM theme extraction failed: {e}")
+            key_themes = ['Market discussions', 'Stock performance', 'Investor sentiment']
+            market_mood = f'Based on {n_total} tweets, Twitter/X sentiment is {sentiment_label.lower()}.'
 
-TWEETS:
-{combined_text[:4000]}
+        # Engagement stats
+        total_engagement = sum(
+            t.get('favorites', 0) + t.get('retweets', 0) + t.get('replies', 0) + t.get('quotes', 0)
+            for t in tweets_data
+        )
+        sorted_tweets = sorted(tweets_data, key=lambda x: x.get('favorites', 0) + x.get('retweets', 0), reverse=True)[:5]
 
-BE OBJECTIVE AND UNBIASED. Base your score ONLY on the actual tweet content, not assumptions.
-
-Provide a comprehensive sentiment analysis with:
-1. Overall Sentiment Score (0 to 100, where 0 is extremely bearish, 50 is neutral, 100 is extremely bullish)
-2. Sentiment Label (Strongly Bullish, Bullish, Neutral, Bearish, Strongly Bearish)
-3. Positive Percentage (0-100)
-4. Negative Percentage (0-100)
-5. Neutral Percentage (0-100)
-6. Key Themes (3-5 main topics discussed)
-7. Market Mood Summary (2-3 sentences)
-8. Confidence Level (High/Medium/Low based on tweet quality and quantity)
-
-Return ONLY valid JSON:
-{{
-  "sentiment_score": <number between 0 and 100>,
-  "sentiment_label": "<label>",
-  "positive_percentage": <number>,
-  "negative_percentage": <number>,
-  "neutral_percentage": <number>,
-  "key_themes": ["theme1", "theme2", ...],
-  "market_mood": "<summary>",
-  "confidence": "<High/Medium/Low>"
-}}"""
-            
-            try:
-                response = self.client.chat.completions.create(
-                    model="openai/gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "You are an objective Twitter sentiment analyst specializing in stock market discussions. Analyze sentiment based ONLY on actual content without bias."},
-                        {"role": "user", "content": sentiment_prompt}
-                    ],
-                    temperature=0.1,
-                    max_tokens=800
-                )
-                
-                result_text = response.choices[0].message.content.strip()
-                
-                # Clean JSON
-                if "```json" in result_text:
-                    result_text = result_text.split("```json")[1].split("```")[0].strip()
-                elif "```" in result_text:
-                    result_text = result_text.split("```")[1].split("```")[0].strip()
-                
-                sentiment_data = json.loads(result_text)
-                
-                # Calculate total engagement
-                total_engagement = sum(
-                    tweet.get('favorites', 0) + 
-                    tweet.get('retweets', 0) + 
-                    tweet.get('replies', 0) + 
-                    tweet.get('quotes', 0)
-                    for tweet in tweets_data
-                )
-                
-                # Get top tweets by engagement
-                sorted_tweets = sorted(
-                    tweets_data, 
-                    key=lambda x: x.get('favorites', 0) + x.get('retweets', 0),
-                    reverse=True
-                )[:5]
-                
-                return {
-                    'sentiment_score': round(sentiment_data.get('sentiment_score', 0), 1),
-                    'sentiment_label': sentiment_data.get('sentiment_label', 'Neutral'),
-                    'tweet_count': len(tweets_data),
-                    'positive_percentage': round(sentiment_data.get('positive_percentage', 0), 1),
-                    'negative_percentage': round(sentiment_data.get('negative_percentage', 0), 1),
-                    'neutral_percentage': round(sentiment_data.get('neutral_percentage', 0), 1),
-                    'total_engagement': total_engagement,
-                    'key_themes': sentiment_data.get('key_themes', []),
-                    'market_mood': sentiment_data.get('market_mood', ''),
-                    'top_tweets': [
-                        {
-                            'text': tweet['text'][:200],
-                            'screen_name': tweet['screen_name'],
-                            'engagement': tweet.get('favorites', 0) + tweet.get('retweets', 0)
-                        }
-                        for tweet in sorted_tweets
-                    ],
-                    'confidence': sentiment_data.get('confidence', 'Medium'),
-                    'source': 'rapidapi_twitter_llm'
+        return {
+            'sentiment_score': round(finbert_score, 1),
+            'sentiment_label': sentiment_label,
+            'tweet_count': n_total,
+            'positive_percentage': round(positive_pct, 1),
+            'negative_percentage': round(negative_pct, 1),
+            'neutral_percentage': round(neutral_pct, 1),
+            'total_engagement': total_engagement,
+            'key_themes': key_themes,
+            'market_mood': market_mood,
+            'top_tweets': [
+                {
+                    'text': t['text'][:200],
+                    'screen_name': t['screen_name'],
+                    'engagement': t.get('favorites', 0) + t.get('retweets', 0)
                 }
-                
-            except Exception as e:
-                print(f"❌ Error analyzing tweet sentiment: {e}")
-                import traceback
-                traceback.print_exc()
-                
-                # Return basic sentiment based on tweet count
-                return {
-                    'sentiment_score': 0,
-                    'sentiment_label': 'Neutral',
-                    'tweet_count': len(tweets_data),
-                    'positive_percentage': 33.3,
-                    'negative_percentage': 33.3,
-                    'neutral_percentage': 33.3,
-                    'total_engagement': sum(
-                        tweet.get('favorites', 0) + tweet.get('retweets', 0)
-                        for tweet in tweets_data
-                    ),
-                    'key_themes': ['Unable to analyze'],
-                    'market_mood': 'Sentiment analysis failed',
-                    'confidence': 'Low',
-                    'source': 'rapidapi_twitter_error'
-                }
+                for t in sorted_tweets
+            ],
+            'confidence': 'High' if n_total >= 30 else 'Medium' if n_total >= 15 else 'Low',
+            'source': 'rapidapi_twitter_finbert' if finbert_ok else 'rapidapi_twitter_vader_fallback',
+            'finbert_result': fb_result if finbert_ok else None,
+        }
     
     def analyze_reddit_sentiment_adanos(self, ticker: str) -> Dict:
         """
@@ -1034,48 +882,45 @@ Return ONLY valid JSON:
                 reddit_sentiment = None
         
         # Calculate weighted combined score
-        # Adjust weights based on available sources
-        # Yahoo Finance gets higher weight as it's based on professional analyst research
+        # Weights per spec: News 40%, Yahoo 20%, Reddit 25%, Twitter 15%
         if reddit_sentiment and reddit_sentiment.get('total_posts', 0) > 0:
-            # All 4 sources: Yahoo (40%), News (25%), Reddit (20%), Twitter (15%)
-            # Yahoo Finance weighted higher as it's based on fundamental analysis
+            # All 4 sources available
             weights = {
-                'yahoo': 0.25,
-                'news': 0.25,
+                'news': 0.40,
+                'yahoo': 0.20,
                 'reddit': 0.25,
-                'twitter': 0.25
+                'twitter': 0.15,
             }
             combined_score = (
-                yahoo_sentiment.get('sentiment_score', 0) * weights['yahoo'] +
                 news_sentiment.get('sentiment_score', 0) * weights['news'] +
+                yahoo_sentiment.get('sentiment_score', 0) * weights['yahoo'] +
                 reddit_sentiment.get('sentiment_score', 0) * weights['reddit'] +
                 twitter_sentiment.get('sentiment_score', 0) * weights['twitter']
             )
         else:
-            # 3 sources: Yahoo (50%), News (30%), Twitter (20%)
-            # Yahoo Finance gets 50% weight as it's the most reliable (analyst research)
+            # 3 sources (no Reddit): News 53%, Yahoo 27%, Twitter 20%
             weights = {
-                'yahoo': 0.50,
-                'news': 0.30,
-                'twitter': 0.20
+                'news': 0.53,
+                'yahoo': 0.27,
+                'twitter': 0.20,
             }
             combined_score = (
-                yahoo_sentiment.get('sentiment_score', 0) * weights['yahoo'] +
                 news_sentiment.get('sentiment_score', 0) * weights['news'] +
+                yahoo_sentiment.get('sentiment_score', 0) * weights['yahoo'] +
                 twitter_sentiment.get('sentiment_score', 0) * weights['twitter']
             )
         
-        # Determine overall sentiment label
-        if combined_score >= 60:
+        # Determine overall sentiment label (scores are 0-100)
+        if combined_score >= 70:
             overall_label = "Strongly Bullish 🚀"
             color = "#10b981"
-        elif combined_score >= 20:
+        elif combined_score >= 60:
             overall_label = "Bullish 📈"
             color = "#34d399"
-        elif combined_score >= -20:
+        elif combined_score >= 40:
             overall_label = "Neutral ⚖️"
             color = "#fbbf24"
-        elif combined_score >= -60:
+        elif combined_score >= 30:
             overall_label = "Bearish 📉"
             color = "#f87171"
         else:
@@ -1178,7 +1023,7 @@ Be specific, balanced, and actionable. If there are large discrepancies (>40 poi
         
         try:
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {"role": "system", "content": "You are a senior market analyst creating unified sentiment reports from multiple data sources."},
                     {"role": "user", "content": analysis_prompt}
@@ -1283,7 +1128,7 @@ Return ONLY valid JSON:
 }}"""
             
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {"role": "system", "content": f"You are a {source} sentiment analyst. Return ONLY valid JSON."},
                     {"role": "user", "content": sentiment_prompt}

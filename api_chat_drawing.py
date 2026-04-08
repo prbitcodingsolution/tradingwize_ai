@@ -127,7 +127,7 @@ class ChatDrawingRequest(BaseModel):
     @validator('market')
     def validate_market(cls, v):
         """Validate market type"""
-        valid_markets = ['stock', 'forex', 'crypto']
+        valid_markets = ['stock', 'nasdaq', 'nyse', 'us', 'forex', 'crypto']
         v_lower = v.lower()
         if v_lower not in valid_markets:
             raise ValueError(f"Invalid market. Must be one of: {', '.join(valid_markets)}")

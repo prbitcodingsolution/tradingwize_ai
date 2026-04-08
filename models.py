@@ -1,5 +1,6 @@
+from __future__ import annotations
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, TYPE_CHECKING
 from datetime import datetime
 
 
@@ -128,6 +129,7 @@ class CompanyData(BaseModel):
     news: List[Dict[str, str]] = Field(default_factory=list)
     announcements: List[str] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.now)
+    finrobot_report: Optional[Any] = Field(default=None, description="FinRobotReport from the three-agent pipeline")
 
 
 class CompanyReport(BaseModel):
@@ -158,3 +160,112 @@ class Summary(BaseModel):
     weaknesses: List[str]
     future_outlook: str
     recommendation: str
+
+
+class QuarterlyHolding(BaseModel):
+    """FII/DII holding for a single quarter."""
+    quarter: str
+    fii_pct: float
+    dii_pct: float
+    promoter_pct: Optional[float] = None
+    public_pct: Optional[float] = None
+
+
+class FIIDIISentiment(BaseModel):
+    """Complete FII/DII institutional sentiment analysis for a stock."""
+    symbol: str
+    company_name: Optional[str] = None
+
+    # Current snapshot
+    current_fii_pct: float
+    current_dii_pct: float
+    current_total_institutional: float
+
+    # Trend data (oldest first)
+    quarterly_history: List[QuarterlyHolding] = Field(default_factory=list)
+
+    # Trend direction
+    fii_trend: str
+    dii_trend: str
+    fii_change_1q: Optional[float] = None
+    fii_change_4q: Optional[float] = None
+    dii_change_1q: Optional[float] = None
+    dii_change_4q: Optional[float] = None
+
+    # Scoring
+    institutional_sentiment_score: float
+    sentiment_label: str
+
+    # Recommendation
+    recommendation: str
+    recommendation_color: str
+    reasoning: List[str] = Field(default_factory=list)
+
+    # Metadata
+    data_source: str
+    data_freshness: str
+    timestamp: datetime
+
+
+# ── Option Chain & OI Analysis Models ──
+
+class OptionStrike(BaseModel):
+    """Single strike row from the option chain table."""
+    strike: float
+    call_oi: int = 0
+    call_chng_oi: int = 0
+    put_oi: int = 0
+    put_chng_oi: int = 0
+    is_max_call_oi: bool = False
+    is_max_put_oi: bool = False
+    is_atm: bool = False
+    call_oi_change_pct: Optional[float] = None
+    put_oi_change_pct: Optional[float] = None
+
+
+class OIShiftSignal(BaseModel):
+    """Tracks where OI concentration is shifting."""
+    direction: str
+    description: str
+    strength: str
+    score_contribution: int = 0
+
+
+class OIAnalysis(BaseModel):
+    """Complete OI-based market analysis output."""
+    symbol: str
+    expiry_date: str
+    underlying_price: float
+    max_call_oi_strike: float
+    max_put_oi_strike: float
+    max_pain_strike: float
+    put_call_ratio: float
+    pcr_label: str
+    call_oi_shift: OIShiftSignal
+    put_oi_shift: OIShiftSignal
+    key_support: float
+    key_resistance: float
+    range_low: float
+    range_high: float
+    market_bias: str
+    bias_strength: str
+    recommendation: str
+    recommendation_color: str
+    verdict_points: List[str]
+    confidence: str
+    total_signal_score: int = 0
+    has_contradiction: bool = False
+    pcr_score: int = 0
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class OptionChainData(BaseModel):
+    """Complete option chain fetch result — raw data + analysis."""
+    symbol: str
+    expiry_date: str
+    underlying_price: float
+    available_expiries: List[str]
+    strikes: List[OptionStrike]
+    analysis: OIAnalysis
+    data_source: str = "nse_api"
+    timestamp: datetime = Field(default_factory=datetime.utcnow)

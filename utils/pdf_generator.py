@@ -144,7 +144,16 @@ def generate_pdf_report(content: str, stock_symbol: str = "Stock") -> BytesIO:
             line = line.strip()
             if not line:
                 continue
-                
+
+            # Skip markdown table separator lines (e.g. |---|---|---|)
+            if re.match(r'^\|[\s\-:|]+\|$', line):
+                continue
+
+            # Convert markdown table rows to plain text
+            if line.startswith('|') and line.endswith('|'):
+                cells = [c.strip() for c in line.strip('|').split('|')]
+                line = ' | '.join(c for c in cells if c)
+
             # Check if it's a bullet point
             if line.startswith('- ') or line.startswith('• '):
                 # Bullet point - add indentation
@@ -157,7 +166,14 @@ def generate_pdf_report(content: str, stock_symbol: str = "Stock") -> BytesIO:
         
         # Join lines with line breaks
         formatted_text = '<br/>'.join(formatted_lines)
-        
+
+        # Sanitize HTML for ReportLab: only allow <b>, <i>, <u>, <br/> tags
+        # Remove any <br> without closing slash (ReportLab requires <br/>)
+        formatted_text = formatted_text.replace('<br>', '<br/>')
+        # Remove duplicate <br/>
+        while '<br/><br/>' in formatted_text:
+            formatted_text = formatted_text.replace('<br/><br/>', '<br/>')
+
         # Create paragraph with appropriate style
         if is_main_header:
             # Add a small divider line before main headers (except first one)

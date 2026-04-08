@@ -12,11 +12,20 @@ import os
 from dotenv import load_dotenv
 import time
 from api_logger import api_logger, log_api_call, should_wait_for_rate_limit
-from utils.model_config import get_model, get_client
-from pydantic_ai import Agent
-from pydantic import BaseModel, Field
+from utils.model_config import get_client, guarded_llm_call
 
 client = get_client()
+
+
+def safe_llm_content(response) -> str:
+    """Safely extract content from an OpenAI-style chat completion response.
+    Returns the content string, or raises ValueError if content is None/empty.
+    This guards against models (esp. free-tier) returning None content."""
+    content = response.choices[0].message.content
+    if not content:
+        raise ValueError("LLM returned empty/null content")
+    return content
+
 
 load_dotenv()
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
@@ -224,19 +233,17 @@ Return JSON:"""
 
             try:
                 # Use the model name string directly for OpenAI client
-                model_name = "openai/gpt-4o-mini"  # Use a reliable model for extraction
+                model_name = "openai/gpt-oss-20b"  # Use a reliable model for extraction
                 
-                response = client.chat.completions.create(
+                response = guarded_llm_call(
                     model=model_name,
                     messages=[
                         {"role": "system", "content": "You are a financial data extraction expert. Extract data accurately and return valid JSON only."},
                         {"role": "user", "content": extraction_prompt}
                     ],
-                    temperature=0.1,
-                    max_tokens=1000
                 )
                 
-                response_text = response.choices[0].message.content.strip()
+                response_text = safe_llm_content(response).strip()
                 
                 # Parse JSON from response
                 if "```json" in response_text:
@@ -769,18 +776,15 @@ Return ONLY valid JSON, no additional text."""
             print(f"🤖 Asking Perplexity for competitors of {company_name}...")
             
             # Call Perplexity using the client
-            response = client.chat.completions.create(
-                model="openai/gpt-oss-120b",
+            response = guarded_llm_call(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": query}
                 ],
-                temperature=0.1,
-                max_tokens=1000
             )
-            
+
             # Extract the response
-            response_text = response.choices[0].message.content.strip()
+            response_text = safe_llm_content(response).strip()
             
             # Parse JSON from response
             if "```json" in response_text:
@@ -817,6 +821,83 @@ Return ONLY valid JSON, no additional text."""
             return []
 
     
+    @staticmethod
+    def _fetch_ceo_name(company_name: str, stock_symbol: str, yf_info: Dict) -> str:
+        """
+        Fetch the current CEO/MD name via Tavily search + LLM extraction.
+        Falls back to yfinance companyOfficers if web search fails.
+        Returns the CEO name string, or 'N/A' if not found.
+        Thread-safe: no shared mutable state.
+        """
+        import json as json_module
+
+        # Try web search first
+        try:
+            ceo_results, ceo_answer = StockTools._search_with_tavily(
+                f"{company_name} CEO managing director chairman 2024 2025 2026",
+                domain=["moneycontrol.com", "economictimes.com", "screener.in"]
+            )
+
+            all_ceo_content = []
+            if ceo_answer:
+                all_ceo_content.append(ceo_answer)
+            for result in ceo_results[:3]:
+                content = result.get('content', '')
+                if content:
+                    all_ceo_content.append(content)
+
+            if all_ceo_content:
+                combined = "\n\n".join(all_ceo_content)[:4000]
+                ceo_prompt = (
+                    f"Extract the CURRENT CEO, Managing Director, or Chairman name for "
+                    f"{company_name} ({stock_symbol}) from this information.\n\n"
+                    f"Information:\n{combined}\n\n"
+                    f"Return ONLY valid JSON: {{\"ceo_name\": \"Full Name\", \"title\": \"CEO/MD/Chairman\"}}\n"
+                    f"If not found: {{\"ceo_name\": null, \"title\": null}}"
+                )
+
+                response = guarded_llm_call(
+                    model="openai/gpt-oss-20b",
+                    messages=[
+                        {"role": "system", "content": "Extract CEO/MD names accurately. Return only valid JSON."},
+                        {"role": "user", "content": ceo_prompt}
+                    ],
+                    max_tokens=150,
+                )
+
+                text = safe_llm_content(response).strip()
+                # Clean markdown
+                if "```json" in text:
+                    text = text.split("```json")[1].split("```")[0].strip()
+                elif "```" in text:
+                    text = text.split("```")[1].split("```")[0].strip()
+                if not text.startswith('{'):
+                    s, e = text.find('{'), text.rfind('}')
+                    if s != -1 and e != -1:
+                        text = text[s:e+1]
+
+                ceo_data = json_module.loads(text)
+                name = (ceo_data.get('ceo_name') or '').strip()
+                if name and name not in ('null', 'N/A', '') and len(name.split()) >= 2:
+                    print(f"✅ CEO from web: {name}")
+                    return name
+
+        except Exception as e:
+            print(f"⚠️ CEO web search failed: {e}")
+
+        # Fallback: yfinance
+        try:
+            officers = yf_info.get('companyOfficers', [])
+            if officers:
+                yf_ceo = officers[0].get('name', '')
+                if yf_ceo and len(yf_ceo.split()) >= 2:
+                    print(f"✅ CEO from yfinance: {yf_ceo}")
+                    return yf_ceo
+        except Exception:
+            pass
+
+        return 'N/A'
+
     @staticmethod
     def _check_and_backfill_missing_data(company_data: CompanyData, stock_symbol: str) -> CompanyData:
         """
@@ -962,10 +1043,13 @@ Return ONLY valid JSON, no additional text."""
         print(f"\n{'='*60}")
         print(f"🔍 STEP 2: Checking for remaining missing fields")
         print(f"{'='*60}")
-        
-        # Define domains to iterate through
-        search_domains = ["screener.in", "nseindia.com", "bseindia.com"]
-        
+
+        # OPTIMIZATION: Query only 1 domain instead of 3.
+        # Previously iterated ["screener.in", "nseindia.com", "bseindia.com"] sequentially,
+        # costing ~60s (3x Tavily + 3x LLM + 3x competitor lookups).
+        # The first domain captures 80%+ of findable data; the rest is diminishing returns.
+        search_domains = ["screener.in"]
+
         # Initialize OpenAI client
         client = get_client()
 
@@ -1026,36 +1110,120 @@ Return ONLY valid JSON, no additional text."""
             if not missing_fields:
                 print("✅ All fields are populated!")
                 break
-            
+
             print(f"⚠️ Found {len(missing_fields)} missing fields: {', '.join(str(field) for field in missing_fields)}")
-            
+
             # Search for missing data using Tavily
             scalar_fields = [f for f in missing_fields if f != 'competitor_data']
-            
+
             if scalar_fields:
-                # Clean field names for query
-                field_names = [f.split('.')[-1] for f in scalar_fields]
-                search_query = f"{company_data.name} {stock_symbol} {' '.join(field_names)} financial data"
-                print(f"🔎 Searching for missing data on {domain}: {search_query}")
-                
-                try:
-                    search_results, answer = StockTools._search_with_tavily(search_query, domain=[domain])
-                    
-                    # Retry with broader query if no results found - fixes empty content issue
-                    if not search_results and not answer:
-                        print(f"⚠️ No results found on {domain} with specific query. Retrying with broader query...")
-                        fallback_query = f"{company_data.name} {stock_symbol} financial results data"
-                        search_results, answer = StockTools._search_with_tavily(fallback_query, domain=[domain])
-                    
-                    # Combine all search content - safely handle None answer
-                    all_content = (answer if answer else "") + "\n\n"
-                    for result in search_results[:5]:
-                        all_content += f"Title: {result.get('title', '')}\n"
-                        all_content += f"Content: {result.get('content', '')}\n\n"
-                    # print("All content from tavily search:- ", all_content)
-                    if all_content.strip():
-                        # Use LLM to extract missing data
-                        extraction_prompt = f"""Extract the following missing fields for {company_data.name} ({stock_symbol}) from the search results.
+                # Split fields: business/overview fields need general web, financial fields need screener.in
+                business_field_names = {'founded_year', 'main_products', 'revenue_sources', 'growth_segments', 'description'}
+                biz_fields = [f for f in scalar_fields if f.split('.')[-1] in business_field_names]
+                fin_fields = [f for f in scalar_fields if f.split('.')[-1] not in business_field_names]
+
+                # --- Fetch business/overview fields from general web ---
+                if biz_fields:
+                    biz_field_names = [f.split('.')[-1] for f in biz_fields]
+                    biz_query = f"{company_data.name} company overview founded products services revenue segments"
+                    print(f"🔎 Searching for business overview data (general web): {biz_query}")
+                    try:
+                        biz_results, biz_answer = StockTools._search_with_tavily(biz_query)
+                        biz_content = (biz_answer if biz_answer else "") + "\n\n"
+                        for result in biz_results[:5]:
+                            biz_content += f"Title: {result.get('title', '')}\n"
+                            biz_content += f"Content: {result.get('content', '')}\n\n"
+
+                        if biz_content.strip():
+                            biz_prompt = f"""Extract the following fields for {company_data.name} ({stock_symbol}) from the search results.
+
+Missing Fields: {json.dumps(biz_field_names, indent=2)}
+
+Search Results:
+{biz_content[:10000]}
+
+CRITICAL INSTRUCTIONS:
+1. Return ONLY valid JSON - no markdown, no explanations
+2. For founded_year: return a 4-digit number (e.g., 1968) or null
+3. For list fields (main_products, revenue_sources, growth_segments): return arrays of 3-5 strings each
+   - main_products: the company's primary products/services (e.g., ["IT Services", "Consulting", "Cloud Solutions"])
+   - revenue_sources: where the company earns money (e.g., ["IT Services", "BPO", "Digital Services"])
+   - growth_segments: fastest growing business areas (e.g., ["Cloud", "AI/ML", "Cybersecurity"])
+4. If a field cannot be found, use null
+5. Be precise and factual
+
+OUTPUT FORMAT (JSON only):
+{{
+  "field_name": value
+}}"""
+                            print("🤖 Using LLM to extract business overview data...")
+                            biz_response = guarded_llm_call(
+                                messages=[
+                                    {"role": "system", "content": "You are a business data extraction expert. Extract company information and return ONLY valid JSON."},
+                                    {"role": "user", "content": biz_prompt}
+                                ],
+                            )
+                            biz_text = safe_llm_content(biz_response).strip()
+                            if "```json" in biz_text:
+                                biz_text = biz_text.split("```json")[1].split("```")[0].strip()
+                            elif "```" in biz_text:
+                                biz_text = biz_text.split("```")[1].split("```")[0].strip()
+                            try:
+                                biz_data = json.loads(biz_text)
+                                snap_fields_set = set(company_data.snapshot.model_dump().keys())
+                                bus_fields_set = set(company_data.business_overview.model_dump().keys())
+                                for k, v in biz_data.items():
+                                    if v in [None, "null", "N/A", ""]:
+                                        continue
+                                    if k == 'founded_year' and k in snap_fields_set:
+                                        try:
+                                            year = int(v) if isinstance(v, (int, float)) else int(str(v).strip())
+                                            if 1800 <= year <= 2030:
+                                                setattr(company_data.snapshot, k, str(year))
+                                                print(f"✅ Updated snapshot.{k}: {year}")
+                                        except (ValueError, TypeError):
+                                            print(f"⚠️ Could not parse year: {v}")
+                                    elif k in bus_fields_set and isinstance(v, list):
+                                        setattr(company_data.business_overview, k, v)
+                                        print(f"✅ Updated business_overview.{k}: {v}")
+                            except json.JSONDecodeError:
+                                print(f"⚠️ Could not parse business overview LLM response")
+                    except Exception as e:
+                        print(f"⚠️ Business overview search failed: {e}")
+
+                # --- Fetch financial fields from screener.in ---
+                field_names = [f.split('.')[-1] for f in fin_fields] if fin_fields else [f.split('.')[-1] for f in scalar_fields]
+                if not fin_fields and not biz_fields:
+                    field_names = [f.split('.')[-1] for f in scalar_fields]
+
+                if not field_names:
+                    # All scalar fields were business fields already handled above
+                    field_names = []
+
+                if field_names:
+                    search_query = f"{company_data.name} {stock_symbol} {' '.join(field_names)} financial data"
+                    print(f"🔎 Searching for missing data on {domain}: {search_query}")
+                else:
+                    search_query = None
+
+                if search_query:
+                    try:
+                        search_results, answer = StockTools._search_with_tavily(search_query, domain=[domain])
+
+                        # Retry with broader query if no results found
+                        if not search_results and not answer:
+                            print(f"⚠️ No results found on {domain} with specific query. Retrying with broader query...")
+                            fallback_query = f"{company_data.name} {stock_symbol} financial results data"
+                            search_results, answer = StockTools._search_with_tavily(fallback_query, domain=[domain])
+
+                        # Combine all search content - safely handle None answer
+                        all_content = (answer if answer else "") + "\n\n"
+                        for result in search_results[:5]:
+                            all_content += f"Title: {result.get('title', '')}\n"
+                            all_content += f"Content: {result.get('content', '')}\n\n"
+                        if all_content.strip():
+                            # Use LLM to extract missing data
+                            extraction_prompt = f"""Extract the following missing fields for {company_data.name} ({stock_symbol}) from the search results.
 
 Missing Fields: {json.dumps(field_names, indent=2)}
 
@@ -1077,135 +1245,95 @@ OUTPUT FORMAT (JSON only):
   "field_name": value,
   "another_field": value
 }}"""
-                        
-                        print("🤖 Using LLM to extract missing data...")
-                        response = client.chat.completions.create(
-                            model="openai/gpt-oss-120b",  # Free model
-                            messages=[
-                                {"role": "system", "content": "You are a financial data extraction expert. Extract specific company information and return ONLY valid JSON with no additional text."},
-                                {"role": "user", "content": extraction_prompt}
-                            ],
-                            temperature=0.1,
-                            max_tokens=1000
-                        )
-                        
-                        extracted_text = response.choices[0].message.content.strip()
-                        print(extracted_text)
-                        
-                        # Try to parse JSON from the response
-                        if "```json" in extracted_text:
-                            extracted_text = extracted_text.split("```json")[1].split("```")[0].strip()
-                        elif "```" in extracted_text:
-                            extracted_text = extracted_text.split("```")[1].split("```")[0].strip()
-                        
-                        try:
-                            extracted_data = json.loads(extracted_text)
-                            print(f"✅ Successfully extracted fields: {list(extracted_data.keys())}")
-                            
-                            # Update CompanyData with extracted values
-                            snap_fields = company_data.snapshot.model_dump().keys()
-                            bus_fields = company_data.business_overview.model_dump().keys()
-                            fin_fields = company_data.financials.model_dump().keys()
-                            mkt_fields = company_data.market_data.model_dump().keys()
-                            
-                            for k, v in extracted_data.items():
-                                print("key :- " , k)
-                                print("value :- ", v)
-                                if v in [None, "null", "N/A", ""]: continue
-                                
-                                if k in snap_fields:
-                                    # Special handling for founded_year
-                                    if k == 'founded_year':
-                                        try:
-                                            # Convert to integer if it's a valid year
-                                            if isinstance(v, str):
-                                                year = int(v.strip())
-                                                if 1800 <= year <= 2030:  # Reasonable year range
-                                                    setattr(company_data.snapshot, k, year)
-                                                    print(f"✅ Updated snapshot.{k}: {year}")
-                                                else:
-                                                    print(f"⚠️ Invalid year value: {v}")
-                                            elif isinstance(v, (int, float)):
-                                                year = int(v)
-                                                if 1800 <= year <= 2030:
-                                                    setattr(company_data.snapshot, k, year)
-                                                    print(f"✅ Updated snapshot.{k}: {year}")
-                                        except:
-                                            print(f"⚠️ Could not parse year: {v}")
-                                    else:
-                                        setattr(company_data.snapshot, k, v)
-                                        print(f"✅ Updated snapshot.{k}: {v}")
-                                elif k in bus_fields:
-                                    setattr(company_data.business_overview, k, v)
-                                elif k in fin_fields:
-                                    try:
-                                        # Clean and convert numeric values
-                                        val_str = str(v).replace(',', '').replace('₹', '').replace('$', '').strip()
-                                        
-                                        # Handle suffixes
-                                        multiplier = 1.0
-                                        if val_str.lower().endswith('cr'):
-                                            multiplier = 10000000.0
-                                            val_str = val_str.lower().replace('cr', '').strip()
-                                        elif val_str.lower().endswith('l'):
-                                            multiplier = 100000.0
-                                            val_str = val_str.lower().replace('l', '').strip()
-                                        elif val_str.lower().endswith('b'):
-                                            multiplier = 1000000000.0
-                                            val_str = val_str.lower().replace('b', '').strip()
-                                        elif val_str.lower().endswith('m'):
-                                            multiplier = 1000000.0
-                                            val_str = val_str.lower().replace('m', '').strip()
-                                            
-                                        # Extract first valid number if there's extra text
-                                        import re
-                                        number_match = re.search(r'-?\d*\.?\d+', val_str)
-                                        if number_match:
-                                            clean_val = float(number_match.group()) * multiplier
-                                            setattr(company_data.financials, k, clean_val)
-                                            print(f"✅ Updated financials.{k}: {clean_val}")
-                                        else:
-                                            print(f"⚠️ Could not parse numeric value for financials.{k}: {v}")
-                                    except Exception as e:
-                                        print(f"❌ Failed to update financials.{k} with value '{v}': {e}")
-                                elif k in mkt_fields:
-                                    try:
-                                        # Clean and convert numeric values
-                                        val_str = str(v).replace(',', '').replace('₹', '').replace('$', '').strip()
-                                        
-                                        # Handle suffixes
-                                        multiplier = 1.0
-                                        if val_str.lower().endswith('cr'):
-                                            multiplier = 10000000.0
-                                            val_str = val_str.lower().replace('cr', '').strip()
-                                        elif val_str.lower().endswith('l'):
-                                            multiplier = 100000.0
-                                            val_str = val_str.lower().replace('l', '').strip()
-                                        elif val_str.lower().endswith('b'):
-                                            multiplier = 1000000000.0
-                                            val_str = val_str.lower().replace('b', '').strip()
-                                        elif val_str.lower().endswith('m'):
-                                            multiplier = 1000000.0
-                                            val_str = val_str.lower().replace('m', '').strip()
-                                            
-                                        # Extract first valid number if there's extra text
-                                        import re
-                                        number_match = re.search(r'-?\d*\.?\d+', val_str)
-                                        if number_match:
-                                            clean_val = float(number_match.group()) * multiplier
-                                            setattr(company_data.market_data, k, clean_val)
-                                            print(f"✅ Updated market_data.{k}: {clean_val}")
-                                        else:
-                                            print(f"⚠️ Could not parse numeric value for market_data.{k}: {v}")
-                                    except Exception as e:
-                                        print(f"❌ Failed to update market_data.{k} with value '{v}': {e}")
-                        except json.JSONDecodeError:
-                             print("❌ Failed to parse LLM JSON response")
-                except Exception as e:
-                     print(f"❌ Error searching/extracting on {domain}: {e}")
 
-            # Backfill Competitor Data using Perplexity
-            if 'competitor_data' in missing_fields:
+                            print("🤖 Using LLM to extract missing financial data...")
+                            response = guarded_llm_call(
+                                messages=[
+                                    {"role": "system", "content": "You are a financial data extraction expert. Extract specific company information and return ONLY valid JSON with no additional text."},
+                                    {"role": "user", "content": extraction_prompt}
+                                ],
+                            )
+
+                            extracted_text = safe_llm_content(response).strip()
+                            print(extracted_text)
+
+                            # Try to parse JSON from the response
+                            if "```json" in extracted_text:
+                                extracted_text = extracted_text.split("```json")[1].split("```")[0].strip()
+                            elif "```" in extracted_text:
+                                extracted_text = extracted_text.split("```")[1].split("```")[0].strip()
+
+                            try:
+                                extracted_data = json.loads(extracted_text)
+                                print(f"✅ Successfully extracted fields: {list(extracted_data.keys())}")
+
+                                # Update CompanyData with extracted values
+                                snap_keys = company_data.snapshot.model_dump().keys()
+                                bus_keys = company_data.business_overview.model_dump().keys()
+                                fin_keys = company_data.financials.model_dump().keys()
+                                mkt_keys = company_data.market_data.model_dump().keys()
+
+                                for k, v in extracted_data.items():
+                                    if v in [None, "null", "N/A", ""]:
+                                        continue
+
+                                    if k in snap_keys:
+                                        if k == 'founded_year':
+                                            try:
+                                                year = int(v) if isinstance(v, (int, float)) else int(str(v).strip())
+                                                if 1800 <= year <= 2030:
+                                                    setattr(company_data.snapshot, k, str(year))
+                                                    print(f"✅ Updated snapshot.{k}: {year}")
+                                            except (ValueError, TypeError):
+                                                print(f"⚠️ Could not parse year: {v}")
+                                        else:
+                                            setattr(company_data.snapshot, k, v)
+                                            print(f"✅ Updated snapshot.{k}: {v}")
+                                    elif k in bus_keys:
+                                        setattr(company_data.business_overview, k, v)
+                                        print(f"✅ Updated business_overview.{k}: {v}")
+                                    elif k in fin_keys:
+                                        try:
+                                            val_str = str(v).replace(',', '').replace('₹', '').replace('$', '').strip()
+                                            multiplier = 1.0
+                                            for suffix, mult in [('cr', 1e7), ('l', 1e5), ('b', 1e9), ('m', 1e6)]:
+                                                if val_str.lower().endswith(suffix):
+                                                    multiplier = mult
+                                                    val_str = val_str[:-(len(suffix))].strip()
+                                                    break
+                                            import re
+                                            number_match = re.search(r'-?\d*\.?\d+', val_str)
+                                            if number_match:
+                                                clean_val = float(number_match.group()) * multiplier
+                                                setattr(company_data.financials, k, clean_val)
+                                                print(f"✅ Updated financials.{k}: {clean_val}")
+                                        except Exception as e:
+                                            print(f"❌ Failed to update financials.{k}: {e}")
+                                    elif k in mkt_keys:
+                                        try:
+                                            val_str = str(v).replace(',', '').replace('₹', '').replace('$', '').strip()
+                                            multiplier = 1.0
+                                            for suffix, mult in [('cr', 1e7), ('l', 1e5), ('b', 1e9), ('m', 1e6)]:
+                                                if val_str.lower().endswith(suffix):
+                                                    multiplier = mult
+                                                    val_str = val_str[:-(len(suffix))].strip()
+                                                    break
+                                            import re
+                                            number_match = re.search(r'-?\d*\.?\d+', val_str)
+                                            if number_match:
+                                                clean_val = float(number_match.group()) * multiplier
+                                                setattr(company_data.market_data, k, clean_val)
+                                                print(f"✅ Updated market_data.{k}: {clean_val}")
+                                        except Exception as e:
+                                            print(f"❌ Failed to update market_data.{k}: {e}")
+                            except json.JSONDecodeError:
+                                print("❌ Failed to parse LLM JSON response")
+                    except Exception as e:
+                        print(f"❌ Error searching/extracting on {domain}: {e}")
+
+            # Backfill Competitor Data using Perplexity (only if truly empty)
+            existing_non_main = [c for c in (company_data.market_data.competitors or []) if not c.get('is_main_company')]
+            if 'competitor_data' in missing_fields and len(existing_non_main) < 2:
                 print(f"🔎 Searching for competitor data using Perplexity...")
                 try:
                     # Get competitor data dynamically using Perplexity
@@ -1270,10 +1398,13 @@ OUTPUT FORMAT (JSON only):
     @staticmethod
     def _build_screener_competitor_table(peer_data: List[Dict], company_name: str, stock_symbol: str, company_info: Dict) -> List[Dict]:
         """
-        Build competitor comparison table from screener.in peer data with real financial data
+        Build competitor comparison table from screener.in peer data with real financial data.
+
+        OPTIMIZATION: Uses a single batch LLM call to resolve ALL peer tickers at once
+        instead of 1 LLM call per peer (was up to 6 calls, now 1).
         """
         competitors = []
-        
+
         # Add the main company first
         main_company = {
             'name': company_name,
@@ -1288,142 +1419,55 @@ OUTPUT FORMAT (JSON only):
             'is_main_company': True
         }
         competitors.append(main_company)
-        
-        # Extract peer companies from screener.in content
-        peer_companies = StockTools._extract_screener_peers(peer_data)
-        
-        # Use Perplexity to get ticker symbols for peer companies dynamically
-        print(f"🔎 Using Perplexity to find ticker symbols for {len(peer_companies)} peer companies...")
-        
-        # Try to get real financial data for peer companies using Perplexity
-        for peer_name in peer_companies[:5]:  # Limit to 5 peers
+
+        # NOTE: screener.in's peer comparison table is loaded via JavaScript,
+        # so _extract_screener_peers only gets garbage from Tavily text snippets.
+        # Instead, use a single LLM call to find real competitors directly.
+
+        sector = company_info.get('sector', company_info.get('industry', 'general'))
+        print(f"🔎 Finding competitors for {company_name} ({sector}) via LLM...")
+
+        resolved_peers = []  # list of {name, symbol}
+        try:
+            additional = StockTools._get_competitors_with_perplexity(company_name, sector)
+            resolved_peers = [{'name': c.get('name', ''), 'symbol': c.get('symbol', '')} for c in additional]
+        except Exception as e:
+            print(f"⚠️ Competitor discovery failed: {e}")
+
+        if not resolved_peers:
+            return competitors
+
+        # ── Fetch yfinance data for resolved peers ──
+        import yfinance as yf
+        for peer in resolved_peers[:5]:
+            peer_symbol = peer.get('symbol', '')
+            peer_name = peer.get('name', '')
+            if not peer_symbol or peer_symbol == stock_symbol:
+                continue
+            # Skip duplicates
+            if any(c.get('symbol') == peer_symbol for c in competitors):
+                continue
             try:
-                # Use Perplexity to find the ticker symbol for this company
-                perplexity_client = get_client()
-
-                                
-                system_prompt="""You are a financial data expert. Find the exact Yahoo Finance ticker symbol for the given Indian company.
-                    
-Output Format:-
-[
-    {
-        'verified_name': <company name>, 
-        'symbol': <ticker symbol>
-    },
-    ...,
-    {
-        'verified_name': <company name>, 
-        'symbol': <ticker symbol>
-    }
-]
-
-
-CRITICAL REQUIREMENTS:
-1. Return ONLY the exact Yahoo Finance ticker symbol (e.g., RELIANCE.NS, TCS.NS)
-2. Prioritize .NS (NSE) over .BO (BSE) symbols
-3. Return the official full company name as listed on the exchange
-4. Ensure the ticker is currently active and traded"""
-                
-                
-                ticker_response = perplexity_client.chat.completions.create(
-                    model="openai/gpt-oss-120b",
-                    messages = [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"Find the Yahoo Finance ticker symbol for {peer_name}"}
-                    ]
-                )
-                
-                # Extract the content from the response
-                ticker_result = ticker_response.choices[0].message.content.strip()
-                print("in the screener competitor table ticker_result:- ", ticker_result )
-                
-                if "```json" in ticker_result:
-                    ticker_result = ticker_result.replace("```json", "").replace("```", "")
-                elif "```" in ticker_result:
-                    ticker_result = ticker_result.replace("```", "")
-                
-                try:
-                    ticker_data = json.loads(ticker_result)
-                    
-                    if ticker_data and isinstance(ticker_data, dict):
-                        peer_ticker = ticker_data.get('symbol')
-                        verified_name = ticker_data.get('verified_name', peer_name)
-                        
-                        if peer_ticker:
-                            # Fetch financial data from yfinance
-                            import yfinance as yf
-                            peer_ticker_obj = yf.Ticker(peer_ticker)
-                            peer_info = peer_ticker_obj.info
-                            
-                            if peer_info and peer_info.get('symbol'):
-                                competitors.append({
-                                    'name': peer_info.get('longName', verified_name),
-                                    'symbol': peer_ticker,
-                                    'market_cap': peer_info.get('marketCap', 'N/A'),
-                                    'pe_ratio': peer_info.get('trailingPE', 'N/A'),
-                                    'pb_ratio': peer_info.get('priceToBook', 'N/A'),
-                                    'revenue': peer_info.get('totalRevenue', 'N/A'),
-                                    'profit_margin': peer_info.get('profitMargins', 'N/A'),
-                                    'roe': peer_info.get('returnOnEquity', 'N/A'),
-                                    'debt_to_equity': peer_info.get('debtToEquity', 'N/A'),
-                                    'source': 'perplexity_yfinance',
-                                    'is_main_company': False
-                                })
-                                print(f"✅ Found ticker for {peer_name}: {peer_ticker}")
-                            else:
-                                print(f"⚠️ Invalid ticker data for {peer_name}: {peer_ticker}")
-                        else:
-                            print(f"⚠️ No ticker symbol found for {peer_name}")
-                    else:
-                        print(f"⚠️ Invalid JSON response for {peer_name}")
-                        
-                except json.JSONDecodeError as e:
-                    print(f"❌ JSON decode error for {peer_name}: {e}")
-                except Exception as e:
-                    print(f"❌ Error processing {peer_name}: {e}")
-                    
+                peer_ticker_obj = yf.Ticker(peer_symbol)
+                peer_info = peer_ticker_obj.info
+                if peer_info and peer_info.get('symbol'):
+                    competitors.append({
+                        'name': peer_info.get('longName', peer_name),
+                        'symbol': peer_symbol,
+                        'market_cap': peer_info.get('marketCap', 'N/A'),
+                        'pe_ratio': peer_info.get('trailingPE', 'N/A'),
+                        'pb_ratio': peer_info.get('priceToBook', 'N/A'),
+                        'revenue': peer_info.get('totalRevenue', 'N/A'),
+                        'profit_margin': peer_info.get('profitMargins', 'N/A'),
+                        'roe': peer_info.get('returnOnEquity', 'N/A'),
+                        'debt_to_equity': peer_info.get('debtToEquity', 'N/A'),
+                        'source': 'batch_llm_yfinance',
+                        'is_main_company': False
+                    })
+                    print(f"✅ Added competitor: {peer_name} ({peer_symbol})")
             except Exception as e:
-                print(f"❌ Error processing {peer_name}: {e}")
-        
-        # If we still don't have enough peers, use Perplexity to find more competitors
-        if len(competitors) < 4:  # Main company + at least 3 peers
-            print(f"🔎 Need more competitors, using Perplexity to find additional ones...")
-            sector = company_info.get('sector', 'finance')
-            additional_competitors = StockTools._get_competitors_with_perplexity(company_name, sector)
-            
-            # Add the additional competitors from Perplexity
-            import yfinance as yf
-            for comp_data in additional_competitors:
-                if len(competitors) >= 6:  # Main + 5 peers max
-                    break
-                
-                comp_name = comp_data.get('name')
-                comp_symbol = comp_data.get('symbol')
-                
-                # Check if already added
-                if not any(comp.get('symbol') == comp_symbol for comp in competitors):
-                    try:
-                        peer_ticker_obj = yf.Ticker(comp_symbol)
-                        peer_info = peer_ticker_obj.info
-                        
-                        if peer_info and peer_info.get('symbol'):
-                            competitors.append({
-                                'name': peer_info.get('longName', comp_name),
-                                'symbol': comp_symbol,
-                                'market_cap': peer_info.get('marketCap', 'N/A'),
-                                'pe_ratio': peer_info.get('trailingPE', 'N/A'),
-                                'pb_ratio': peer_info.get('priceToBook', 'N/A'),
-                                'revenue': peer_info.get('totalRevenue', 'N/A'),
-                                'profit_margin': peer_info.get('profitMargins', 'N/A'),
-                                'roe': peer_info.get('returnOnEquity', 'N/A'),
-                                'debt_to_equity': peer_info.get('debtToEquity', 'N/A'),
-                                'source': 'perplexity_fallback',
-                                'is_main_company': False
-                            })
-                            print(f"✅ Added fallback competitor: {comp_name} ({comp_symbol})")
-                    except Exception as e:
-                        print(f"❌ Error adding fallback competitor {comp_name}: {e}")
-        
+                print(f"⚠️ Could not fetch data for {peer_name} ({peer_symbol}): {e}")
+
         return competitors
 
     
@@ -1503,23 +1547,62 @@ CRITICAL REQUIREMENTS:
                 # Try to find if stock was merged or renamed
                 company_name = stock_symbol.replace('.NS', '').replace('.BO', '')
                 search_results, answer = StockTools._search_with_tavily(
-                    f"{company_name} stock merged delisted renamed ticker symbol India NSE BSE"
+                    f"{company_name} stock merged delisted renamed new ticker symbol India NSE BSE 2025 2026"
                 )
-                
+
+                # Try to extract a new ticker symbol from the Tavily answer and auto-retry
+                if answer:
+                    import re as _re
+                    # Look for patterns like "ticker changed to TMPV", "renamed to XYZ", "new symbol is ABC"
+                    new_ticker_patterns = [
+                        r'ticker[^.]*?changed to\s+([A-Z]{2,20})',
+                        r'renamed to\s+([A-Z]{2,20})',
+                        r'new ticker[^.]*?(?:is|symbol)\s+([A-Z]{2,20})',
+                        r'now trades? (?:as|under)\s+([A-Z]{2,20})',
+                        r'symbol changed to\s+([A-Z]{2,20})',
+                        r'listed (?:as|under)\s+([A-Z]{2,20})',
+                        r'new symbol\s+([A-Z]{2,20})',
+                    ]
+
+                    new_ticker = None
+                    for pattern in new_ticker_patterns:
+                        match = _re.search(pattern, answer, _re.IGNORECASE)
+                        if match:
+                            candidate = match.group(1).upper()
+                            # Skip if it's the same as the original
+                            if candidate != company_name.upper():
+                                new_ticker = candidate
+                                break
+
+                    if new_ticker:
+                        # Try the new ticker on yfinance
+                        for suffix in ['.NS', '.BO']:
+                            try_new = f"{new_ticker}{suffix}"
+                            print(f"🔄 Stock renamed/demerged. Trying new ticker: {try_new}")
+                            try:
+                                new_yf_ticker = yf.Ticker(try_new)
+                                new_info = new_yf_ticker.info
+                                if new_info and 'symbol' in new_info and new_info.get('symbol'):
+                                    print(f"✅ Found renamed stock: {try_new}")
+                                    # Recursively call with the correct new symbol
+                                    return StockTools.get_realtime_data(try_new)
+                            except Exception:
+                                continue
+
                 error_msg = f"❌ **Stock Not Found: {stock_symbol}**\n\n"
                 error_msg += f"The ticker symbol **{stock_symbol}** is not available on Yahoo Finance. This could mean:\n\n"
                 error_msg += "• The stock has been **delisted**\n"
                 error_msg += "• The stock has been **merged** with another company\n"
                 error_msg += "• The ticker symbol is **incorrect**\n\n"
-                
+
                 if answer:
                     error_msg += f"**Latest Information:**\n{answer}\n\n"
-                
+
                 error_msg += "**What you can do:**\n"
                 error_msg += "• Try searching for the company name instead of the ticker\n"
                 error_msg += "• Check if the company has been merged with another entity\n"
                 error_msg += "• Verify the correct ticker symbol from screener.in or moneycontrol.com\n"
-                
+
                 raise Exception(error_msg)
             
             # Log the info request
@@ -1712,102 +1795,62 @@ CRITICAL REQUIREMENTS:
             gross_margin=info.get('grossMargins')
         )
         
-        # Step 8: Build competitor comparison from screener.in data
-        competitors_data = []
-        
-        # Check if we have peer comparison data from screener.in
-        if web_insights.get('peer_comparison'):
-            competitors_data = StockTools._build_screener_competitor_table(
-                web_insights['peer_comparison'], 
-                company_name, 
-                stock_symbol,
-                info
+        # ── THREADING: Launch competitor + screener + CEO in parallel ──
+        # These 3 tasks are independent and I/O-bound (network waits).
+        # Running them concurrently saves ~15-20s vs sequential execution.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        print(f"\n⚡ Launching parallel tasks: competitors + screener + CEO...")
+
+        def _task_competitors():
+            """Resolve competitors via LLM + yfinance."""
+            return StockTools._build_screener_competitor_table(
+                web_insights.get('peer_comparison', []),
+                company_name, stock_symbol, info
             )
-        
-        # Fallback: Try to get basic competitor info if no screener data
-        if not competitors_data and web_insights['competitors']:
-            competitor_symbols = web_insights['competitors'][:5]  # Top 5 competitors
-            
-            # Map common company names to their likely ticker symbols
-            company_ticker_map = {
-                'tcs': 'TCS.NS', 'tata consultancy': 'TCS.NS', 'tata consultancy services': 'TCS.NS',
-                'wipro': 'WIPRO.NS', 'wipro limited': 'WIPRO.NS',
-                'hcl technologies': 'HCLTECH.NS', 'hcl tech': 'HCLTECH.NS', 'hcl': 'HCLTECH.NS',
-                'tech mahindra': 'TECHM.NS', 'tech mahindra limited': 'TECHM.NS',
-                'infosys': 'INFY.NS', 'reliance': 'RELIANCE.NS', 'kotak': 'KOTAKBANK.NS',
-                'hdfc': 'HDFCBANK.NS', 'icici': 'ICICIBANK.NS', 'axis': 'AXISBANK.NS',
-                'sbi': 'SBIN.NS', 'bajaj finance': 'BAJFINANCE.NS', 'itc': 'ITC.NS', 
-                'hindustan unilever': 'HUL.NS',
-                'oil india': 'OIL.NS', 'hindustan petroleum': 'HINDPETRO.NS', 'bharat petroleum': 'BPCL.NS',
-                'gail': 'GAIL.NS', 'mahanagar gas': 'MGL.NS', 'petronet': 'PETRONET.NS',
-                'zomato': 'ZOMATO.NS', 'paytm': 'PAYTM.NS', 'nykaa': 'NYKAA.NS',
-                'tata motors': 'TATAMOTORS.NS', 'maruti': 'MARUTI.NS', 'm&m': 'M&M.NS',
-                'sun pharma': 'SUNPHARMA.NS', 'asian paints': 'ASIANPAINT.NS',
-                'titan': 'TITAN.NS', 'bharti airtel': 'BHARTIARTL.NS'
-            }
-            
-            for comp_name in competitor_symbols:
-                try:
-                    ticker = None
-                    comp_name_lower = comp_name.lower().strip()
-                    
-                    # 1. Check direct map
-                    if comp_name_lower in company_ticker_map:
-                        ticker = company_ticker_map[comp_name_lower]
-                    else:
-                        # 2. Partial match in map
-                        for key, val in company_ticker_map.items():
-                            if key in comp_name_lower or comp_name_lower in key:
-                                ticker = val
-                                break
-                    
-                    # 3. Heuristics if not found
-                    if not ticker:
-                        # Try adding .NS to cleaned name
-                        clean_name = comp_name_lower.replace('limited', '').replace('ltd', '').replace('india', '').strip()
-                        ticker = f"{clean_name.upper().replace(' ', '')}.NS"
-                    
-                    # Try to find ticker symbol for competitor
-                    comp_ticker = yf.Ticker(ticker)
-                    
-                    # Suppress errors for this check and try getting info
-                    try:
-                        comp_info = comp_ticker.info
-                        # Check if we got valid data (sometimes yf returns empty info without error)
-                        if not comp_info or 'symbol' not in comp_info:
-                            # Try without .NS if we added it
-                            if ticker.endswith('.NS'):
-                                comp_ticker = yf.Ticker(ticker.replace('.NS', ''))
-                                comp_info = comp_ticker.info
-                    except:
-                        # If failed, try searching blindly with original name as fallback
-                        comp_ticker = yf.Ticker(comp_name)
-                        comp_info = comp_ticker.info
 
-                    if comp_info and comp_info.get('symbol'):
-                        competitors_data.append({
-                            'name': comp_info.get('longName', comp_name),
-                            'symbol': comp_info.get('symbol'),
-                            'revenue': comp_info.get('totalRevenue'),
-                            'market_cap': comp_info.get('marketCap'),
-                            'pe_ratio': comp_info.get('trailingPE'),
-                            'profit_margin': comp_info.get('profitMargins'),
-                            'source': 'yfinance'
-                        })
-                    else:
-                         raise Exception("No symbol found")
+        def _task_screener():
+            """Scrape screener.in financial data for Indian stocks."""
+            is_indian = stock_symbol.endswith('.NS') or stock_symbol.endswith('.BO')
+            if not is_indian:
+                return None
+            try:
+                from utils.screener_scraper import get_screener_financial_data
+                return get_screener_financial_data(stock_symbol)
+            except Exception as e:
+                print(f"⚠️ Screener thread error: {e}")
+                return None
 
-                except Exception:
-                    # If yfinance fails, add basic info from screener.in name only
-                    competitors_data.append({
-                        'name': comp_name,
-                        'symbol': 'N/A',
-                        'revenue': 'N/A',
-                        'market_cap': 'N/A',
-                        'pe_ratio': 'N/A',
-                        'profit_margin': 'N/A',
-                        'source': 'screener.in'
-                    })
+        def _task_ceo():
+            """Fetch CEO name via Tavily + LLM."""
+            return StockTools._fetch_ceo_name(company_name, stock_symbol, info)
+
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="data") as pool:
+            fut_competitors = pool.submit(_task_competitors)
+            fut_screener = pool.submit(_task_screener)
+            fut_ceo = pool.submit(_task_ceo)
+
+        # Collect results (all threads are done after exiting the 'with' block)
+        try:
+            competitors_data = fut_competitors.result(timeout=120)
+        except Exception as e:
+            print(f"⚠️ Competitor thread failed: {e}")
+            competitors_data = []
+
+        try:
+            _parallel_screener_data = fut_screener.result(timeout=30)
+        except Exception as e:
+            print(f"⚠️ Screener thread failed: {e}")
+            _parallel_screener_data = None
+
+        try:
+            _parallel_ceo_name = fut_ceo.result(timeout=60)
+        except Exception as e:
+            print(f"⚠️ CEO thread failed: {e}")
+            _parallel_ceo_name = 'N/A'
+
+        print(f"✅ Parallel tasks complete: {len(competitors_data)} competitors, "
+              f"screener={'OK' if _parallel_screener_data else 'N/A'}, CEO={_parallel_ceo_name[:30]}")
         
         # Calculate overall high and low from price history
         overall_high = None
@@ -1863,10 +1906,10 @@ CRITICAL REQUIREMENTS:
             avg_volume=info.get('averageVolume'),
             beta=info.get('beta'),
             
-            # Holdings
+            # Holdings (DII comes from screener.in via _dii_holding, not yfinance)
             promoter_holding=info.get('heldPercentInsiders'),
             fii_holding=info.get('heldPercentInstitutions'),
-            dii_holding=None,  # Not available in yfinance
+            dii_holding=info.get('_dii_holding'),
             
             # Price History
             price_history=price_history,
@@ -1989,193 +2032,37 @@ CRITICAL REQUIREMENTS:
             announcements=announcements
         )
         
-        # Step 13.5: ALWAYS fetch PE/PB and CEO from screener.in for Indian stocks (more accurate than yfinance)
+        # Step 13.5 + 13.6: Apply parallel results (screener + CEO — already fetched above)
         is_indian_stock = stock_symbol.endswith('.NS') or stock_symbol.endswith('.BO')
-        
-        if is_indian_stock:
-            print(f"\n🇮🇳 Indian stock detected - fetching accurate data from screener.in...")
-            try:
-                from utils.screener_scraper import get_screener_financial_data
-                
-                screener_data = get_screener_financial_data(stock_symbol)
-                
-                if screener_data and screener_data.get('success'):
-                    print(f"✅ Screener.in data retrieved successfully!")
-                    
-                    # ALWAYS override PE ratio from screener.in (more accurate)
-                    if screener_data.get('pe_ratio') is not None:
-                        old_pe = info.get('trailingPE')
-                        info['trailingPE'] = screener_data['pe_ratio']
-                        print(f"   ✓ PE Ratio: {old_pe} → {screener_data['pe_ratio']} (from screener.in)")
-                    
-                    # ALWAYS override PB ratio from screener.in
-                    if screener_data.get('book_value') is not None and screener_data.get('current_price') is not None:
-                        old_pb = info.get('priceToBook')
-                        pb_ratio = screener_data['current_price'] / screener_data['book_value'] if screener_data['book_value'] > 0 else None
-                        if pb_ratio:
-                            info['priceToBook'] = pb_ratio
-                            print(f"   ✓ PB Ratio: {old_pb} → {pb_ratio:.2f} (from screener.in)")
-                    
-                    # Override other key metrics
-                    if screener_data.get('debt_to_equity') is not None:
-                        info['debtToEquity'] = screener_data['debt_to_equity']
-                        print(f"   ✓ Debt to Equity: {screener_data['debt_to_equity']}")
-                    
-                    if screener_data.get('promoter_holding') is not None:
-                        info['heldPercentInsiders'] = screener_data['promoter_holding'] / 100
-                        print(f"   ✓ Promoter Holding: {screener_data['promoter_holding']}%")
-                    
-                    if screener_data.get('fii_holding') is not None:
-                        info['heldPercentInstitutions'] = screener_data['fii_holding'] / 100
-                        print(f"   ✓ FII Holding: {screener_data['fii_holding']}%")
-                    
-                    print(f"✅ Key metrics updated from screener.in")
-                    
-                else:
-                    print(f"⚠️ Screener.in data not available, using yfinance")
-                    
-            except Exception as e:
-                print(f"⚠️ Error fetching from screener.in: {e}")
-        
-        # Step 13.6: Fetch CEO from web search (yfinance CEO is often outdated)
-        print(f"\n👤 Fetching current CEO information from web...")
-        ceo_found = False
-        
-        try:
-            # Try multiple search queries for better results
-            ceo_queries = [
-                f"{company_name} CEO managing director 2024 2025 2026",
-                f"{company_name} current CEO chairman",
-                f"{stock_symbol} company CEO managing director"
-            ]
-            
-            all_ceo_content = []
-            
-            for query in ceo_queries:
-                try:
-                    ceo_results, ceo_answer = StockTools._search_with_tavily(
-                        query,
-                        domain=["moneycontrol.com", "economictimes.com", "bseindia.com", "nseindia.com", "screener.in"]
-                    )
-                    
-                    if ceo_answer:
-                        all_ceo_content.append(ceo_answer)
-                    
-                    # Also add content from results
-                    for result in ceo_results[:3]:
-                        content = result.get('content', '')
-                        if content:
-                            all_ceo_content.append(content)
-                    
-                    if len(all_ceo_content) >= 3:
-                        break  # Got enough content
-                        
-                except Exception as e:
-                    print(f"⚠️ Search query failed: {e}")
-                    continue
-            
-            if all_ceo_content:
-                # Combine all content
-                combined_ceo_content = "\n\n".join(all_ceo_content)[:4000]
-                
-                # Extract CEO name using LLM
-                import json as json_module
-                
-                ceo_prompt = f"""Extract the CURRENT CEO, Managing Director, or Chairman name for {company_name} ({stock_symbol}) from the following information.
 
-Information:
-{combined_ceo_content}
+        if is_indian_stock and _parallel_screener_data and _parallel_screener_data.get('success'):
+            screener_data = _parallel_screener_data
+            print(f"✅ Applying screener.in data (from parallel fetch)...")
+            if screener_data.get('pe_ratio') is not None:
+                info['trailingPE'] = screener_data['pe_ratio']
+                print(f"   ✓ PE Ratio: {screener_data['pe_ratio']}")
+            if screener_data.get('book_value') and screener_data.get('current_price'):
+                pb = screener_data['current_price'] / screener_data['book_value'] if screener_data['book_value'] > 0 else None
+                if pb:
+                    info['priceToBook'] = pb
+                    print(f"   ✓ PB Ratio: {pb:.2f}")
+            if screener_data.get('debt_to_equity') is not None:
+                info['debtToEquity'] = screener_data['debt_to_equity']
+            if screener_data.get('promoter_holding') is not None:
+                info['heldPercentInsiders'] = screener_data['promoter_holding'] / 100
+                print(f"   ✓ Promoter Holding: {screener_data['promoter_holding']}%")
+            if screener_data.get('fii_holding') is not None:
+                info['heldPercentInstitutions'] = screener_data['fii_holding'] / 100
+                print(f"   ✓ FII Holding: {screener_data['fii_holding']}%")
+            # Store DII for later use (yfinance has no DII field)
+            if screener_data.get('dii_holding') is not None:
+                info['_dii_holding'] = screener_data['dii_holding']
+                print(f"   ✓ DII Holding: {screener_data['dii_holding']}%")
 
-Look for:
-- CEO (Chief Executive Officer)
-- Managing Director (MD)
-- Chairman & Managing Director
-- Executive Chairman
-
-Return ONLY the person's full name in this JSON format:
-{{"ceo_name": "Full Name", "title": "CEO/MD/Chairman"}}
-
-If multiple people are mentioned, return the CEO or Managing Director (not independent directors or board members).
-If not found, return: {{"ceo_name": null, "title": null}}
-
-IMPORTANT: Return ONLY valid JSON, no explanations.
-
-Return JSON:"""
-                
-                try:
-                    model_name = "openai/gpt-4o-mini"
-                    response = client.chat.completions.create(
-                        model=model_name,
-                        messages=[
-                            {"role": "system", "content": "You are a data extraction expert. Extract CEO/MD names accurately from corporate information. Return only valid JSON."},
-                            {"role": "user", "content": ceo_prompt}
-                        ],
-                        temperature=0.1,
-                        max_tokens=150
-                    )
-                    
-                    response_text = response.choices[0].message.content.strip()
-                    
-                    # Clean up response
-                    if "```json" in response_text:
-                        response_text = response_text.split("```json")[1].split("```")[0].strip()
-                    elif "```" in response_text:
-                        response_text = response_text.split("```")[1].split("```")[0].strip()
-                    
-                    # Remove any non-JSON text
-                    if not response_text.startswith('{'):
-                        # Find the first { and last }
-                        start = response_text.find('{')
-                        end = response_text.rfind('}')
-                        if start != -1 and end != -1:
-                            response_text = response_text[start:end+1]
-                    
-                    ceo_data = json_module.loads(response_text)
-                    
-                    if ceo_data.get('ceo_name') and ceo_data['ceo_name'] not in [None, 'null', 'N/A', '']:
-                        ceo_name = ceo_data['ceo_name'].strip()
-                        title = ceo_data.get('title', 'CEO')
-                        
-                        # Validate CEO name (should have at least 2 words)
-                        if len(ceo_name.split()) >= 2:
-                            snapshot.ceo = ceo_name
-                            ceo_found = True
-                            print(f"✅ CEO updated: {snapshot.ceo} ({title}) - from web search")
-                        else:
-                            print(f"⚠️ CEO name too short: '{ceo_name}' - might be invalid")
-                    else:
-                        print(f"⚠️ CEO not found in web search results")
-                        
-                except json_module.JSONDecodeError as e:
-                    print(f"⚠️ Error parsing CEO JSON: {e}")
-                    print(f"   Response was: {response_text[:200]}")
-                except Exception as e:
-                    print(f"⚠️ Error extracting CEO with LLM: {e}")
-                    import traceback
-                    traceback.print_exc()
-            else:
-                print(f"⚠️ No CEO information found in web search")
-                
-        except Exception as e:
-            print(f"⚠️ Error fetching CEO from web: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # Fallback: Try yfinance CEO if web search failed
-        if not ceo_found:
-            print(f"\n🔄 Trying yfinance CEO as fallback...")
-            try:
-                if info.get('companyOfficers') and len(info.get('companyOfficers', [])) > 0:
-                    yf_ceo = info.get('companyOfficers')[0].get('name', 'N/A')
-                    if yf_ceo and yf_ceo != 'N/A' and len(yf_ceo.split()) >= 2:
-                        snapshot.ceo = yf_ceo
-                        print(f"✅ CEO from yfinance: {snapshot.ceo} (may be outdated)")
-                    else:
-                        print(f"⚠️ No valid CEO in yfinance either")
-                else:
-                    print(f"⚠️ No company officers in yfinance")
-            except Exception as e:
-                print(f"⚠️ Error getting yfinance CEO: {e}")
+        # Apply CEO result from parallel fetch
+        if _parallel_ceo_name and _parallel_ceo_name != 'N/A':
+            snapshot.ceo = _parallel_ceo_name
+            print(f"✅ CEO: {snapshot.ceo} (from parallel fetch)")
         
         # Step 13.7: Validate data quality and add warnings
         print(f"\n🔍 Validating data quality for {company_name}...")
@@ -2832,16 +2719,10 @@ Return JSON:"""
         
         news_section = "\n".join(news_lines) 
         
-        # 9. EXPERT OPINION - Generate using latest news and current data
-        expert_opinion_section = "👨‍💼 **EXPERT OPINION**\n"
-        
-        try:
-            # Generate expert opinion using Tavily + LLM
-            expert_opinion_text = StockTools.generate_expert_opinion(company_data)
-            expert_opinion_section += expert_opinion_text + "\n\n"
-        except Exception as e:
-            print(f"Warning: Could not generate expert opinion: {e}")
-            expert_opinion_section += "Expert analysis temporarily unavailable.\n\n"
+        # 9. EXPERT OPINION placeholder — actual generation moved to analyze_stock_request
+        # OPTIMIZATION: Removed hidden Tavily + LLM call (~20s) from this formatting function.
+        # Expert opinion is now generated separately and injected by the caller.
+        expert_opinion_section = ""
         
         # Combine all sections with proper spacing - ensure each section is properly separated
         full_report = f"""📊 **COMPREHENSIVE STOCK ANALYSIS** - *{company_data.name}*
@@ -2850,7 +2731,7 @@ Return JSON:"""
 
 {business_section.rstrip()}
 
-{financial_section.rstrip()}{data_quality_section}
+{financial_section.rstrip()}
 
 {market_section.rstrip()}
 
@@ -2932,6 +2813,7 @@ Return JSON:"""
             news_summary = "\n".join([f"• {news}" for news in latest_news]) if latest_news else "No recent news available"
             
             
+            from utils.model_config import get_model
             model = get_model()
             
             # Create prompt for expert opinion
@@ -2964,17 +2846,16 @@ Write in a professional, balanced tone. Be specific with data points. Do NOT use
 Do NOT start with "Expert Opinion:" or any heading - just provide the analysis directly."""
 
             # Generate expert opinion using LLM
-            completion = client.chat.completions.create(
-                model="openai/gpt-oss-120b",  # Free model
+            completion = guarded_llm_call(
                 messages=[
                     {"role": "system", "content": "You are a professional financial analyst providing expert stock analysis."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
-                max_tokens=4000
+                max_tokens=4000,
             )
             
-            expert_opinion = completion.choices[0].message.content.strip()
+            expert_opinion = safe_llm_content(completion).strip()
             
             return expert_opinion
             
@@ -3000,19 +2881,17 @@ Do NOT start with "Expert Opinion:" or any heading - just provide the analysis d
             
             print(f"🤖 Generating Shark Tank pitch using LLM...")
             
-            response = client.chat.completions.create(
-                model="openai/gpt-oss-120b",  # Free model
+            response = guarded_llm_call(
                 messages=[
                     {"role": "system", "content": "You are a CEO/CFO presenting to Shark Tank investors. Generate a VERY CONCISE pitch (MAXIMUM 3000 characters total). Focus on the most critical points only. Write in first person as the company, speaking directly to the Sharks. Be brief and impactful - every word must count. NO structural elements, numbered points, or section headers."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.7,  # Slightly creative but consistent
-                max_tokens=900,  # Further reduced to generate ~4000-5000 character pitch (including formatting)
-                timeout=30.0      # 30 second timeout to prevent hanging
+                temperature=0.7,
+                max_tokens=900,
             )
             
             # Extract the generated pitch
-            generated_pitch = response.choices[0].message.content.strip()
+            generated_pitch = safe_llm_content(response).strip()
             
             print(f"✅ Successfully generated Shark Tank pitch ({len(generated_pitch)} characters)")
             

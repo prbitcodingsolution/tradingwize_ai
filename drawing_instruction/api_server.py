@@ -586,6 +586,39 @@ HTML_TEMPLATE = """
 """
 
 
+@app.route('/api/trade-ideas/<symbol>', methods=['GET'])
+def get_trade_ideas(symbol):
+    """
+    Fetch top trade ideas from TradingView for a given stock symbol.
+
+    GET /api/trade-ideas/TCS
+    GET /api/trade-ideas/RELIANCE?exchange=NSE&max_ideas=9
+    """
+    exchange = request.args.get('exchange', 'NSE')
+    max_ideas = int(request.args.get('max_ideas', 9))
+
+    try:
+        from utils.tradingview_ideas_scraper import scrape_trade_ideas
+        result = scrape_trade_ideas(symbol, exchange=exchange, max_ideas=max_ideas)
+        return jsonify(result)
+    except ImportError:
+        # If running as module, adjust import path
+        import sys, os
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from utils.tradingview_ideas_scraper import scrape_trade_ideas
+        result = scrape_trade_ideas(symbol, exchange=exchange, max_ideas=max_ideas)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error fetching trade ideas for {symbol}: {e}")
+        return jsonify({
+            "symbol": symbol,
+            "exchange": exchange,
+            "ideas": [],
+            "count": 0,
+            "error": str(e)
+        }), 500
+
+
 if __name__ == '__main__':
     print("\n" + "="*70)
     print("🚀 Starting Auto Drawing Generator API Server")
@@ -596,6 +629,7 @@ if __name__ == '__main__':
     print("  POST /api/zones       - Generate zones only")
     print("  POST /api/patterns    - Generate patterns only")
     print("  POST /api/indicators  - Generate indicators only")
+    print("  GET  /api/trade-ideas/<symbol> - Fetch TradingView trade ideas")
     print("\n" + "="*70 + "\n")
     
     app.run(host='0.0.0.0', port=5001, debug=False)

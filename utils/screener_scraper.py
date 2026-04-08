@@ -336,6 +336,7 @@ def scrape_screener_financials(stock_symbol: str) -> Dict[str, Any]:
         # Parse shareholding pattern
         print("\n👥 Parsing shareholding pattern...")
         shareholding_section = soup.find('section', {'id': 'shareholding'})
+        _public_holding = None  # track Public % for DII calculation fallback
         if shareholding_section:
             table = shareholding_section.find('table')
             if table:
@@ -348,28 +349,63 @@ def scrape_screener_financials(stock_symbol: str) -> Dict[str, Any]:
                             # First cell has the category name
                             category_cell = cells[0]
                             category_text = category_cell.get_text(strip=True)
-                            
+
                             # Last cell has the latest value
                             latest_value = cells[-1].get_text(strip=True)
-                            
+
                             # Map shareholding categories
+                            # NOTE: use `is not None` instead of truthy check
+                            # because 0.00% is a valid holding value (e.g. FII=0%)
                             if 'Promoter' in category_text and 'promoter_holding' not in data:
                                 parsed = parse_number(latest_value)
-                                if parsed:
+                                if parsed is not None:
                                     data['promoter_holding'] = parsed
                                     print(f"  ✓ Promoter Holding: {latest_value}")
-                            
+
                             elif 'FII' in category_text and 'fii_holding' not in data:
                                 parsed = parse_number(latest_value)
-                                if parsed:
+                                if parsed is not None:
                                     data['fii_holding'] = parsed
                                     print(f"  ✓ FII Holding: {latest_value}")
-                            
+
                             elif 'DII' in category_text and 'dii_holding' not in data:
                                 parsed = parse_number(latest_value)
-                                if parsed:
+                                if parsed is not None:
                                     data['dii_holding'] = parsed
                                     print(f"  ✓ DII Holding: {latest_value}")
+
+                            elif 'Public' in category_text:
+                                parsed = parse_number(latest_value)
+                                if parsed is not None:
+                                    _public_holding = parsed
+
+                            elif 'Government' in category_text:
+                                # Some stocks have Government holding separately
+                                parsed = parse_number(latest_value)
+                                if parsed is not None:
+                                    data.setdefault('govt_holding', 0)
+                                    data['govt_holding'] = parsed
+
+        # ── FALLBACK: Calculate missing DII from other holdings ──
+        # Screener.in sometimes doesn't show a DII row (micro-caps, small-caps).
+        # Formula: DII ≈ 100 - Promoter - FII - Public - Government
+        if 'dii_holding' not in data and _public_holding is not None:
+            promoter = data.get('promoter_holding', 0)
+            fii = data.get('fii_holding', 0)
+            govt = data.get('govt_holding', 0)
+            others = data.get('others_holding', 0)
+            calculated_dii = round(100.0 - promoter - fii - _public_holding - govt - others, 2)
+            if calculated_dii >= 0:
+                data['dii_holding'] = calculated_dii
+                print(f"  ✓ DII Holding: {calculated_dii}% (calculated: 100 - {promoter} - {fii} - {_public_holding} - {govt})")
+            else:
+                data['dii_holding'] = 0.0
+                print(f"  ✓ DII Holding: 0.00% (no DII category found)")
+
+        # Ensure FII is always set (even as 0) if we have any shareholding data
+        if 'promoter_holding' in data and 'fii_holding' not in data:
+            data['fii_holding'] = 0.0
+            print(f"  ✓ FII Holding: 0.00% (no FII category found)")
         
         # Try to get additional metrics from the analysis section
         print("\n🔬 Parsing analysis section...")
@@ -424,27 +460,50 @@ def scrape_screener_financials(stock_symbol: str) -> Dict[str, Any]:
         return {"success": False, "error": str(e)}
 
 
+# Thread-safe in-memory cache for multi-user Streamlit deployments.
+# Protected by a lock so concurrent users don't corrupt the dict.
+import threading
+
+_screener_cache: Dict[str, Dict] = {}
+_screener_lock = threading.Lock()
+
+
 def get_screener_financial_data(stock_symbol: str) -> Optional[Dict[str, Any]]:
     """
-    Main function to get financial data from screener.in
-    
-    Args:
-        stock_symbol: Stock symbol (e.g., 'TATASTEEL.NS', 'RELIANCE')
-    
-    Returns:
-        Dict with financial data or None if failed
+    Main function to get financial data from screener.in (thread-safe cache).
     """
-    # Clean the symbol
     clean_symbol = stock_symbol.replace('.NS', '').replace('.BO', '').upper()
-    
-    # Scrape the data
+
+    # Thread-safe read
+    with _screener_lock:
+        if clean_symbol in _screener_cache:
+            cached = _screener_cache[clean_symbol]
+            if cached.get('success'):
+                print(f"⚡ Screener.in cache hit for {clean_symbol}")
+                return cached
+
+    # Scrape outside the lock (I/O-bound — don't block other threads)
     data = scrape_screener_financials(clean_symbol)
-    
+
+    # Thread-safe write
+    with _screener_lock:
+        _screener_cache[clean_symbol] = data
+
     if data.get('success'):
         return data
     else:
         print(f"❌ Failed to get data from screener.in: {data.get('error')}")
         return None
+
+
+def clear_screener_cache(stock_symbol: str = None):
+    """Clear the screener cache. If symbol is None, clear all."""
+    with _screener_lock:
+        if stock_symbol:
+            clean = stock_symbol.replace('.NS', '').replace('.BO', '').upper()
+            _screener_cache.pop(clean, None)
+        else:
+            _screener_cache.clear()
 
 
 # Test the scraper

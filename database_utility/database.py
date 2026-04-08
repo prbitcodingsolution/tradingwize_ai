@@ -182,6 +182,44 @@ class StockDatabase:
             print(f"❌ Failed to retrieve analysis: {e}")
             return None
     
+    def get_cached_analysis(self, stock_symbol: str, max_age_hours: int = 6) -> Optional[Dict[str, Any]]:
+        """
+        Return a recent analysis if it exists and is fresh enough.
+        Used to serve instant responses when another user already analyzed
+        the same stock recently.
+
+        Args:
+            stock_symbol: Ticker (e.g. 'RELIANCE.NS')
+            max_age_hours: Maximum age in hours to consider the cache valid.
+
+        Returns:
+            Dict with 'analyzed_response' key, or None if stale/missing.
+        """
+        try:
+            query = """
+            SELECT stock_name, stock_symbol, analyzed_response,
+                   analyzed_at, tech_analysis, selection
+            FROM stock_analysis
+            WHERE stock_symbol = %s
+              AND analyzed_at > NOW() - INTERVAL '%s hours'
+            ORDER BY analyzed_at DESC
+            LIMIT 1
+            """
+            self.cursor.execute(query, (stock_symbol, max_age_hours))
+            result = self.cursor.fetchone()
+
+            if result:
+                columns = [desc[0] for desc in self.cursor.description]
+                row = dict(zip(columns, result))
+                print(f"⚡ DB cache hit for {stock_symbol} "
+                      f"(analyzed {row['analyzed_at']})")
+                return row
+            return None
+
+        except Exception as e:
+            print(f"⚠️ DB cache lookup failed: {e}")
+            return None
+
     def get_selected_stocks(self) -> list:
         """Get all stocks marked as selected (% change <= -25%)"""
         try:

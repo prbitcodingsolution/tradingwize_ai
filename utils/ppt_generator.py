@@ -27,7 +27,7 @@ import openai
 load_dotenv()
 
 
-class StockPPTGenerator:
+class  StockPPTGenerator:
     """Generate professional PowerPoint presentations from stock analysis data with bilingual support"""
     
     def __init__(self):
@@ -45,213 +45,80 @@ class StockPPTGenerator:
     
     def translate_to_hindi(self, text_or_list: Union[str, List[str]]) -> Union[str, List[str]]:
         """
-        Translate English text to Hindi using LLM
-        
-        Args:
-            text_or_list: String or list of strings to translate
-        
-        Returns:
-            Translated Hindi text (same type as input)
+        Translate English text to Hindi using LLM.
+        For lists: translates each item individually to avoid delimiter/mismatch issues.
+        For strings: translates the full text as one block.
         """
+        _sys_msg = (
+            "You are a professional Hindi translator specializing in financial content. "
+            "Translate English to PURE MODERN HINDI using Devanagari script. "
+            "DO NOT create Hinglish (mixing English words in Hindi sentences). "
+            "Translate ALL common words to Hindi. "
+            "Only keep stock tickers (TCS.NS), financial abbreviations (EBITDA, CAGR, EPS, PE, ROE, ROCE), "
+            "currency symbols (₹, $, Cr), numbers, and proper names in English. "
+            "Return ONLY the Hindi translation, nothing else."
+        )
+
+        _translation_rules = """Translate to PURE MODERN HINDI (Devanagari script) for an investor presentation.
+
+TRANSLATE these words to Hindi:
+company→कंपनी, market→बाजार, business→व्यवसाय, growth→वृद्धि, revenue→राजस्व, profit→लाभ,
+services→सेवाएं, customers→ग्राहक, industry→उद्योग, technology→प्रौद्योगिकी, global→वैश्विक,
+leading→अग्रणी, provider→प्रदाता, consulting→परामर्श, strong/robust→मजबूत, financial→वित्तीय,
+performance→प्रदर्शन, positive→सकारात्मक, outlook→दृष्टिकोण, investment→निवेश, investor→निवेशक,
+opportunity→अवसर, dividend→लाभांश, stability→स्थिरता, potential→क्षमता, future→भविष्य
+
+KEEP in English: stock tickers, EBITDA/CAGR/EPS/PE/ROE/ROCE, ₹/$/Cr, numbers, proper names, IT/AI/CEO
+
+"""
+
         try:
-            # Handle list input
+            # Handle list input — translate each item individually
             if isinstance(text_or_list, list):
                 if not text_or_list:
                     return []
-                
-                # Translate all items in batch
-                combined_text = "\n---ITEM---\n".join(text_or_list)
-                
-                prompt = f"""Translate the following financial slide content into PURE MODERN HINDI suitable for investor presentation.
 
-CRITICAL INSTRUCTION: Write in PURE HINDI using Devanagari script. DO NOT mix English words into Hindi sentences (no Hinglish).
+                # Filter out None/empty items, track indices
+                hindi_results = list(text_or_list)  # start with English copy
+                for i, item in enumerate(text_or_list):
+                    if not item or not str(item).strip():
+                        continue
+                    try:
+                        response = self.client.chat.completions.create(
+                            model="openai/gpt-oss-120b",
+                            messages=[
+                                {"role": "system", "content": _sys_msg},
+                                {"role": "user", "content": _translation_rules + f"Translate this:\n{item}"}
+                            ],
+                            temperature=0.3,
+                            max_tokens=500
+                        )
+                        result = response.choices[0].message.content
+                        if result and result.strip():
+                            hindi_results[i] = result.strip()
+                    except Exception as item_err:
+                        print(f"⚠️ Translation failed for item {i}: {item_err}")
+                        # Keep English for this item
 
-TRANSLATION RULES:
-1. Translate ALL common words to Hindi:
-   - company → कंपनी
-   - market → बाजार
-   - business → व्यवसाय
-   - growth → वृद्धि
-   - revenue → राजस्व
-   - profit → लाभ
-   - services → सेवाएं
-   - customers → ग्राहक
-   - industry → उद्योग
-   - technology → प्रौद्योगिकी
-   - global → वैश्विक
-   - leading → अग्रणी
-   - provider → प्रदाता
-   - consulting → परामर्श
-   - strong → मजबूत
-   - presence → उपस्थिति
-   - established → स्थापित
-   - headquarters → मुख्यालय
-   - key player → प्रमुख खिलाड़ी
-   - robust → मजबूत
-   - financial → वित्तीय
-   - performance → प्रदर्शन
-   - positive → सकारात्मक
-   - outlook → दृष्टिकोण
-   - cloud → क्लाउड
-   - advancements → प्रगति
-   - market capitalization → बाजार पूंजीकरण
-   - offerings → पेशकश
-   - expand → विस्तार करना
-   - future → भविष्य
-   - position → स्थिति
-   - investors → निवेशक
-   - investment → निवेश
-   - opportunity → अवसर
-   - consider → विचार करना
-   - encourage → प्रोत्साहित करना
-   - stability → स्थिरता
-   - consistent → निरंतर
-   - dividend → लाभांश
-   - payouts → भुगतान
-   - emerging → उभरती
-   - potential → क्षमता
+                return hindi_results
 
-2. Use modern, natural Hindi (not overly Sanskritized)
-3. Keep professional, formal tone for business presentations
-4. Write complete sentences in Hindi
-
-EXCEPTIONS (Keep in English):
-- Stock tickers: TCS.NS, RELIANCE.NS, CUPID.NS
-- Financial abbreviations: EBITDA, CAGR, EPS, PE, ROE, ROI, ROCE
-- Currency: ₹, $, Cr, crore, billion
-- Numbers: 294.23, 35%, etc.
-- Proper names: TCS, Mumbai, India, Fortune 500
-- Technical acronyms: IT, AI, CEO
-
-CORRECT EXAMPLE:
-❌ WRONG (Hinglish): "TCS ek leading global provider hai IT services aur consulting ka"
-✅ CORRECT (Pure Hindi): "TCS IT सेवाओं और परामर्श का एक अग्रणी वैश्विक प्रदाता है"
-
-English content:
-{text_or_list}
-
-Return ONLY the pure Hindi translation in Devanagari script, no additional text."""
-
-                response = self.client.chat.completions.create(
-                    model="openai/gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a professional Hindi translator specializing in financial content. Translate English to PURE MODERN HINDI using Devanagari script. DO NOT create Hinglish (mixing English words in Hindi sentences). Translate ALL common words to Hindi. Only keep stock tickers, financial abbreviations, currency symbols, numbers, and proper names in English. Write natural, professional Hindi suitable for business presentations."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    temperature=0.3,
-                    max_tokens=2000
-                )
-                
-                hindi_text = response.choices[0].message.content.strip()
-                hindi_items = hindi_text.split("---ITEM---")
-                hindi_items = [item.strip() for item in hindi_items if item.strip()]
-                
-                # Ensure we have the same number of items
-                if len(hindi_items) != len(text_or_list):
-                    print(f"⚠️ Translation mismatch: {len(text_or_list)} items -> {len(hindi_items)} translations. Using fallback.")
-                    return text_or_list  # Fallback to English
-                
-                return hindi_items
-            
             # Handle string input
             else:
-                if not text_or_list or not text_or_list.strip():
+                if not text_or_list or not str(text_or_list).strip():
                     return ""
-                
-                prompt = f"""Translate the following financial slide content into PURE MODERN HINDI suitable for investor presentation.
-
-CRITICAL INSTRUCTION: Write in PURE HINDI using Devanagari script. DO NOT mix English words into Hindi sentences (no Hinglish).
-
-TRANSLATION RULES:
-1. Translate ALL common words to Hindi:
-   - company → कंपनी
-   - market → बाजार
-   - business → व्यवसाय
-   - growth → वृद्धि
-   - revenue → राजस्व
-   - profit → लाभ
-   - services → सेवाएं
-   - customers → ग्राहक
-   - industry → उद्योग
-   - technology → प्रौद्योगिकी
-   - global → वैश्विक
-   - leading → अग्रणी
-   - provider → प्रदाता
-   - consulting → परामर्श
-   - strong → मजबूत
-   - presence → उपस्थिति
-   - established → स्थापित
-   - headquarters → मुख्यालय
-   - key player → प्रमुख खिलाड़ी
-   - robust → मजबूत
-   - financial → वित्तीय
-   - performance → प्रदर्शन
-   - positive → सकारात्मक
-   - outlook → दृष्टिकोण
-   - cloud → क्लाउड
-   - advancements → प्रगति
-   - market capitalization → बाजार पूंजीकरण
-   - offerings → पेशकश
-   - expand → विस्तार करना
-   - future → भविष्य
-   - position → स्थिति
-   - investors → निवेशक
-   - investment → निवेश
-   - opportunity → अवसर
-   - consider → विचार करना
-   - encourage → प्रोत्साहित करना
-   - stability → स्थिरता
-   - consistent → निरंतर
-   - dividend → लाभांश
-   - payouts → भुगतान
-   - emerging → उभरती
-   - potential → क्षमता
-
-2. Use modern, natural Hindi (not overly Sanskritized)
-3. Keep professional, formal tone for business presentations
-4. Write complete sentences in Hindi
-
-EXCEPTIONS (Keep in English):
-- Stock tickers: TCS.NS, RELIANCE.NS, CUPID.NS
-- Financial abbreviations: EBITDA, CAGR, EPS, PE, ROE, ROI, ROCE
-- Currency: ₹, $, Cr, crore, billion
-- Numbers: 294.23, 35%, etc.
-- Proper names: TCS, Mumbai, India, Fortune 500
-- Technical acronyms: IT, AI, CEO
-
-CORRECT EXAMPLE:
-❌ WRONG (Hinglish): "TCS ek leading global provider hai IT services aur consulting ka"
-✅ CORRECT (Pure Hindi): "TCS IT सेवाओं और परामर्श का एक अग्रणी वैश्विक प्रदाता है"
-
-English content:
-{text_or_list}
-
-Return ONLY the pure Hindi translation in Devanagari script, no additional text."""
 
                 response = self.client.chat.completions.create(
-                    model="openai/gpt-4o-mini",
+                    model="openai/gpt-oss-120b",
                     messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a professional Hindi translator specializing in financial content. Translate English to PURE MODERN HINDI using Devanagari script. DO NOT create Hinglish (mixing English words in Hindi sentences). Translate ALL common words to Hindi. Only keep stock tickers, financial abbreviations, currency symbols, numbers, and proper names in English. Write natural, professional Hindi suitable for business presentations."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
+                        {"role": "system", "content": _sys_msg},
+                        {"role": "user", "content": _translation_rules + f"Translate this:\n{text_or_list}"}
                     ],
                     temperature=0.3,
-                    max_tokens=1000
+                    max_tokens=1500
                 )
-                
-                return response.choices[0].message.content.strip()
-        
+                result = response.choices[0].message.content
+                return result.strip() if result else text_or_list
+
         except Exception as e:
             print(f"⚠️ Translation error: {e}. Using English as fallback.")
             return text_or_list  # Fallback to English
@@ -420,7 +287,7 @@ Return ONLY the JSON structure, no additional text or markdown."""
 
             # Call LLM with higher token limit for comprehensive content
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {"role": "system", "content": "You are a senior financial analyst expert at creating comprehensive, professional stock analysis presentations with rich content. Generate detailed slides with both bullet points and paragraph-style content. Return only valid JSON."},
                     {"role": "user", "content": prompt}
@@ -845,13 +712,13 @@ Return ONLY the JSON structure, no additional text or markdown."""
             Inches(0.5), Inches(2.5), Inches(12.333), Inches(1.5)
         )
         title_frame = title_box.text_frame
-        title_frame.text = slide_data['title']
+        title_frame.text = stock_data.get('stock_name', slide_data['title'])
         title_para = title_frame.paragraphs[0]
         title_para.alignment = PP_ALIGN.CENTER
         title_para.font.size = Pt(44)
         title_para.font.bold = True
         title_para.font.color.rgb = RGBColor(255, 255, 255)
-        
+
         # Add subtitle
         subtitle_text = f"{stock_data['stock_symbol']} | {datetime.now().strftime('%B %d, %Y')}"
         subtitle_box = slide.shapes.add_textbox(

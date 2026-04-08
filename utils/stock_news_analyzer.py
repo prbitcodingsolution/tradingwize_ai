@@ -139,7 +139,7 @@ class StockNewsAnalyzer:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             
-            response = requests.get(url, headers=headers, timeout=10)
+            response = requests.get(url, headers=headers, timeout=5)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -315,15 +315,15 @@ Format: "Score: XX - [brief reason]"
             # Try models for sentiment analysis
             models_to_try = [
                 "openai/gpt-oss-120b",  # Free model (primary)
-                "google/gemini-2.0-flash-exp:free",
+                "google/gemini-2.0-flash-001",
                 "meta-llama/llama-3.1-8b-instruct",
-                "openai/gpt-4o-mini",
+                "openai/gpt-oss-20b",
             ]
-            
+
             for model in models_to_try:
                 try:
                     print(f"  🔄 Trying model for sentiment: {model}")
-                    
+
                     response = self.client.chat.completions.create(
                         model=model,
                         messages=[
@@ -333,14 +333,20 @@ Format: "Score: XX - [brief reason]"
                         temperature=0.2,  # Lower temperature for more consistent scoring
                         max_tokens=100  # Short response needed
                     )
-                    
+
+                    if not response.choices or not response.choices[0].message:
+                        print(f"  ⚠️ Model {model} returned no choices, skipping")
+                        continue
                     sentiment_response = response.choices[0].message.content
+                    if not sentiment_response:
+                        print(f"  ⚠️ Model {model} returned empty content, skipping")
+                        continue
                     print(f"  ✅ Sentiment analysis: {sentiment_response[:100]}")
-                    
+
                     # Extract score
                     score = self._extract_sentiment_score(sentiment_response)
                     return score
-                    
+
                 except Exception as e:
                     print(f"  ⚠️ Model {model} failed for sentiment: {str(e)[:100]}")
                     continue
@@ -404,17 +410,17 @@ Provide your analysis in a structured format with clear sections. Use ALL the co
 
             # Try models for summary generation
             models_to_try = [
-                "openai/gpt-oss-120b", 
-                "google/gemini-2.0-flash-exp:free",
+                "openai/gpt-oss-120b",
+                "google/gemini-2.0-flash-001",
                 "meta-llama/llama-3.1-8b-instruct",
-                "openai/gpt-4o-mini",
+                "openai/gpt-oss-20b",
             ]
             print(f"  📊 Generating summary with {len(models_to_try)} fallback models...")
-            
+
             for model in models_to_try:
                 try:
                     print(f"  🔄 Trying model for summary: {model}")
-                    
+
                     response = self.client.chat.completions.create(
                         model=model,
                         messages=[
@@ -424,11 +430,17 @@ Provide your analysis in a structured format with clear sections. Use ALL the co
                         temperature=0.3,
                         max_tokens=3000
                     )
-                    
+
+                    if not response.choices or not response.choices[0].message:
+                        print(f"  ⚠️ Model {model} returned no choices for summary, skipping")
+                        continue
                     analysis_text = response.choices[0].message.content
+                    if not analysis_text:
+                        print(f"  ⚠️ Model {model} returned empty content, skipping")
+                        continue
                     print(f"  ✅ Summary generated successfully")
                     return analysis_text
-                    
+
                 except Exception as e:
                     print(f"  ⚠️ Model {model} failed for summary: {str(e)[:100]}")
                     continue
@@ -510,18 +522,33 @@ Provide your analysis in a structured format with clear sections. Use ALL the co
                 "timestamp": datetime.now().isoformat()
             }
         
-        # Step 2: Extract content from top articles
+        # Step 2: Extract content from top articles (parallel for speed)
         extracted_contents = []
-        
+
         if extract_content:
-            print(f"\n📥 Extracting content from {len(articles)} articles...")
-            for article in articles[:max_articles]:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            target_articles = articles[:max_articles]
+            print(f"\n📥 Extracting content from {len(target_articles)} articles in parallel...")
+
+            def _extract(article):
                 url = article.get('url')
                 if url:
                     content = self.extract_article_content(url)
-                    extracted_contents.append(content or article.get('content', ''))
-                else:
-                    extracted_contents.append(article.get('content', ''))
+                    return content or article.get('content', '')
+                return article.get('content', '')
+
+            # Run extractions in parallel with a short overall timeout
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                future_map = {executor.submit(_extract, a): idx for idx, a in enumerate(target_articles)}
+                results = [''] * len(target_articles)
+                for future in as_completed(future_map, timeout=30):
+                    idx = future_map[future]
+                    try:
+                        results[idx] = future.result()
+                    except Exception:
+                        results[idx] = target_articles[idx].get('content', '')
+                extracted_contents = results
         else:
             # Use Tavily's content snippets
             extracted_contents = [article.get('content', '') for article in articles]

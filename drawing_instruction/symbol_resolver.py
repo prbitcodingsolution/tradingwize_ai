@@ -189,60 +189,73 @@ SYMBOL_MAP = {
 }
 
 
-def resolve_symbol(symbol: str) -> str:
+# Markets where symbols must NOT get an .NS suffix
+_NON_INDIAN_MARKETS = {"nasdaq", "nyse", "us", "forex", "crypto"}
+
+
+def resolve_symbol(symbol: str, market: str = "stock") -> str:
     """
-    Resolve a symbol to its correct NSE format
-    
+    Resolve a symbol to the correct exchange format.
+
+    For Indian stocks (market='stock') unknown symbols get '.NS' appended.
+    For US/global markets (market='nasdaq'|'nyse'|'us'|'forex'|'crypto')
+    the symbol is returned as-is so yfinance can look it up directly.
+
     Args:
-        symbol: Input symbol (can be short name, full name, or NSE format)
-    
+        symbol: Input symbol (e.g. 'AAPL', 'JIO', 'RELIANCE.NS')
+        market: Market type — 'stock' (NSE India), 'nasdaq', 'nyse',
+                'us', 'forex', 'crypto'
+
     Returns:
-        str: Resolved NSE symbol (e.g., "JIOFIN.NS")
-    
-    Examples:
-        >>> resolve_symbol("JIO")
-        "JIOFIN.NS"
-        >>> resolve_symbol("RELIANCE")
-        "RELIANCE.NS"
-        >>> resolve_symbol("TCS.NS")
-        "TCS.NS"
+        str: Exchange-suffixed symbol where applicable.
     """
     if not symbol:
         return symbol
-    
-    # Normalize input
+
     symbol_upper = symbol.upper().strip()
-    
+    market_lower = (market or "stock").lower()
+
+    # For non-Indian markets, skip NSE mapping entirely
+    if market_lower in _NON_INDIAN_MARKETS:
+        # Strip any accidentally-appended .NS suffix
+        if symbol_upper.endswith('.NS'):
+            symbol_upper = symbol_upper[:-3]
+        # Strip yfinance-specific suffixes (=X, =F, -USD) so the clean
+        # symbol flows through the pipeline; yfinance conversion happens
+        # only in the yfinance fallback of llm_drawing_generator.
+        if symbol_upper.endswith('=X') or symbol_upper.endswith('=F'):
+            symbol_upper = symbol_upper[:-2]
+        if symbol_upper.endswith('-USD'):
+            symbol_upper = symbol_upper[:-4]
+        logger.info(f"Non-Indian market ({market_lower}): using symbol as-is: {symbol_upper}")
+        return symbol_upper
+
+    # --- Indian stock path ---
     # Check if already in correct format (ends with .NS)
     if symbol_upper.endswith('.NS'):
-        # Check if it needs mapping (e.g., JIO.NS -> JIOFIN.NS)
         if symbol_upper in SYMBOL_MAP:
             resolved = SYMBOL_MAP[symbol_upper]
             logger.info(f"Resolved {symbol} -> {resolved}")
             return resolved
         return symbol_upper
-    
+
     # Check direct mapping
     if symbol_upper in SYMBOL_MAP:
         resolved = SYMBOL_MAP[symbol_upper]
         logger.info(f"Resolved {symbol} -> {resolved}")
         return resolved
-    
+
     # Try adding .NS suffix
     with_ns = f"{symbol_upper}.NS"
     if with_ns in SYMBOL_MAP:
         resolved = SYMBOL_MAP[with_ns]
         logger.info(f"Resolved {symbol} -> {resolved}")
         return resolved
-    
-    # No mapping found - assume it's already correct or add .NS
-    if not symbol_upper.endswith('.NS'):
-        resolved = f"{symbol_upper}.NS"
-        logger.info(f"No mapping found, using: {symbol} -> {resolved}")
-        return resolved
-    
-    logger.info(f"Using symbol as-is: {symbol}")
-    return symbol_upper
+
+    # No mapping found — append .NS as best guess for NSE
+    resolved = f"{symbol_upper}.NS"
+    logger.info(f"No mapping found, using: {symbol} -> {resolved}")
+    return resolved
 
 
 def add_symbol_mapping(short_name: str, nse_symbol: str):

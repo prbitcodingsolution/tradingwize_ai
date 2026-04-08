@@ -63,12 +63,19 @@ class APIPriceFetcher:
                 from_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
             
             logger.info(f"Fetching data for {symbol} from {from_date} to {to_date}")
-            
+
+            # Strip yfinance-specific suffixes before calling API
+            api_symbol = symbol
+            if api_symbol.endswith('=X') or api_symbol.endswith('=F'):
+                api_symbol = api_symbol[:-2]
+            if api_symbol.endswith('-USD'):
+                api_symbol = api_symbol[:-4]
+
             # Build API URL
             endpoint = f"{self.base_url}/api/v1/mentor/get-forex-data/"
-            
+
             params = {
-                'pair': symbol,
+                'pair': api_symbol,
                 'from': from_date,
                 'to': to_date,
                 'market': market,

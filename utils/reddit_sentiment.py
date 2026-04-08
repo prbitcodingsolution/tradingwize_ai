@@ -31,16 +31,6 @@ class RedditSentimentAnalyzer:
         self.client = get_client()
         self.api_key = REDDIT_RAPIDAPI_KEY
         self.api_host = REDDIT_RAPIDAPI_HOST
-        
-        # Try to import VADER
-        try:
-            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-            self.vader_analyzer = SentimentIntensityAnalyzer()
-            self.vader_available = True
-        except ImportError:
-            self.vader_analyzer = None
-            self.vader_available = False
-            print("⚠️ VADER not installed. Using LLM for Reddit sentiment.")
     
     def _normalize_sentiment_score(self, score: float) -> float:
         """
@@ -239,171 +229,123 @@ class RedditSentimentAnalyzer:
             Dictionary with sentiment analysis results
         """
         print(f"   🤖 Analyzing sentiment of {len(posts_data)} Reddit posts...")
-        
-        # Try VADER first for objective, unbiased sentiment scoring
-        if self.vader_available and self.vader_analyzer:
-            try:
-                print(f"   🔍 Using VADER for objective sentiment analysis...")
-                
-                # Analyze each post with VADER
-                post_sentiments = []
-                for post in posts_data:
-                    text = f"{post['title']} {post['text']}"
-                    if text.strip():
-                        vader_scores = self.vader_analyzer.polarity_scores(text)
-                        post_sentiments.append({
-                            'compound': vader_scores['compound'],  # -1 to +1
-                            'pos': vader_scores['pos'],
-                            'neg': vader_scores['neg'],
-                            'neu': vader_scores['neu'],
-                            'title': post['title'][:100],
-                            'subreddit': post['subreddit']
-                        })
-                
-                if not post_sentiments:
-                    print(f"   ⚠️ No valid posts to analyze")
-                    return self._get_default_reddit_sentiment()
-                
-                # Calculate average VADER scores
-                avg_compound = sum(p['compound'] for p in post_sentiments) / len(post_sentiments)
-                avg_pos = sum(p['pos'] for p in post_sentiments) / len(post_sentiments)
-                avg_neg = sum(p['neg'] for p in post_sentiments) / len(post_sentiments)
-                avg_neu = sum(p['neu'] for p in post_sentiments) / len(post_sentiments)
-                
-                # Convert VADER compound score (-1 to +1) to 0-100 scale
-                vader_sentiment_score = (avg_compound + 1) * 50
-                
-                # Determine sentiment label based on VADER score (0-100 scale)
-                if vader_sentiment_score >= 70:
-                    sentiment_label = "Strongly Bullish"
-                elif vader_sentiment_score >= 60:
-                    sentiment_label = "Bullish"
-                elif vader_sentiment_score >= 40:
-                    sentiment_label = "Neutral"
-                elif vader_sentiment_score >= 30:
-                    sentiment_label = "Bearish"
-                else:
-                    sentiment_label = "Strongly Bearish"
-                
-                # Count positive, negative, neutral posts
-                positive_count = sum(1 for p in post_sentiments if p['compound'] > 0.05)
-                negative_count = sum(1 for p in post_sentiments if p['compound'] < -0.05)
-                neutral_count = len(post_sentiments) - positive_count - negative_count
-                
-                # Calculate percentages
-                positive_percentage = (positive_count / len(post_sentiments) * 100) if post_sentiments else 0
-                negative_percentage = (negative_count / len(post_sentiments) * 100) if post_sentiments else 0
-                neutral_percentage = (neutral_count / len(post_sentiments) * 100) if post_sentiments else 0
-                
-                print(f"   ✅ VADER Analysis Complete:")
-                print(f"      Score: {vader_sentiment_score:.1f}/100")
-                print(f"      Positive: {positive_count}/{len(post_sentiments)} posts ({positive_percentage:.1f}%)")
-                print(f"      Negative: {negative_count}/{len(post_sentiments)} posts ({negative_percentage:.1f}%)")
-                print(f"      Neutral: {neutral_count}/{len(post_sentiments)} posts ({neutral_percentage:.1f}%)")
-                
-                # Now use LLM only for extracting key themes (not for scoring)
-                sentiment_prompt = f"""Analyze Reddit discussions about {stock_name} ({stock_symbol}).
 
-OBJECTIVE SENTIMENT SCORE (from VADER analysis): {vader_sentiment_score:.1f}/100
-This score is calculated objectively based on the post content.
+        # --- FinBERT scoring ---
+        try:
+            from .finbert_sentiment import FinBERTSentimentAnalyzer
+            texts = [
+                f"{p['title']} {p['text']}"
+                for p in posts_data
+                if (p.get('title') or p.get('text', '')).strip()
+            ]
+            if not texts:
+                return self._get_default_reddit_sentiment()
+
+            finbert = FinBERTSentimentAnalyzer.get_instance()
+            fb_result = finbert.analyze_texts(texts)
+
+            finbert_score = fb_result["score"]
+            sentiment_label = fb_result["label"]
+            breakdown = fb_result["breakdown"]
+            positive_count = breakdown.get("positive", 0)
+            negative_count = breakdown.get("negative", 0)
+            neutral_count = breakdown.get("neutral", 0)
+            n = len(texts)
+            positive_percentage = positive_count / n * 100 if n else 0
+            negative_percentage = negative_count / n * 100 if n else 0
+            neutral_percentage = neutral_count / n * 100 if n else 0
+
+            print(f"   ✅ FinBERT Analysis Complete:")
+            print(f"      Score: {finbert_score:.1f}/100  Label: {sentiment_label}")
+            print(f"      Positive: {positive_count}  Negative: {negative_count}  Neutral: {neutral_count}")
+
+            # LLM for theme extraction only
+            sentiment_prompt = f"""Analyze Reddit discussions about {stock_name} ({stock_symbol}).
+
+OBJECTIVE SENTIMENT SCORE (FinBERT): {finbert_score:.1f}/100
 
 Sample Reddit Posts:
 {combined_text[:3000]}
 
-Based on the posts, provide:
-1. Key Themes (3-5 main topics being discussed)
-2. Market Mood Summary (2-3 sentences explaining the overall Reddit sentiment)
-
-DO NOT change the sentiment score. Just extract the key themes and context.
-
 Return ONLY valid JSON:
 {{
-  "key_themes": ["theme1", "theme2", "theme3", ...],
+  "key_themes": ["theme1", "theme2", "theme3"],
   "market_mood": "<2-3 sentence summary>"
 }}"""
-                
-                try:
-                    response = self.client.chat.completions.create(
-                        model="openai/gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": "You are a Reddit sentiment analyst extracting key themes. Do not change the sentiment score, just extract themes."},
-                            {"role": "user", "content": sentiment_prompt}
-                        ],
-                        temperature=0.1,
-                        max_tokens=500
-                    )
-                    
-                    result_text = response.choices[0].message.content.strip()
-                    
-                    # Clean JSON
-                    if "```json" in result_text:
-                        result_text = result_text.split("```json")[1].split("```")[0].strip()
-                    elif "```" in result_text:
-                        result_text = result_text.split("```")[1].split("```")[0].strip()
-                    
-                    llm_data = json.loads(result_text)
-                    key_themes = llm_data.get('key_themes', ['Retail investor discussions', 'Stock performance'])
-                    market_mood = llm_data.get('market_mood', f'Reddit sentiment is {sentiment_label.lower()} based on {len(post_sentiments)} posts.')
-                    
-                except Exception as e:
-                    print(f"   ⚠️ LLM theme extraction failed: {e}, using defaults")
-                    key_themes = ['Retail investor discussions', 'Stock performance', 'Market sentiment']
-                    market_mood = f'Based on {len(post_sentiments)} Reddit posts, sentiment is {sentiment_label.lower()}.'
-                
-                # Calculate subreddit distribution
-                subreddit_counts = {}
-                for post in posts_data:
-                    sub = post['subreddit']
-                    subreddit_counts[sub] = subreddit_counts.get(sub, 0) + 1
-                
-                # Get top posts by engagement
-                sorted_posts = sorted(
-                    posts_data,
-                    key=lambda x: x.get('score', 0) + x.get('num_comments', 0) * 2,
-                    reverse=True
-                )[:5]
-                
-                top_posts = [
-                    {
-                        'title': post['title'][:150],
-                        'subreddit': post['subreddit'],
-                        'score': post['score'],
-                        'num_comments': post['num_comments'],
-                        'url': f"https://reddit.com{post['permalink']}" if post.get('permalink') else None
-                    }
-                    for post in sorted_posts
-                ]
-                
-                return {
-                    'sentiment_score': round(vader_sentiment_score, 1),
-                    'sentiment_label': sentiment_label,
-                    'total_posts': len(posts_data),
-                    'total_items_analyzed': len(post_sentiments),
-                    'positive_count': positive_count,
-                    'negative_count': negative_count,
-                    'neutral_count': neutral_count,
-                    'positive_percentage': round(positive_percentage, 1),
-                    'negative_percentage': round(negative_percentage, 1),
-                    'neutral_percentage': round(neutral_percentage, 1),
-                    'key_themes': key_themes,
-                    'market_mood': market_mood,
-                    'key_insights': [
-                        f"Analyzed {len(posts_data)} Reddit posts from {len(subreddit_counts)} subreddits",
-                        f"Overall sentiment: {sentiment_label}",
-                        market_mood
+            try:
+                response = self.client.chat.completions.create(
+                    model="openai/gpt-oss-120b",
+                    messages=[
+                        {"role": "system", "content": "You are a Reddit sentiment analyst extracting key themes. Do not change the score, just extract themes."},
+                        {"role": "user", "content": sentiment_prompt}
                     ],
-                    'top_posts': top_posts,
-                    'subreddit_distribution': subreddit_counts,
-                    'confidence': 'High' if len(post_sentiments) >= 30 else 'Medium' if len(post_sentiments) >= 15 else 'Low',
-                    'source': 'reddit_rapidapi_vader'
-                }
-                
+                    temperature=0.1,
+                    max_tokens=500
+                )
+                result_text = response.choices[0].message.content.strip()
+                if "```json" in result_text:
+                    result_text = result_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in result_text:
+                    result_text = result_text.split("```")[1].split("```")[0].strip()
+                llm_data = json.loads(result_text)
+                key_themes = llm_data.get('key_themes', ['Retail investor discussions', 'Stock performance'])
+                market_mood = llm_data.get('market_mood', f'Reddit sentiment is {sentiment_label.lower()} based on {n} posts.')
             except Exception as e:
-                print(f"   ⚠️ VADER analysis failed: {e}, falling back to LLM")
-        
-        # Fallback to LLM-only if VADER not available
-        print(f"   ⚠️ VADER not available, using LLM-only analysis")
-        print(f"   💡 Install VADER for unbiased sentiment: pip install vaderSentiment")
+                print(f"   ⚠️ LLM theme extraction failed: {e}")
+                key_themes = ['Retail investor discussions', 'Stock performance', 'Market sentiment']
+                market_mood = f'Based on {n} Reddit posts, FinBERT sentiment is {sentiment_label.lower()}.'
+
+            subreddit_counts = {}
+            for post in posts_data:
+                sub = post['subreddit']
+                subreddit_counts[sub] = subreddit_counts.get(sub, 0) + 1
+
+            sorted_posts = sorted(
+                posts_data,
+                key=lambda x: x.get('score', 0) + x.get('num_comments', 0) * 2,
+                reverse=True
+            )[:5]
+            top_posts = [
+                {
+                    'title': post['title'][:150],
+                    'subreddit': post['subreddit'],
+                    'score': post['score'],
+                    'num_comments': post['num_comments'],
+                    'url': f"https://reddit.com{post['permalink']}" if post.get('permalink') else None
+                }
+                for post in sorted_posts
+            ]
+
+            return {
+                'sentiment_score': round(finbert_score, 1),
+                'sentiment_label': sentiment_label,
+                'total_posts': len(posts_data),
+                'total_items_analyzed': n,
+                'positive_count': positive_count,
+                'negative_count': negative_count,
+                'neutral_count': neutral_count,
+                'positive_percentage': round(positive_percentage, 1),
+                'negative_percentage': round(negative_percentage, 1),
+                'neutral_percentage': round(neutral_percentage, 1),
+                'key_themes': key_themes,
+                'market_mood': market_mood,
+                'key_insights': [
+                    f"Analyzed {len(posts_data)} Reddit posts from {len(subreddit_counts)} subreddits",
+                    f"Overall sentiment (FinBERT): {sentiment_label}",
+                    market_mood
+                ],
+                'top_posts': top_posts,
+                'subreddit_distribution': subreddit_counts,
+                'confidence': 'High' if n >= 30 else 'Medium' if n >= 15 else 'Low',
+                'source': 'reddit_rapidapi_finbert',
+                'finbert_result': fb_result,
+            }
+
+        except Exception as e:
+            print(f"   ⚠️ FinBERT Reddit scoring failed: {e}, falling back to LLM-only")
+
+        # LLM-only fallback
+        print(f"   ⚠️ FinBERT unavailable, using LLM-only analysis")
         
         sentiment_prompt = f"""Analyze Reddit sentiment for {stock_name} ({stock_symbol}) based on these posts.
 
@@ -436,7 +378,7 @@ Return ONLY valid JSON:
         
         try:
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {"role": "system", "content": "You are an objective Reddit sentiment analyst. Analyze sentiment based ONLY on actual content without bias."},
                     {"role": "user", "content": sentiment_prompt}

@@ -73,7 +73,7 @@ English narration:
 Return ONLY the Hinglish translation, no additional text or formatting."""
 
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {
                         "role": "system",
@@ -88,7 +88,7 @@ Return ONLY the Hinglish translation, no additional text or formatting."""
                 max_tokens=500
             )
             
-            hindi_script = response.choices[0].message.content.strip()
+            hindi_script = (response.choices[0].message.content or "").strip()
             
             # Clean up any markdown or formatting
             hindi_script = hindi_script.replace('**', '').replace('*', '').replace('#', '')
@@ -117,9 +117,10 @@ Return ONLY the Hinglish translation, no additional text or formatting."""
         slide_type = slide.get('type', 'bullets')
         title = slide.get('title', '')
         
-        # Use English content for script generation
-        content = slide.get('content_eng', slide.get('content', []))
-        paragraph = slide.get('paragraph_eng', slide.get('paragraph', ''))
+        # Use English content for script generation (guard against None)
+        content = slide.get('content_eng', slide.get('content', [])) or []
+        content = [str(item) for item in content if item is not None]
+        paragraph = slide.get('paragraph_eng', slide.get('paragraph', '')) or ''
         
         # Build context-aware prompt based on slide type
         if slide_type == 'bullets':
@@ -135,7 +136,7 @@ Return ONLY the Hinglish translation, no additional text or formatting."""
             print(f"   🎤 Generating English narration for slide {slide_number}: {title}")
             
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {
                         "role": "system",
@@ -191,7 +192,7 @@ Return ONLY the narration script text, no formatting."""
                 max_tokens=350
             )
             
-            script_eng = response.choices[0].message.content.strip()
+            script_eng = (response.choices[0].message.content or "").strip()
             
             # Clean up any markdown or formatting
             script_eng = script_eng.replace('**', '').replace('*', '').replace('#', '')

@@ -1,10 +1,41 @@
+# Environment & secrets
 .env
-__pycache__
-*.pyc
-.DS_Store
 .env.local
 .env.*.local
-venv/
 
-# Generated AI narration scripts
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Generated outputs (regenerated on demand)
 generated_ai_scripts/
+PPT_json/
+scanner_cache_tradingview/
+
+# Downloaded files (PDFs, PPTs from screener.in)
+downloads/
+
+
+# Data / reference PDFs
+data/
+
+# Cached API responses
+reddit_api_response_*.json
+smc_json_*_test.json
+

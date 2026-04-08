@@ -35,10 +35,11 @@ def generate_drawings_with_llm(symbol, timeframe="1d", use_api=True, api_config=
         dict: Complete drawing JSON with LLM-detected patterns
     """
     try:
-        # Resolve symbol to correct NSE format
+        # Resolve symbol — use market from api_config so US/forex symbols don't get .NS suffix
         original_symbol = symbol
-        symbol = resolve_symbol(symbol)
-        
+        _market = (api_config or {}).get('market', 'stock')
+        symbol = resolve_symbol(symbol, market=_market)
+
         if original_symbol != symbol:
             logger.info(f"Symbol resolved: {original_symbol} -> {symbol}")
         
@@ -84,12 +85,42 @@ def generate_drawings_with_llm(symbol, timeframe="1d", use_api=True, api_config=
             try:
                 import yfinance as yf
                 from datetime import datetime
-                
+
                 start_date = api_config.get('from_date', '2025-01-01')
                 end_date = api_config.get('to_date', datetime.now().strftime('%Y-%m-%d'))
-                
-                logger.info(f"Downloading {symbol} data from yfinance ({start_date} to {end_date})...")
-                ticker = yf.Ticker(symbol)
+
+                # Convert symbol to yfinance format for non-stock markets
+                # Strip any =X suffix first to get the clean symbol
+                yf_symbol = symbol
+                if yf_symbol.endswith('=X'):
+                    yf_symbol = yf_symbol[:-2]
+                if yf_symbol.endswith('=F'):
+                    yf_symbol = yf_symbol[:-2]
+
+                yf_market = api_config.get('market', 'stocks').lower()
+                if yf_market == 'forex':
+                    # Precious metals / commodities need futures format on yfinance
+                    _FOREX_YF_MAP = {
+                        'XAUUSD': 'GC=F',   # Gold
+                        'XAGUSD': 'SI=F',    # Silver
+                        'XPTUSD': 'PL=F',    # Platinum
+                        'XPDUSD': 'PA=F',    # Palladium
+                        'WTIUSD': 'CL=F',    # Crude Oil WTI
+                        'BCOUSD': 'BZ=F',    # Brent Crude
+                        'NGUSD':  'NG=F',    # Natural Gas
+                    }
+                    if yf_symbol.upper() in _FOREX_YF_MAP:
+                        yf_symbol = _FOREX_YF_MAP[yf_symbol.upper()]
+                    elif not yf_symbol.endswith('=X'):
+                        # Regular forex pairs use =X (e.g. EURUSD=X)
+                        yf_symbol = f"{yf_symbol}=X"
+                elif yf_market == 'crypto':
+                    # yfinance uses -USD suffix for crypto (e.g. BTC-USD, ETH-USD)
+                    if not yf_symbol.endswith('-USD') and 'USD' not in yf_symbol:
+                        yf_symbol = f"{yf_symbol}-USD"
+
+                logger.info(f"Downloading {yf_symbol} data from yfinance ({start_date} to {end_date})...")
+                ticker = yf.Ticker(yf_symbol)
                 df = ticker.history(start=start_date, end=end_date, interval='1d')
                 
                 if df is None or df.empty:

@@ -236,8 +236,8 @@ IMPORTANT: Return ONLY valid JSON, no other text."""
                 from .llm_drawing_generator import generate_drawings_with_llm
                 from .symbol_resolver import resolve_symbol
             
-            # Resolve symbol
-            resolved_symbol = resolve_symbol(symbol)
+            # Resolve symbol — pass market so US/forex symbols skip .NS suffix
+            resolved_symbol = resolve_symbol(symbol, market=market)
             logger.info(f"🔍 Resolved symbol: {symbol} -> {resolved_symbol}")
             
             # Prepare API config

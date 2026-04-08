@@ -1,0 +1,67 @@
+COMPREHENSIVE FINANCIAL ANALYSIS: ITC
+Generated: 2026-04-03 14:14:53
+Number of PDFs Analyzed: 1
+
+================================================================================
+TOKEN USAGE & COST ANALYSIS
+================================================================================
+Total API Calls: 2
+Input Tokens: 14,388
+Output Tokens: 999
+Total Tokens: 15,387
+Cost (GPT-3.5-turbo): $0.0087 USD
+
+Cost Estimates for Other Models:
+  - GPT-4: $0.4916 USD
+  - GPT-4-Turbo: $0.1739 USD
+  - Claude-3-Sonnet: $0.0581 USD
+  - Claude-3-Opus: $0.2907 USD
+  - Claude-3-Haiku: $0.0048 USD
+
+================================================================================
+
+PDF 3: ITC_quarterly_1775205859_3.pdf
+Word Count: 371 words
+--------------------------------------------------------------------------------
+**Financial Summary**
+
+**Financial Performance:**
+- **Revenue:** ITC Limited reported a significant increase in gross revenue from the sale of products and services for the quarter ended June 30, 2025, reaching Rs. 23,007.49 crores on a consolidated basis, compared to Rs. 19,239.05 crores in the corresponding period last year.
+- **Profit:** The company's profit before tax from continuing operations stood at Rs. 7,128.01 crores, reflecting a growth of 11.5% compared to the previous year.
+- **Margins:** ITC maintained healthy margins with a profit for the period from continuing operations after tax amounting to Rs. 5,343.41 crores, showcasing a stable financial performance.
+
+**Business Highlights:**
+- **Strategic Acquisitions:** ITC acquired Mother Sparsh Baby Care Private Limited and Sresta Natural Bioproducts Private Limited during the quarter, expanding its presence in the FMCG sector and strengthening its portfolio.
+- **Segment Revenue:** The FMCG segment, including cigarettes and other products, continued to be a significant revenue driver for the company, contributing Rs. 15,354.30 crores on a consolidated basis.
+- **Brand Building:** Significant investments in brand building for personal care and branded packaged food products were reflected in the financials, demonstrating a focus on long-term growth.
+
+**Financial Health:**
+- **Equity and Reserves:** With a paid-up equity share capital of Rs. 1,251.75 crores and substantial reserves of Rs. 68,778.64 crores, ITC exhibited a strong financial foundation.
+- **Segment Liabilities:** The company managed its segment liabilities effectively, with total liabilities amounting to Rs. 19,082.73 crores on a consolidated basis, indicating prudent financial management.
+
+**Future Outlook:**
+- **Expansion Plans:** ITC's recent acquisitions and the approval of the Scheme of Amalgamation signal the company's strategic growth initiatives and potential for further expansion.
+- **Opportunities:** The focus on FMCG, paperboards, packaging, and agri-business sectors presents opportunities for diversification and revenue growth.
+- **Risks:** Despite positive performance, risks related to regulatory changes, market competition, and economic uncertainties should be closely monitored to mitigate potential impacts on financial performance.
+
+In conclusion, ITC Limited demonstrated robust financial performance in the quarter ended June 30, 2025, driven by revenue growth, strategic acquisitions, and prudent financial management. The company's focus on brand building and expansion initiatives positions it well for future growth, although risks in the operating environment should be carefully managed to sustain profitability and shareholder value.
+
+================================================================================
+
+MAIN CONSOLIDATED SUMMARY
+Word Count: 316 words
+--------------------------------------------------------------------------------
+Executive Overview:
+ITC Limited has shown a strong performance across the quarters, with consistent revenue growth and profitability. The company's strategic acquisitions, focus on brand building, and prudent financial management have contributed to its stable financial foundation and growth potential. While opportunities for expansion exist, risks related to regulatory changes and market competition need to be monitored closely.
+
+Financial Performance Analysis:
+ITC's gross revenue increased significantly year-over-year, reaching Rs. 23,007.49 crores in the first quarter of 2025 compared to Rs. 19,239.05 crores in the same period last year. Profit before tax grew by 11.5% to Rs. 7,128.01 crores, indicating improving profitability. The company maintained healthy margins, with a profit after tax of Rs. 5,343.41 crores, reflecting stable financial performance.
+
+Business Development & Strategy:
+ITC's strategic acquisitions of Mother Sparsh Baby Care Private Limited and Sresta Natural Bioproducts Private Limited have strengthened its presence in the FMCG sector. The FMCG segment, including cigarettes and other products, remained a key revenue driver, contributing Rs. 15,354.30 crores on a consolidated basis. Significant investments in brand building for personal care and packaged food products demonstrate a long-term growth focus.
+
+Financial Health & Stability:
+ITC exhibited a strong financial foundation with a paid-up equity share capital of Rs. 1,251.75 crores and substantial reserves of Rs. 68,778.64 crores. The company effectively managed its segment liabilities, totaling Rs. 19,082.73 crores on a consolidated basis, showcasing prudent financial management practices.
+
+Future Outlook & Investment Perspective:
+ITC's expansion plans, recent acquisitions, and approval of the Scheme of Amalgamation highlight its strategic growth initiatives and potential for further expansion. Opportunities in the FMCG, paperboards, packaging, and agri-business sectors offer avenues for diversification and revenue growth. However, risks associated with regulatory changes, market competition, and economic uncertainties necessitate vigilant monitoring to safeguard financial performance and shareholder value. Balancing growth strategies with risk mitigation measures will be crucial for sustaining profitability and driving long-term value creation for investors.

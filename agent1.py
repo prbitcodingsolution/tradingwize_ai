@@ -1,39 +1,345 @@
 from pydantic_ai import Agent, RunContext
-
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
-from typing import Optional, List
+from typing import Optional, List, Dict
 from dataclasses import dataclass
+from pydantic import BaseModel, Field
+from datetime import datetime
+from dotenv import load_dotenv
+from langsmith import traceable
+from tools import StockTools
+from models import (
+    StockValidation, CompanyData, CompanyReport,
+    ScenarioAnalysis, Summary
+)
+from utils.model_config import get_model, get_client, guarded_llm_call
+from utils.fii_dii_analyzer import get_fii_dii_sentiment as _get_fii_dii_data
+from utils.option_chain_analyzer import get_option_chain_analysis as _fetch_option_chain
+import asyncio
 import os
 import re
 import random
-from datetime import datetime
-from tools import StockTools
-import yfinance as yf
-from typing import Dict
-from models import (
-    StockValidation, CompanyData, CompanyReport, 
-    ScenarioAnalysis, Summary
-)
-# from utils.pdf_text_summarizer import PDFSummarizerPipeline
-from dotenv import load_dotenv
-from langsmith import traceable
-from database_utility.database import StockDatabase, extract_tech_analysis_json, calculate_selection_status
-load_dotenv()
-
-# Debug LangSmith in agent
-print(f"🤖 Agent LangSmith Debug:")
-print(f"  API Key: {'✅ Set' if os.getenv('LANGSMITH_API_KEY') else '❌ Missing'}")
-print(f"  Project: {os.getenv('LANGSMITH_PROJECT')}")
-print(f"  Tracing: {os.getenv('LANGSMITH_TRACING')}")
-
-import asyncio
 import time
 from collections import deque
 
+load_dotenv()
 
-from utils.model_config import get_model, get_client
-from pydantic import BaseModel, Field
+
+# -------------------------
+#   MERGED / DELISTED STOCK REGISTRY
+#   Handles corporate actions: mergers, delistings, demergers
+# -------------------------
+MERGED_STOCKS = {
+    # HDFC Ltd merged into HDFC Bank (July 2023)
+    "HDFC.NS": {"status": "merged", "merged_into": "HDFCBANK.NS", "merged_name": "HDFC Bank Limited", "note": "HDFC Ltd merged into HDFC Bank in July 2023"},
+    "HDFC.BO": {"status": "merged", "merged_into": "HDFCBANK.NS", "merged_name": "HDFC Bank Limited", "note": "HDFC Ltd merged into HDFC Bank in July 2023"},
+    # HDFC Life & HDFC AMC are separate listed entities, NOT merged — only HDFC Ltd parent merged
+
+    # PNB Housing Finance was subsidiary of PNB, not merged but sometimes confused
+    # Vijaya Bank & Dena Bank merged into Bank of Baroda (April 2019)
+    "VIJAYABANK.NS": {"status": "merged", "merged_into": "BANKBARODA.NS", "merged_name": "Bank of Baroda", "note": "Vijaya Bank merged into Bank of Baroda in April 2019"},
+    "DENABANK.NS": {"status": "merged", "merged_into": "BANKBARODA.NS", "merged_name": "Bank of Baroda", "note": "Dena Bank merged into Bank of Baroda in April 2019"},
+
+    # Andhra Bank & Corporation Bank merged into Union Bank (April 2020)
+    "ANDHRABANK.NS": {"status": "merged", "merged_into": "UNIONBANK.NS", "merged_name": "Union Bank of India", "note": "Andhra Bank merged into Union Bank of India in April 2020"},
+    "CORPBANK.NS": {"status": "merged", "merged_into": "UNIONBANK.NS", "merged_name": "Union Bank of India", "note": "Corporation Bank merged into Union Bank of India in April 2020"},
+
+    # Oriental Bank & United Bank merged into PNB (April 2020)
+    "ORIENTBANK.NS": {"status": "merged", "merged_into": "PNB.NS", "merged_name": "Punjab National Bank", "note": "Oriental Bank of Commerce merged into PNB in April 2020"},
+    "UNITEDBNK.NS": {"status": "merged", "merged_into": "PNB.NS", "merged_name": "Punjab National Bank", "note": "United Bank of India merged into PNB in April 2020"},
+
+    # Syndicate Bank merged into Canara Bank (April 2020)
+    "SYNDIBANK.NS": {"status": "merged", "merged_into": "CANBK.NS", "merged_name": "Canara Bank", "note": "Syndicate Bank merged into Canara Bank in April 2020"},
+
+    # Allahabad Bank merged into Indian Bank (April 2020)
+    "ALBK.NS": {"status": "merged", "merged_into": "INDIANB.NS", "merged_name": "Indian Bank", "note": "Allahabad Bank merged into Indian Bank in April 2020"},
+
+    # Lakshmi Vilas Bank merged into DBS Bank India (Nov 2020) — delisted
+    "LAKSHVILAS.NS": {"status": "delisted", "merged_into": None, "merged_name": None, "note": "Lakshmi Vilas Bank was merged into DBS Bank India (unlisted) in Nov 2020"},
+
+    # IDFC merged into IDFC First Bank (Oct 2023)
+    "IDFC.NS": {"status": "merged", "merged_into": "IDFCFIRSTB.NS", "merged_name": "IDFC First Bank Limited", "note": "IDFC Ltd merged into IDFC First Bank in Oct 2023"},
+
+    # Gruh Finance merged into Bandhan Bank (Oct 2019)
+    "GRUH.NS": {"status": "merged", "merged_into": "BANDHANBNK.NS", "merged_name": "Bandhan Bank Limited", "note": "Gruh Finance merged into Bandhan Bank in Oct 2019"},
+}
+
+# Alternate search names that should map to the merged entity
+# Catches user queries like "HDFC Ltd", "HDFC Limited", etc.
+MERGED_NAME_ALIASES = {
+    "hdfc ltd": "HDFC.NS",
+    "hdfc limited": "HDFC.NS",
+    "housing development finance": "HDFC.NS",
+    "housing development finance corporation": "HDFC.NS",
+    "vijaya bank": "VIJAYABANK.NS",
+    "dena bank": "DENABANK.NS",
+    "andhra bank": "ANDHRABANK.NS",
+    "corporation bank": "CORPBANK.NS",
+    "oriental bank": "ORIENTBANK.NS",
+    "united bank": "UNITEDBNK.NS",
+    "syndicate bank": "SYNDIBANK.NS",
+    "allahabad bank": "ALBK.NS",
+    "lakshmi vilas bank": "LAKSHVILAS.NS",
+    "idfc limited": "IDFC.NS",
+    "idfc ltd": "IDFC.NS",
+    "gruh finance": "GRUH.NS",
+}
+
+
+# -------------------------
+#   COMMON STOCK ALIASES
+#   Fast lookup for popular names/abbreviations that don't match their Yahoo Finance symbol.
+#   Checked BEFORE the slow LLM call so common queries resolve instantly.
+# -------------------------
+COMMON_STOCK_ALIASES = {
+    # Jio Financial Services
+    "jio": "JIOFIN.NS",
+    "jio financial": "JIOFIN.NS",
+    "jio finance": "JIOFIN.NS",
+    "jio financial services": "JIOFIN.NS",
+    "jiofin": "JIOFIN.NS",
+    # Reliance group
+    "ril": "RELIANCE.NS",
+    "reliance industries": "RELIANCE.NS",
+    # Infosys
+    "infosys": "INFY.NS",
+    "infy": "INFY.NS",
+    # TCS
+    "tata consultancy": "TCS.NS",
+    "tata consultancy services": "TCS.NS",
+    # HDFC Bank
+    "hdfc bank": "HDFCBANK.NS",
+    "hdfcbank": "HDFCBANK.NS",
+    # ICICI Bank
+    "icici": "ICICIBANK.NS",
+    "icici bank": "ICICIBANK.NS",
+    # SBI
+    "sbi": "SBIN.NS",
+    "state bank": "SBIN.NS",
+    "state bank of india": "SBIN.NS",
+    # Airtel
+    "airtel": "BHARTIARTL.NS",
+    "bharti airtel": "BHARTIARTL.NS",
+    # HCL Tech
+    "hcl": "HCLTECH.NS",
+    "hcl tech": "HCLTECH.NS",
+    "hcltech": "HCLTECH.NS",
+    # Maruti
+    "maruti suzuki": "MARUTI.NS",
+    "maruti": "MARUTI.NS",
+    # HUL
+    "hul": "HINDUNILVR.NS",
+    "hindustan unilever": "HINDUNILVR.NS",
+    # Asian Paints
+    "asian paints": "ASIANPAINT.NS",
+    "asianpaint": "ASIANPAINT.NS",
+    # Nestle India
+    "nestle": "NESTLEIND.NS",
+    "nestle india": "NESTLEIND.NS",
+    # Coal India
+    "coal india": "COALINDIA.NS",
+    # Power Grid
+    "power grid": "POWERGRID.NS",
+    "powergrid": "POWERGRID.NS",
+    # NTPC
+    "ntpc": "NTPC.NS",
+    # Sun Pharma
+    "sun pharma": "SUNPHARMA.NS",
+    "sunpharma": "SUNPHARMA.NS",
+    # L&T
+    "l&t": "LT.NS",
+    "larsen": "LT.NS",
+    "larsen and toubro": "LT.NS",
+    "larsen & toubro": "LT.NS",
+    # Axis Bank
+    "axis": "AXISBANK.NS",
+    "axis bank": "AXISBANK.NS",
+    # Kotak
+    "kotak": "KOTAKBANK.NS",
+    "kotak bank": "KOTAKBANK.NS",
+    "kotak mahindra": "KOTAKBANK.NS",
+    # Bajaj Finance
+    "bajaj finance": "BAJFINANCE.NS",
+    "bajfinance": "BAJFINANCE.NS",
+    # Bajaj Finserv
+    "bajaj finserv": "BAJAJFINSV.NS",
+    # Bajaj Auto
+    "bajaj auto": "BAJAJ-AUTO.NS",
+    # Wipro
+    "wipro": "WIPRO.NS",
+    # Tech Mahindra
+    "tech mahindra": "TECHM.NS",
+    "techm": "TECHM.NS",
+    # ITC
+    "itc": "ITC.NS",
+    # Titan
+    "titan": "TITAN.NS",
+    # ONGC
+    "ongc": "ONGC.NS",
+    # IOC
+    "ioc": "IOC.NS",
+    "indian oil": "IOC.NS",
+    # BPCL
+    "bpcl": "BPCL.NS",
+    "bharat petroleum": "BPCL.NS",
+    # HPCL
+    "hpcl": "HINDPETRO.NS",
+    "hindustan petroleum": "HINDPETRO.NS",
+    # Zomato
+    "zomato": "ZOMATO.NS",
+    # Paytm
+    "paytm": "PAYTM.NS",
+    # Nykaa
+    "nykaa": "NYKAA.NS",
+    # Dmart / Avenue Supermarts
+    "dmart": "DMART.NS",
+    "avenue supermarts": "DMART.NS",
+    # LIC
+    "lic": "LICI.NS",
+    # Tata Motors
+    "tata motors": "TATAMOTORS.NS",
+    # Tata Steel
+    "tata steel": "TATASTEEL.NS",
+    # Tata Power
+    "tata power": "TATAPOWER.NS",
+    # Tata Consumer
+    "tata consumer": "TATACONSUM.NS",
+    # Tata Elxsi
+    "tata elxsi": "TATAELXSI.NS",
+    # Adani Enterprises
+    "adani enterprises": "ADANIENT.NS",
+    # Adani Ports
+    "adani ports": "ADANIPORTS.NS",
+    # Adani Green
+    "adani green": "ADANIGREEN.NS",
+    # Adani Power
+    "adani power": "ADANIPOWER.NS",
+    # Vedanta
+    "vedanta": "VEDL.NS",
+    "vedl": "VEDL.NS",
+    # Hindalco
+    "hindalco": "HINDALCO.NS",
+    # JSW Steel
+    "jsw steel": "JSWSTEEL.NS",
+    "jsw": "JSWSTEEL.NS",
+    # Cipla
+    "cipla": "CIPLA.NS",
+    # Dr Reddy's
+    "dr reddy": "DRREDDY.NS",
+    "dr reddys": "DRREDDY.NS",
+    # Divis Labs
+    "divis": "DIVISLAB.NS",
+    "divis lab": "DIVISLAB.NS",
+    # UltraTech
+    "ultratech": "ULTRACEMCO.NS",
+    "ultratech cement": "ULTRACEMCO.NS",
+    # Grasim
+    "grasim": "GRASIM.NS",
+    # IndusInd Bank
+    "indusind": "INDUSINDBK.NS",
+    "indusind bank": "INDUSINDBK.NS",
+    # M&M
+    "m&m": "M&M.NS",
+    "mahindra": "M&M.NS",
+    "mahindra and mahindra": "M&M.NS",
+    # Hero MotoCorp
+    "hero": "HEROMOTOCO.NS",
+    "hero motocorp": "HEROMOTOCO.NS",
+    # Eicher Motors
+    "eicher": "EICHERMOT.NS",
+    "eicher motors": "EICHERMOT.NS",
+    # Pidilite
+    "pidilite": "PIDILITIND.NS",
+    # Godrej Consumer
+    "godrej": "GODREJCP.NS",
+    "godrej consumer": "GODREJCP.NS",
+    # Dabur
+    "dabur": "DABUR.NS",
+    # Britannia
+    "britannia": "BRITANNIA.NS",
+    # Havells
+    "havells": "HAVELLS.NS",
+    # Page Industries
+    "page industries": "PAGEIND.NS",
+    # Berger Paints
+    "berger paints": "BERGEPAINT.NS",
+    # SBI Life
+    "sbi life": "SBILIFE.NS",
+    # HDFC Life
+    "hdfc life": "HDFCLIFE.NS",
+    # ICICI Prudential
+    "icici prudential": "ICICIPRULI.NS",
+    "icici pru": "ICICIPRULI.NS",
+    # Trent
+    "trent": "TRENT.NS",
+    # Persistent
+    "persistent": "PERSISTENT.NS",
+    # Dixon
+    "dixon": "DIXON.NS",
+    # Polycab
+    "polycab": "POLYCAB.NS",
+    # HAL
+    "hal": "HAL.NS",
+    "hindustan aeronautics": "HAL.NS",
+    # BEL
+    "bel": "BEL.NS",
+    "bharat electronics": "BEL.NS",
+    # IRCTC
+    "irctc": "IRCTC.NS",
+}
+
+
+def check_merged_stock(symbol: str) -> dict:
+    """Check if a symbol is a merged/delisted stock.
+    Returns the MERGED_STOCKS entry if found, else None."""
+    return MERGED_STOCKS.get(symbol.upper().strip())
+
+
+def check_merged_by_name(query: str) -> dict:
+    """Check if user's search query matches a known merged company name.
+    Returns {'old_symbol': ..., **MERGED_STOCKS entry} if found, else None."""
+    query_lower = query.strip().lower()
+    for alias, old_symbol in MERGED_NAME_ALIASES.items():
+        if alias in query_lower:
+            entry = MERGED_STOCKS.get(old_symbol)
+            if entry:
+                return {**entry, "old_symbol": old_symbol}
+    return None
+
+
+def filter_and_annotate_companies(companies: list) -> tuple:
+    """Filter out merged/delisted stocks from company list.
+    Returns (filtered_companies, merger_notes) where merger_notes is a list of strings."""
+    filtered = []
+    merger_notes = []
+    seen_symbols = set()
+
+    for company in companies:
+        symbol = company.get('symbol', '').upper().strip()
+        merge_info = check_merged_stock(symbol)
+
+        if merge_info:
+            # This stock is merged/delisted
+            merger_notes.append(merge_info['note'])
+
+            if merge_info['status'] == 'merged' and merge_info.get('merged_into'):
+                successor = merge_info['merged_into']
+                # Add the successor if not already in the list
+                if successor not in seen_symbols:
+                    filtered.append({
+                        'name': merge_info.get('merged_name', company.get('name', '')),
+                        'symbol': successor,
+                        'exchange': 'NSE' if '.NS' in successor else 'BSE',
+                        'merger_info': merge_info['note']
+                    })
+                    seen_symbols.add(successor)
+            # If delisted with no successor, just skip it
+        else:
+            if symbol not in seen_symbols:
+                filtered.append(company)
+                seen_symbols.add(symbol)
+
+    return filtered, merger_notes
 
 
 # -------------------------
@@ -701,13 +1007,13 @@ agent = Agent(
     model=model,
     system_prompt=agent_system_prompt,
     deps_type=ConversationState,
-    output_type=str,  # Accept plain string — we extract the real tool output from deps cache
-    retries=2,        # Fewer retries since we recover from cache anyway
+    output_type=str,  
+    retries=2, 
 )
 
 
 # -------------------------
-#   RESPONSE VALIDATOR FUNCTION - Ensures agent returns ONLY tool output
+# RESPONSE VALIDATOR FUNCTION - Ensures agent returns ONLY tool output
 # -------------------------
 def validate_tool_output_only(response: str) -> str:
     """
@@ -1013,6 +1319,28 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
             "analyze_stock_request"
         )
     
+    # Check if this is a number selection from pending variants BEFORE safeguards
+    # so that "analyze 1", "analyze 2" etc. always work after a stock list is shown
+    _raw_input = ticker_symbol.strip()
+    _is_number_selection = False
+    if ctx.deps.pending_variants:
+        import re as _re_check
+        _num_check = None
+        if _raw_input.isdigit():
+            _num_check = int(_raw_input)
+        else:
+            _m = _re_check.search(r'\b(\d+)\b', _raw_input)
+            if _m:
+                _num_check = int(_m.group(1))
+        if _num_check is not None and 1 <= _num_check <= len(ctx.deps.pending_variants):
+            _is_number_selection = True
+            # Reset analysis state so safeguards don't block the new stock
+            ctx.deps.analysis_complete = False
+            ctx.deps.company_data = None
+            ctx.deps.stock_symbol = None
+            ctx.deps.stock_name = None
+            print(f"🔄 Number selection detected ({_num_check}), reset analysis state for new stock")
+
     # 🚨 CRITICAL SAFEGUARD #1: Check if analysis is already complete
     if hasattr(ctx.deps, 'analysis_complete') and ctx.deps.analysis_complete:
         print(f"🛑 BLOCKED: Analysis already complete, preventing repeated call")
@@ -1025,19 +1353,19 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
             "STOP: Analysis is complete. Do not call any more tools. The analysis results are already displayed to the user.",
             "analyze_stock_request"
         )
-    
+
     # 🚨 CRITICAL SAFEGUARD #2: Prevent repeated analysis calls after successful analysis
     if ctx.deps.company_data and ctx.deps.stock_symbol:
         # Check if this is a different stock or just a retry of failed analysis
         current_symbol = ctx.deps.stock_symbol.upper()
         new_symbol = ticker_symbol.strip().upper()
-        
+
         # If symbols are different and we already have successful data, reject the call
         if not new_symbol.isdigit() and new_symbol != current_symbol:
             # Check if the new symbol is similar (might be alternative ticker)
             base_current = current_symbol.replace('.NS', '').replace('.BO', '')
             base_new = new_symbol.replace('.NS', '').replace('.BO', '')
-            
+
             if base_new != base_current:
                 print(f"🛑 BLOCKED: Already analyzed {current_symbol}, rejecting call for {new_symbol}")
                 return create_tool_response(
@@ -1053,7 +1381,7 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
                     f"Using the existing analysis.",
                     "analyze_stock_request"
                 )
-    
+
     # Handle number selections from pending variants
     # Extract number from inputs like "1", "analyze 1", "now analyze 1", "please select 3"
     _raw = ticker_symbol.strip()
@@ -1084,10 +1412,100 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
             ticker_symbol = f"{ticker_symbol}.NS"
     
     try:
+        # ── DB CACHE CHECK: Return instantly if this stock was recently analyzed ──
+        # When 10 users are active, if User 2 asks for the same stock User 1 just analyzed,
+        # we skip the entire 90-second pipeline and return the cached report in <1s.
+        try:
+            from database_utility.database import StockDatabase
+            _cache_db = StockDatabase()
+            if _cache_db.connect():
+                cached_row = _cache_db.get_cached_analysis(ticker_symbol, max_age_hours=6)
+                _cache_db.disconnect()
+                if cached_row and cached_row.get('analyzed_response'):
+                    print(f"⚡ DB CACHE HIT — returning cached analysis for {ticker_symbol}")
+                    cached_report = cached_row['analyzed_response']
+                    _cached_name = cached_row.get('stock_name', ticker_symbol)
+
+                    # Build a basic CompanyData from quick yfinance fetch so
+                    # downstream features (sentiment, trade ideas, dashboard) work
+                    try:
+                        import yfinance as yf
+                        _yf = yf.Ticker(ticker_symbol)
+                        _info = _yf.info or {}
+                        _hist = _yf.history(period="1y")
+                        _price = _info.get('currentPrice') or _info.get('regularMarketPrice')
+                        if not _price and not _hist.empty:
+                            _price = float(_hist['Close'].iloc[-1])
+                        _52h = _info.get('fiftyTwoWeekHigh')
+                        _52l = _info.get('fiftyTwoWeekLow')
+                        if not _52h and not _hist.empty:
+                            _52h = float(_hist['High'].max())
+                            _52l = float(_hist['Low'].min())
+
+                        from models import (
+                            CompanyData, CompanySnapshot, BusinessOverview,
+                            FinancialData, MarketData, SWOTAnalysis
+                        )
+                        _cd = CompanyData(
+                            name=_cached_name,
+                            symbol=ticker_symbol,
+                            snapshot=CompanySnapshot(
+                                company_name=_cached_name,
+                                ticker_symbol=ticker_symbol,
+                                exchange=_info.get('exchange', 'NSE'),
+                                sector=_info.get('sector', 'N/A'),
+                                industry=_info.get('industry', 'N/A'),
+                                headquarters=_info.get('city', 'N/A'),
+                                ceo=_info.get('companyOfficers', [{}])[0].get('name') if _info.get('companyOfficers') else None,
+                                employees=_info.get('fullTimeEmployees'),
+                                website=_info.get('website', 'N/A'),
+                            ),
+                            business_overview=BusinessOverview(
+                                description=_info.get('longBusinessSummary', 'N/A'),
+                            ),
+                            financials=FinancialData(
+                                revenue=_info.get('totalRevenue'),
+                                net_profit=_info.get('netIncomeToCommon'),
+                                pe_ratio=_info.get('trailingPE'),
+                                pb_ratio=_info.get('priceToBook'),
+                                profit_margin=_info.get('profitMargins'),
+                                operating_margin=_info.get('operatingMargins'),
+                                dividend_yield=_info.get('dividendYield'),
+                                debt_to_equity=_info.get('debtToEquity'),
+                            ),
+                            market_data=MarketData(
+                                current_price=_price,
+                                market_cap=_info.get('marketCap'),
+                                week_52_high=_52h,
+                                week_52_low=_52l,
+                                promoter_holding=None,
+                                fii_holding=None,
+                                dii_holding=None,
+                            ),
+                            swot=SWOTAnalysis(),
+                        )
+                        ctx.deps.company_data = _cd
+                        print(f"✅ Built quick CompanyData for cache hit (price={_price})")
+                    except Exception as _cd_err:
+                        print(f"⚠️ Quick CompanyData build failed: {_cd_err}")
+
+                    ctx.deps.stock_symbol = ticker_symbol
+                    ctx.deps.stock_name = _cached_name
+                    ctx.deps.analysis_complete = True
+                    ctx.deps.last_analysis_response = cached_report
+                    return create_tool_response(
+                        f"✅ **Selected: {_cached_name} ({ticker_symbol})**\n\n"
+                        f"{cached_report}\n\n"
+                        f"*ℹ️ Cached analysis from {cached_row.get('analyzed_at', 'recently')}*",
+                        "analyze_stock_request"
+                    )
+        except Exception as cache_err:
+            print(f"⚠️ DB cache check failed (continuing with fresh analysis): {cache_err}")
+
         # Fetch company data directly (no re-validation needed)
         print(f"📊 Fetching data for validated ticker: {ticker_symbol}")
         company_data = StockTools.get_realtime_data(ticker_symbol)
-        
+
         if not company_data:
             error_msg = f"❌ Unable to fetch data for {ticker_symbol}. Please try another stock."
             return create_tool_response(error_msg, "analyze_stock_request")
@@ -1098,22 +1516,48 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
         ctx.deps.company_data = company_data
         ctx.deps.pending_variants = None
         
-        # Format report
+        # Format report (fast — no API calls, <1s)
         formatted_report = StockTools.format_data_for_report(company_data)
-        
-        # Generate PDF summary from screener.in
-        print(f"\n📄 Generating PDF summary from screener.in...")
-        try:
-            from utils.pdf_text_summarizer import PDFSummarizerPipeline
-            pipeline = PDFSummarizerPipeline()
-            
-            # Extract base stock symbol (remove .NS or .BO suffix)
-            base_symbol = ticker_symbol.replace('.NS', '').replace('.BO', '')
-            
-            pdf_result = pipeline.process_multiple_pdfs(base_symbol, num_pdfs=4)
-            
-            if pdf_result.get("success") and pdf_result.get("main_summary"):
-                screener_pdf_summary = f"""
+
+        # ── THREADING: Run expert opinion + PDF summarize in parallel ──
+        # Expert opinion: Tavily search + LLM (~20s)
+        # PDF summarize:  screener.in download + LLM (~48s fresh, <1s cached)
+        # Running in parallel saves ~20s (the shorter task is fully overlapped).
+        from concurrent.futures import ThreadPoolExecutor
+
+        base_symbol = ticker_symbol.replace('.NS', '').replace('.BO', '')
+
+        def _task_expert_opinion():
+            try:
+                return StockTools.generate_expert_opinion(company_data)
+            except Exception as e:
+                print(f"⚠️ Expert opinion generation failed: {e}")
+                return ""
+
+        def _task_pdf_summary():
+            try:
+                from utils.pdf_text_summarizer import PDFSummarizerPipeline
+                pipeline = PDFSummarizerPipeline()
+                return pipeline.process_multiple_pdfs(base_symbol, num_pdfs=4)
+            except Exception as e:
+                print(f"⚠️ PDF summary generation error: {e}")
+                return {"success": False, "error": str(e)}
+
+        print(f"\n⚡ Launching parallel tasks: expert opinion + PDF summary...")
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="report") as pool:
+            fut_expert = pool.submit(_task_expert_opinion)
+            fut_pdf = pool.submit(_task_pdf_summary)
+
+        # Collect expert opinion result
+        expert_opinion_text = fut_expert.result(timeout=120)
+        if expert_opinion_text:
+            formatted_report += f"\n\n👨‍💼 **EXPERT OPINION**\n{expert_opinion_text}\n"
+
+        # Collect PDF summary result
+        pdf_result = fut_pdf.result(timeout=300)
+        screener_pdf_summary = ""
+        if pdf_result.get("success") and pdf_result.get("main_summary"):
+            screener_pdf_summary = f"""
 
 **📊 Screener.in Quarterly Reports Summary**
 
@@ -1122,13 +1566,9 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
 **Based on analysis of latest {len(pdf_result.get('individual_summaries', []))} quarterly reports from screener.in**
 
 """
-                print(f"✅ PDF summary generated: {len(pdf_result['main_summary'].split())} words")
-            else:
-                screener_pdf_summary = ""
-                print(f"⚠️ PDF summary generation failed: {pdf_result.get('error', 'Unknown error')}")
-        except Exception as e:
-            screener_pdf_summary = ""
-            print(f"⚠️ PDF summary generation error: {e}")
+            print(f"✅ PDF summary generated: {len(pdf_result['main_summary'].split())} words")
+        else:
+            print(f"⚠️ PDF summary: {pdf_result.get('error', 'No summary generated')}")
         
         # Note: Shark Tank pitch generation is available via separate tool
         # Not included in main analysis to keep response focused
@@ -1143,15 +1583,16 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
         # Save to PostgreSQL database
         print(f"\n💾 Saving analysis to database...")
         try:
+            from database_utility.database import StockDatabase, extract_tech_analysis_json, calculate_selection_status
             # Extract technical analysis JSON
             tech_analysis_json = extract_tech_analysis_json(company_data)
-            
+
             # Calculate selection status
             is_selected = calculate_selection_status(company_data)
-            
+
             # Prepare analyzed response (formatted report + PDF summary)
             analyzed_response_text = f"{formatted_report}\n\n{screener_pdf_summary}"
-            
+
             # Note: Sentiment data will be saved separately when available
             # For now, we save the analysis without sentiment data
             db = StockDatabase()
@@ -1228,6 +1669,7 @@ def validate_and_get_stock(ctx: RunContext[ConversationState], stock_name: str) 
     Returns:
         ToolResponse: Either a complete stock analysis (if 1 match) OR a formatted list of options (if multiple matches)
     """
+    import yfinance as yf
     print(f"🔎 Validating stock '{stock_name}'...")
     
     # Block re-entry: if validate_and_get_stock already ran this turn, return cached result
@@ -1248,10 +1690,77 @@ def validate_and_get_stock(ctx: RunContext[ConversationState], stock_name: str) 
     if hasattr(ctx.deps, 'analysis_complete'):
         ctx.deps.analysis_complete = False
         print("🔄 Reset analysis_complete flag for new search")
-    
+
+    # ── MERGED STOCK PRE-CHECK ──
+    # Check if the user's query matches a known merged/delisted company
+    merge_match = check_merged_by_name(stock_name)
+    if not merge_match:
+        # Also check if user typed an exact symbol like "HDFC.NS"
+        merge_match = check_merged_stock(stock_name.strip().upper())
+        if merge_match:
+            merge_match = {**merge_match, "old_symbol": stock_name.strip().upper()}
+
+    if merge_match:
+        print(f"⚠️ Merged stock detected: {merge_match.get('old_symbol')} → {merge_match.get('merged_into')}")
+        if merge_match['status'] == 'merged' and merge_match.get('merged_into'):
+            # Redirect to the successor stock and auto-analyze
+            successor_symbol = merge_match['merged_into']
+            successor_name = merge_match.get('merged_name', successor_symbol)
+            merger_note = merge_match.get('note', '')
+
+            print(f"🔄 Redirecting to successor: {successor_name} ({successor_symbol})")
+
+            # Set up state for the successor
+            ctx.deps.pending_variants = [{
+                'symbol': successor_symbol,
+                'name': successor_name,
+                'exchange': 'NSE' if '.NS' in successor_symbol else 'BSE',
+                'merger_info': merger_note
+            }]
+
+            # Auto-analyze the successor (single stock, no selection needed)
+            ctx.deps.validation_done_this_turn = False
+            return analyze_stock_request(ctx, successor_symbol)
+        else:
+            # Delisted with no successor
+            return create_tool_response(
+                f"❌ **{stock_name}** is no longer listed.\n\n"
+                f"ℹ️ {merge_match.get('note', 'This stock has been delisted.')}\n\n"
+                f"Please search for a different stock.",
+                "validate_and_get_stock"
+            )
+
+    # ── FAST ALIAS LOOKUP ──
+    # Check common stock aliases BEFORE making the slow LLM call.
+    # This makes popular queries like "jio", "sbi", "airtel" resolve in <1 second.
+    alias_key = stock_name.strip().lower()
+    alias_symbol = COMMON_STOCK_ALIASES.get(alias_key)
+    if alias_symbol:
+        print(f"⚡ Fast alias match: '{stock_name}' → {alias_symbol}")
+        try:
+            ticker = yf.Ticker(alias_symbol)
+            info = ticker.info
+            if info and info.get('symbol') and (info.get('regularMarketPrice') or info.get('currentPrice') or info.get('previousClose')):
+                actual_name = info.get('longName') or info.get('shortName') or stock_name
+                resolved_symbol = info.get('symbol', alias_symbol)
+                print(f"✅ Fast alias verified: {actual_name} ({resolved_symbol})")
+
+                ctx.deps.pending_variants = [{
+                    'symbol': resolved_symbol,
+                    'name': actual_name,
+                    'exchange': info.get('exchange', 'NSE'),
+                }]
+                # Single match — auto-analyze directly
+                ctx.deps.validation_done_this_turn = False
+                return analyze_stock_request(ctx, resolved_symbol)
+            else:
+                print(f"⚠️ Fast alias {alias_symbol} could not be verified, falling through to LLM search")
+        except Exception as e:
+            print(f"⚠️ Fast alias lookup error for {alias_symbol}: {e}, falling through to LLM search")
+
     try:
         client = get_client()
-        
+
         system_prompt = """You are an expert Indian stock market analyst with access to real-time market data. Your task is to find ALL publicly listed companies related to a search query.
 
 CRITICAL REQUIREMENTS FOR ACCURACY:
@@ -1290,10 +1799,14 @@ Response: INFY.NS
 IMPORTANT NOTES:
 - Always use .NS (NSE) as primary exchange
 - Verify symbols are currently trading
-- Check for recent delistings or mergers
+- Check for recent delistings, mergers, or demergers
 - Don't make up symbols - only return verified ones
 - For single companies, return just that company
 - For business groups, return ALL related companies
+
+KNOWN RECENT CHANGES (as of 2025-2026):
+- Tata Motors was demerged in Oct 2025. The passenger vehicle unit is now "Tata Motors Passenger Vehicles Ltd" with ticker TMPV.NS. The commercial vehicle unit was renamed. TATAMOTORS.NS no longer exists on Yahoo Finance.
+- Always check if a company has undergone recent demerger/rename before returning old symbols.
 
 OUTPUT FORMAT (JSON only):
 {
@@ -1316,8 +1829,7 @@ VERIFICATION CHECKLIST BEFORE RETURNING:
 ✅ No recent delisting or merger
 ✅ Symbol is currently trading on NSE/BSE"""
 
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+        response = guarded_llm_call(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"""Find ALL publicly listed companies for '{stock_name}' on Indian stock exchanges (NSE/BSE).
@@ -1339,12 +1851,14 @@ SEARCH INSTRUCTIONS:
    - Check for correct abbreviations (e.g., TCS.NS not TATACONSULTANCY.NS)
 
 Return ALL matching companies with VERIFIED ticker symbols. Be comprehensive - for major business groups, there should be 5-15+ companies."""}
-            ]
+            ],
         )
         
         import json
         import re
         content = response.choices[0].message.content
+        if not content:
+            raise ValueError("LLM returned empty/null content for stock validation")
         print(f"📋 Perplexity response: {content[:100]}...")
         
         # Clean markdown and extract JSON
@@ -1384,13 +1898,87 @@ Return ALL matching companies with VERIFIED ticker symbols. Be comprehensive - f
         print(f"❌ Validation error: {e}")
         return create_tool_response(f"❌ Error validating '{stock_name}': {str(e)}. Please try a different name.", "validate_and_get_stock")
 
+    # ── YFINANCE DIRECT FALLBACK ──
+    # If LLM found nothing, try direct yfinance symbol guesses before giving up.
+    # This catches lesser-known stocks the LLM doesn't know about (e.g. CUPID.NS).
+    import yfinance as yf
+
     if not found or not companies:
-        print(f"⚠️ Perplexity found no companies for '{stock_name}'")
-        return create_tool_response(f"❌ No stocks found for '{stock_name}'. Please try:\n• A more specific company name\n• The exact ticker symbol (e.g., TCS.NS, RELIANCE.NS)\n• Check spelling and try again", "validate_and_get_stock")
-    
+        print(f"⚠️ LLM found no companies for '{stock_name}', trying yfinance direct search (3 retries)...")
+
+        # Build candidate symbols from the user's query
+        clean = stock_name.strip().upper().replace(' ', '')
+        candidates = []
+
+        # If user already provided a full symbol like CUPID.NS
+        if '.' in stock_name:
+            candidates.append(stock_name.strip().upper())
+        else:
+            # Try common patterns: NAME.NS, NAME.BO
+            candidates.extend([
+                f"{clean}.NS",
+                f"{clean}.BO",
+            ])
+            # Also try with spaces replaced differently
+            clean_with_dash = stock_name.strip().upper().replace(' ', '-')
+            if clean_with_dash != clean:
+                candidates.extend([f"{clean_with_dash}.NS", f"{clean_with_dash}.BO"])
+
+        fallback_companies = []
+        max_retries = 3
+        for sym in candidates:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    print(f"   🔄 Trying yfinance lookup: {sym} (attempt {attempt}/{max_retries})")
+                    ticker = yf.Ticker(sym)
+                    info = ticker.info
+                    if info and info.get('symbol') and (info.get('quoteType') == 'EQUITY' or info.get('longName')):
+                        actual_name = info.get('longName') or info.get('shortName') or stock_name
+                        fallback_companies.append({
+                            'name': actual_name,
+                            'symbol': info.get('symbol', sym),
+                            'exchange': info.get('exchange', 'NSE')
+                        })
+                        print(f"   ✅ Direct lookup found: {actual_name} ({sym})")
+                        break  # Success, stop retrying this symbol
+                    else:
+                        print(f"   ⚠️ {sym} returned no valid data (attempt {attempt})")
+                        if attempt < max_retries:
+                            import time as _time
+                            _time.sleep(0.3)
+                except Exception as e:
+                    print(f"   ❌ Lookup failed for {sym} (attempt {attempt}): {e}")
+                    if attempt < max_retries:
+                        import time as _time
+                        _time.sleep(0.3)
+                    continue
+            if fallback_companies:
+                break  # Found a match, stop trying other candidates
+
+        if fallback_companies:
+            companies = fallback_companies
+            found = True
+            print(f"✅ yfinance fallback found {len(companies)} company(ies)")
+        else:
+            print(f"❌ Both LLM and yfinance found nothing for '{stock_name}'")
+            return create_tool_response(
+                f"❌ No stocks found for '{stock_name}'. Please try:\n"
+                f"• A more specific company name\n"
+                f"• The exact ticker symbol (e.g., TCS.NS, RELIANCE.NS, CUPID.NS)\n"
+                f"• Check spelling and try again",
+                "validate_and_get_stock"
+            )
+
+    # ── FILTER MERGED/DELISTED STOCKS ──
+    # Remove known merged/delisted stocks before wasting yfinance API calls
+    companies, merger_notes_from_filter = filter_and_annotate_companies(companies)
+    if merger_notes_from_filter:
+        for note in merger_notes_from_filter:
+            print(f"   ℹ️ {note}")
+        print(f"📋 After filtering: {len(companies)} active companies remain")
+
     # SMART VERIFICATION: Verify symbols and try alternatives if needed
     print(f"🔍 Verifying {len(companies)} symbols with yfinance...")
-    import yfinance as yf
     import time
     
     validated_variants = []
@@ -1430,14 +2018,40 @@ Return ALL matching companies with VERIFIED ticker symbols. Be comprehensive - f
                     
                     # Verify this is a real stock (has some key fields)
                     if info.get('symbol') or info.get('quoteType') == 'EQUITY':
-                        validated_variants.append({
-                            'symbol': info.get('symbol', try_symbol),
-                            'name': actual_name,
-                            'exchange': info.get('exchange', c.get('exchange', 'NSE'))
-                        })
-                        print(f"   ✅ {try_symbol} verified: {actual_name}")
-                        verified = True
-                        break  # Found valid symbol, stop trying alternatives
+                        # Check if stock is delisted (no market price = likely delisted)
+                        has_price = info.get('regularMarketPrice') or info.get('currentPrice') or info.get('previousClose')
+                        resolved_symbol = info.get('symbol', try_symbol)
+
+                        # Also check against merged stocks registry
+                        if check_merged_stock(resolved_symbol):
+                            merge_info = check_merged_stock(resolved_symbol)
+                            print(f"   ⚠️ {try_symbol} is a merged/delisted stock: {merge_info['note']}")
+                            merger_notes_from_filter.append(merge_info['note'])
+                            # Add successor instead if available
+                            if merge_info.get('merged_into'):
+                                successor = merge_info['merged_into']
+                                if successor not in {v['symbol'] for v in validated_variants}:
+                                    validated_variants.append({
+                                        'symbol': successor,
+                                        'name': merge_info.get('merged_name', successor),
+                                        'exchange': 'NSE' if '.NS' in successor else 'BSE',
+                                        'merger_info': merge_info['note']
+                                    })
+                                    print(f"   🔄 Added successor: {successor}")
+                            verified = True
+                            break
+                        elif not has_price:
+                            print(f"   ⚠️ {try_symbol} has no market price — likely delisted, skipping")
+                            break
+                        else:
+                            validated_variants.append({
+                                'symbol': resolved_symbol,
+                                'name': actual_name,
+                                'exchange': info.get('exchange', c.get('exchange', 'NSE'))
+                            })
+                            print(f"   ✅ {try_symbol} verified: {actual_name}")
+                            verified = True
+                            break  # Found valid symbol, stop trying alternatives
                     else:
                         print(f"   ⚠️ {try_symbol} exists but might not be equity")
                 else:
@@ -1454,15 +2068,41 @@ Return ALL matching companies with VERIFIED ticker symbols. Be comprehensive - f
                 time.sleep(0.1)
                 continue
         
-        # If no variant worked but we have a name from Perplexity, add with warning
-        if not verified and c.get('name'):
-            print(f"   ⚠️ Could not verify {symbol}, but adding based on search result")
-            validated_variants.append({
-                'symbol': symbol,
-                'name': c.get('name'),
-                'exchange': c.get('exchange', 'NSE')
-            })
+        # If no variant worked, skip this symbol — don't show unverified/delisted stocks to the user
+        if not verified:
+            print(f"   ❌ Skipping {symbol} — could not verify on yfinance (possibly delisted/renamed)")
     
+    if not validated_variants:
+        # Last resort: try direct yfinance symbol guess with retries
+        print(f"⚠️ No LLM symbols verified, trying direct yfinance guess for '{stock_name}' (3 retries)...")
+        clean = stock_name.strip().upper().replace(' ', '')
+        for sym in [f"{clean}.NS", f"{clean}.BO"]:
+            for attempt in range(1, 4):
+                try:
+                    print(f"   🔄 Trying {sym} (attempt {attempt}/3)")
+                    ticker = yf.Ticker(sym)
+                    info = ticker.info
+                    if info and info.get('symbol') and (info.get('quoteType') == 'EQUITY' or info.get('longName')):
+                        actual_name = info.get('longName') or info.get('shortName') or stock_name
+                        validated_variants.append({
+                            'symbol': info.get('symbol', sym),
+                            'name': actual_name,
+                            'exchange': info.get('exchange', 'NSE')
+                        })
+                        print(f"   ✅ Direct fallback found: {actual_name} ({sym})")
+                        break
+                    else:
+                        if attempt < 3:
+                            import time as _time
+                            _time.sleep(0.3)
+                except Exception:
+                    if attempt < 3:
+                        import time as _time
+                        _time.sleep(0.3)
+                    continue
+            if validated_variants:
+                break
+
     if not validated_variants:
         print(f"❌ No symbols could be verified")
         error_msg = f"""❌ Could not verify any stock symbols for '{stock_name}'.
@@ -1476,137 +2116,124 @@ Please try:
 • A more specific company name
 • The exact ticker symbol (e.g., TCS.NS, RELIANCE.NS)
 • Check if the company is publicly traded"""
-        
+
         return create_tool_response(error_msg, "validate_and_get_stock")
     
     print(f"✅ Verified {len(validated_variants)}/{len(companies)} symbols")
     
-    # ENHANCEMENT: Always try comprehensive search for business groups
-    # This ensures we find ALL companies in conglomerates like Reliance, Tata, Adani, etc.
-    print(f"🔍 Found {len(validated_variants)} companies, trying comprehensive business group search...")
-    
-    try:
-        # Create multiple enhanced search queries to catch all variations
-        enhanced_queries = [
-            # Query 1: Direct business group search
-            f"Find ALL publicly listed companies in the '{stock_name}' business group in India. Include parent company, subsidiaries, joint ventures, and affiliated companies. Search for companies like '{stock_name} Industries', '{stock_name} Limited', '{stock_name} Corp', '{stock_name} Power', '{stock_name} Infrastructure', '{stock_name} Energy', '{stock_name} Capital', '{stock_name} Finance', '{stock_name} Motors', '{stock_name} Steel', '{stock_name} Chemicals', '{stock_name} Telecom', '{stock_name} Retail'. Return ALL stock ticker symbols ending with .NS or .BO.",
-            
-            # Query 2: Sector-specific search
-            f"List ALL companies owned by or affiliated with '{stock_name}' group across different sectors: oil & gas, petrochemicals, telecommunications, retail, power, infrastructure, financial services, steel, automotive, chemicals, textiles, hospitality. Include both majority-owned subsidiaries and joint ventures. Provide Yahoo Finance ticker symbols ending with .NS or .BO.",
-            
-            # Query 3: Comprehensive conglomerate search
-            f"'{stock_name}' is a major Indian business conglomerate. Find ALL their publicly listed companies across ALL business verticals and sectors. Include holding companies, operating companies, subsidiaries, and associate companies. Search comprehensively for any company with '{stock_name}' in the name or owned by the '{stock_name}' group. Return complete list with .NS/.BO ticker symbols."
-        ]
-        
-        all_enhanced_companies = []
-        
-        for i, enhanced_query in enumerate(enhanced_queries, 1):
-            try:
-                print(f"🔍 Running enhanced search {i}/3...")
-                
-                enhanced_response = client.chat.completions.create(
-                    model="openai/gpt-oss-120b",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": enhanced_query}
-                    ],
-                    temperature=0.1  # Lower temperature for more consistent results
-                )
-                
-                enhanced_content = enhanced_response.choices[0].message.content
-                print(f"📋 Enhanced search {i} response: {enhanced_content[:100]}...")
-                
-                # Clean and parse enhanced response with better JSON extraction
-                if "```json" in enhanced_content:
-                    # Extract content between ```json and ```
-                    json_match = re.search(r'```json\s*(\{.*?\})\s*```', enhanced_content, re.DOTALL)
-                    if json_match:
-                        enhanced_content = json_match.group(1)
-                    else:
-                        enhanced_content = enhanced_content.split("```json")[1].split("```")[0].strip()
-                elif "```" in enhanced_content:
-                    # Extract content between ``` and ```
-                    json_match = re.search(r'```\s*(\{.*?\})\s*```', enhanced_content, re.DOTALL)
-                    if json_match:
-                        enhanced_content = json_match.group(1)
-                    else:
-                        enhanced_content = enhanced_content.split("```")[1].split("```")[0].strip()
-                else:
-                    # Try to extract JSON object from the content
-                    json_match = re.search(r'(\{.*\})', enhanced_content, re.DOTALL)
-                    if json_match:
-                        enhanced_content = json_match.group(1)
-                
-                # Remove any trailing text after the JSON object
-                enhanced_content = enhanced_content.strip()
-                
-                # Find the last closing brace and truncate there
-                last_brace = enhanced_content.rfind('}')
-                if last_brace != -1:
-                    enhanced_content = enhanced_content[:last_brace + 1]
-                
-                enhanced_data = json.loads(enhanced_content)
-                enhanced_companies = enhanced_data.get('companies', [])
-                
-                if enhanced_companies:
-                    all_enhanced_companies.extend(enhanced_companies)
-                    print(f"✅ Enhanced search {i} found {len(enhanced_companies)} companies")
-                
-            except Exception as search_error:
-                print(f"⚠️ Enhanced search {i} failed: {search_error}")
-                continue
-        
-        # Merge all enhanced results with existing results, avoiding duplicates
-        if all_enhanced_companies:
-            existing_symbols = {v['symbol'].upper() for v in validated_variants}
-            added_count = 0
-            
-            print(f"🔍 Verifying {len(all_enhanced_companies)} enhanced search symbols...")
-            
-            for company in all_enhanced_companies:
-                symbol = company.get('symbol', '').upper().strip()
-                if not symbol or symbol in existing_symbols:
-                    continue
-                
+    # ENHANCEMENT: Only try comprehensive search for known business groups
+    # Skip for single-company queries to avoid wasting 3 extra LLM calls
+    business_groups = ['tata', 'adani', 'reliance', 'birla', 'bajaj', 'mahindra', 'ambani', 'godrej', 'aditya', 'vedanta', 'jindal', 'essar', 'hero', 'larsen']
+    is_business_group = any(group in stock_name.lower() for group in business_groups)
+
+    if not is_business_group:
+        print(f"⏭️ Skipping enhanced business group search — '{stock_name}' is not a known conglomerate")
+    else:
+        print(f"🔍 Found {len(validated_variants)} companies, trying comprehensive business group search...")
+        try:
+            enhanced_queries = [
+                f"Find ALL publicly listed companies in the '{stock_name}' business group in India. Include parent company, subsidiaries, joint ventures, and affiliated companies. Search for companies like '{stock_name} Industries', '{stock_name} Limited', '{stock_name} Corp', '{stock_name} Power', '{stock_name} Infrastructure', '{stock_name} Energy', '{stock_name} Capital', '{stock_name} Finance', '{stock_name} Motors', '{stock_name} Steel', '{stock_name} Chemicals', '{stock_name} Telecom', '{stock_name} Retail'. Return ALL stock ticker symbols ending with .NS or .BO.",
+                f"List ALL companies owned by or affiliated with '{stock_name}' group across different sectors: oil & gas, petrochemicals, telecommunications, retail, power, infrastructure, financial services, steel, automotive, chemicals, textiles, hospitality. Include both majority-owned subsidiaries and joint ventures. Provide Yahoo Finance ticker symbols ending with .NS or .BO.",
+                f"'{stock_name}' is a major Indian business conglomerate. Find ALL their publicly listed companies across ALL business verticals and sectors. Include holding companies, operating companies, subsidiaries, and associate companies. Search comprehensively for any company with '{stock_name}' in the name or owned by the '{stock_name}' group. Return complete list with .NS/.BO ticker symbols."
+            ]
+
+            all_enhanced_companies = []
+
+            for i, enhanced_query in enumerate(enhanced_queries, 1):
                 try:
-                    # Verify with yfinance before adding
-                    print(f"   Checking {symbol}...")
-                    ticker = yf.Ticker(symbol)
-                    info = ticker.info
-                    
-                    if info and 'symbol' in info and info.get('symbol'):
-                        actual_name = info.get('longName') or info.get('shortName') or company.get('name', '')
-                        
-                        if actual_name:
-                            validated_variants.append({
-                                'symbol': info.get('symbol', symbol),
-                                'name': actual_name,
-                                'exchange': info.get('exchange', company.get('exchange', 'Unknown'))
-                            })
-                            existing_symbols.add(symbol)
-                            added_count += 1
-                            print(f"   ✅ {symbol} verified: {actual_name}")
+                    print(f"🔍 Running enhanced search {i}/3...")
+                    enhanced_response = guarded_llm_call(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": enhanced_query}
+                        ],
+                    )
+                    enhanced_content = enhanced_response.choices[0].message.content
+                    if not enhanced_content:
+                        print(f"  ⚠️ Enhanced search {i} returned empty content, skipping")
+                        continue
+                    print(f"📋 Enhanced search {i} response: {enhanced_content[:100]}...")
+
+                    if "```json" in enhanced_content:
+                        json_match = re.search(r'```json\s*(\{.*?\})\s*```', enhanced_content, re.DOTALL)
+                        if json_match:
+                            enhanced_content = json_match.group(1)
                         else:
-                            print(f"   ⚠️ {symbol} has no name data, skipping")
+                            enhanced_content = enhanced_content.split("```json")[1].split("```")[0].strip()
+                    elif "```" in enhanced_content:
+                        json_match = re.search(r'```\s*(\{.*?\})\s*```', enhanced_content, re.DOTALL)
+                        if json_match:
+                            enhanced_content = json_match.group(1)
+                        else:
+                            enhanced_content = enhanced_content.split("```")[1].split("```")[0].strip()
                     else:
-                        print(f"   ⚠️ {symbol} not found or invalid")
-                        
-                    time.sleep(0.1)  # Small delay
-                    
-                except Exception as e:
-                    print(f"   ❌ {symbol} verification failed: {e}")
+                        json_match = re.search(r'(\{.*\})', enhanced_content, re.DOTALL)
+                        if json_match:
+                            enhanced_content = json_match.group(1)
+
+                    enhanced_content = enhanced_content.strip()
+                    last_brace = enhanced_content.rfind('}')
+                    if last_brace != -1:
+                        enhanced_content = enhanced_content[:last_brace + 1]
+
+                    enhanced_data = json.loads(enhanced_content)
+                    enhanced_companies = enhanced_data.get('companies', [])
+                    if enhanced_companies:
+                        all_enhanced_companies.extend(enhanced_companies)
+                        print(f"✅ Enhanced search {i} found {len(enhanced_companies)} companies")
+
+                except Exception as search_error:
+                    print(f"⚠️ Enhanced search {i} failed: {search_error}")
                     continue
-            
-            print(f"✅ Enhanced searches found {added_count} additional verified companies")
-            print(f"📊 Total verified companies: {len(validated_variants)}")
-        
-    except Exception as e:
-        print(f"⚠️ Enhanced search system failed: {e}, continuing with original results")
+
+            if all_enhanced_companies:
+                existing_symbols = {v['symbol'].upper() for v in validated_variants}
+                added_count = 0
+                print(f"🔍 Verifying {len(all_enhanced_companies)} enhanced search symbols...")
+
+                for company in all_enhanced_companies:
+                    symbol = company.get('symbol', '').upper().strip()
+                    if not symbol or symbol in existing_symbols:
+                        continue
+                    try:
+                        print(f"   Checking {symbol}...")
+                        ticker = yf.Ticker(symbol)
+                        info = ticker.info
+                        if info and 'symbol' in info and info.get('symbol'):
+                            actual_name = info.get('longName') or info.get('shortName') or company.get('name', '')
+                            if actual_name:
+                                validated_variants.append({
+                                    'symbol': info.get('symbol', symbol),
+                                    'name': actual_name,
+                                    'exchange': info.get('exchange', company.get('exchange', 'Unknown'))
+                                })
+                                existing_symbols.add(symbol)
+                                added_count += 1
+                                print(f"   ✅ {symbol} verified: {actual_name}")
+                            else:
+                                print(f"   ⚠️ {symbol} has no name data, skipping")
+                        else:
+                            print(f"   ⚠️ {symbol} not found or invalid")
+                        time.sleep(0.1)
+                    except Exception as e:
+                        print(f"   ❌ {symbol} verification failed: {e}")
+                        continue
+
+                print(f"✅ Enhanced searches found {added_count} additional verified companies")
+                print(f"📊 Total verified companies: {len(validated_variants)}")
+
+        except Exception as e:
+            print(f"⚠️ Enhanced search system failed: {e}, continuing with original results")
     
+    # Final pass: filter merged/delisted from verified results too
+    validated_variants, final_merger_notes = filter_and_annotate_companies(validated_variants)
+    if final_merger_notes:
+        merger_notes_from_filter.extend(final_merger_notes)
+
     ctx.deps.pending_variants = validated_variants
-    
+
     # Check if any companies have merger info
-    has_merger_info = any(c.get('merger_info') for c in companies)
+    has_merger_info = bool(merger_notes_from_filter) or any(c.get('merger_info') for c in validated_variants)
     
     # Format response with options - Use cleaner format without "- Exchange"
     options_text = ""
@@ -1634,10 +2261,14 @@ Please try:
         # Directly call analyze_stock_request with the single stock
         single_stock = validated_variants[0]
         ticker_symbol = single_stock['symbol']
-        
+
         # Clear pending variants since we're analyzing directly
         ctx.deps.pending_variants = None
-        
+
+        # Clear the validation_done_this_turn flag so analyze_stock_request
+        # doesn't block itself (it checks this flag as a safeguard)
+        ctx.deps.validation_done_this_turn = False
+
         # Call analyze_stock_request and return its ToolResponse directly
         # This maintains the correct return type for the agent
         return analyze_stock_request(ctx, ticker_symbol)
@@ -1649,7 +2280,13 @@ Please try:
 {options_text}"""
     
     if has_merger_info:
-        response_text += "\n**Note:** Some companies have been merged or renamed. The current ticker symbols are shown above.\n"
+        # Show specific merger notes
+        unique_notes = list(dict.fromkeys(merger_notes_from_filter))  # deduplicate, preserve order
+        if unique_notes:
+            notes_text = "\n".join(f"ℹ️ {note}" for note in unique_notes)
+            response_text += f"\n**Corporate Actions:**\n{notes_text}\n"
+        else:
+            response_text += "\n**Note:** Some companies have been merged or renamed. The current ticker symbols are shown above.\n"
     
     response_text += """
 **Select which one to analyze:**
@@ -1735,7 +2372,7 @@ def handle_trader_question(ctx: RunContext[ConversationState], question: str) ->
             elif val >= 1e5: return f"{currency}{val/1e5:.2f} L"
             else: return f"{currency}{val:,.0f}"
         else:
-            return create_tool_response(f"{currency}{val/1e9:.2f}B", "handle_trader_question")
+            return f"{currency}{val/1e9:.2f}B"
     
     # Create context for the LLM
     company_context = f"""
@@ -1773,14 +2410,13 @@ QUESTION: {question}
 
 Respond naturally as the CEO/CFO would:"""
 
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",  # Free model
+        response = guarded_llm_call(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question}
             ],
             temperature=0.7,
-            max_tokens=300
+            max_tokens=300,
         )
         
         # Safe handling of response content
@@ -1948,4 +2584,197 @@ I can help you with comprehensive stock analysis for Indian and global markets.
 
 What stock would you like to analyze today?"""
     
+    ctx.deps.last_validation_response = greeting_message
     return create_tool_response(greeting_message, "handle_greeting")
+
+
+@agent.tool
+@traceable(name="get_fii_dii_sentiment")
+def get_fii_dii_sentiment_tool(ctx: RunContext[ConversationState], symbol: str) -> ToolResponse:
+    """
+    Get FII (Foreign Institutional Investor) and DII (Domestic Institutional Investor)
+    sentiment analysis for a stock including quarterly trend, score, and recommendation.
+
+    Use this tool when the user asks:
+    - What is FII or DII holding for a stock?
+    - Is FII buying or selling a stock?
+    - What is institutional sentiment?
+    - Are foreign investors buying?
+    - Should I buy based on institutional activity?
+    - What is the institutional holding trend?
+
+    Args:
+        symbol: NSE/BSE ticker (e.g., "TCS.NS", "RELIANCE.NS")
+    """
+    try:
+        # Pull cached FII/DII from existing company_data if available
+        cached_fii = None
+        cached_dii = None
+        company_name = None
+
+        if ctx.deps.company_data:
+            cd = ctx.deps.company_data
+            cached_fii = cd.market_data.fii_holding if cd.market_data else None
+            cached_dii = cd.market_data.dii_holding if cd.market_data else None
+            company_name = cd.name
+
+            # Normalize: if value < 1, it's decimal format from yfinance
+            if cached_fii is not None and cached_fii < 1:
+                cached_fii = cached_fii * 100
+            if cached_dii is not None and cached_dii < 1:
+                cached_dii = cached_dii * 100
+
+        result = _get_fii_dii_data(
+            symbol=symbol,
+            company_name=company_name,
+            cached_fii=float(cached_fii) if cached_fii is not None else None,
+            cached_dii=float(cached_dii) if cached_dii is not None else None,
+        )
+
+        def trend_arrow(trend: str) -> str:
+            if "Strongly Increasing" in trend: return "++ Strongly Increasing"
+            if "Increasing" in trend:          return "+ Increasing"
+            if "Strongly Decreasing" in trend: return "-- Strongly Decreasing"
+            if "Decreasing" in trend:          return "- Decreasing"
+            return "= Stable"
+
+        def change_str(change):
+            if change is None: return "N/A"
+            sign = "+" if change >= 0 else ""
+            return f"{sign}{change:.2f}pp"
+
+        history_lines = "\n".join(
+            f"  {h.quarter}: FII {h.fii_pct:.2f}% | DII {h.dii_pct:.2f}%"
+            for h in result.quarterly_history[-6:]
+        )
+
+        reasoning_lines = "\n".join(f"  - {r}" for r in result.reasoning)
+
+        response_text = f"""
+## FII/DII Institutional Sentiment: {result.company_name or symbol}
+
+### Recommendation: {result.recommendation}
+**Score**: {result.institutional_sentiment_score:.1f}/100 - {result.sentiment_label}
+
+### Current Holdings
+| Type | Holding | Trend (1Q) | Change (1Q) | Change (4Q) |
+|------|---------|------------|-------------|-------------|
+| FII | {result.current_fii_pct:.2f}% | {trend_arrow(result.fii_trend)} | {change_str(result.fii_change_1q)} | {change_str(result.fii_change_4q)} |
+| DII | {result.current_dii_pct:.2f}% | {trend_arrow(result.dii_trend)} | {change_str(result.dii_change_1q)} | {change_str(result.dii_change_4q)} |
+| Total Inst. | {result.current_total_institutional:.2f}% | - | - | - |
+
+### Quarterly History
+{history_lines}
+
+### Analysis
+{reasoning_lines}
+
+*Data source: {result.data_source} | Freshness: {result.data_freshness}*
+"""
+        return create_tool_response(response_text.strip(), "get_fii_dii_sentiment")
+
+    except Exception as e:
+        return create_tool_response(
+            f"Could not fetch FII/DII data for {symbol}: {str(e)}. "
+            f"Try checking screener.in manually for shareholding pattern.",
+            "get_fii_dii_sentiment"
+        )
+
+
+@agent.tool
+async def get_option_chain_analysis(
+    ctx: RunContext[ConversationState],
+    symbol: str,
+    expiry_index: int = 0,
+) -> ToolResponse:
+    """
+    Fetch and analyze NSE option chain data for a stock or index.
+    Provides OI-based market direction analysis with Buy/Sell/Wait recommendation.
+
+    Use this tool when the user asks:
+    - What does the option chain say for [stock/index]?
+    - Show me OI analysis for [symbol]
+    - What is Put-Call Ratio for [symbol]?
+    - Where is Max Pain for [symbol]?
+    - Is the market bullish or bearish based on options?
+    - Should I buy [stock] based on OI data?
+    - What are the support and resistance levels from options?
+    - Show option chain for NIFTY / BANKNIFTY / [stock]
+
+    Args:
+        symbol: Stock or index symbol. Examples: NIFTY, BANKNIFTY, RELIANCE.NS, TCS.NS
+        expiry_index: 0 = nearest expiry (default), 1 = next expiry
+    """
+    try:
+        result = _fetch_option_chain(symbol=symbol, expiry_index=expiry_index)
+        a = result.analysis
+
+        def fmt(n: int) -> str:
+            if n >= 10_000_000:
+                return f"{n/10_000_000:.1f}Cr"
+            elif n >= 100_000:
+                return f"{n/100_000:.1f}L"
+            else:
+                return f"{n:,}"
+
+        top_call = sorted(result.strikes, key=lambda x: x.call_oi, reverse=True)[:5]
+        top_put = sorted(result.strikes, key=lambda x: x.put_oi, reverse=True)[:5]
+
+        response_text = f"""
+## Option Chain Analysis: {result.symbol}
+**Expiry**: {result.expiry_date} | **Spot**: {result.underlying_price:,.2f}
+
+---
+
+### Recommendation: {a.recommendation}
+**Market Bias**: {a.bias_strength} {a.market_bias} | **Confidence**: {a.confidence}
+
+---
+
+### Key OI Levels
+| Level | Strike |
+|-------|--------|
+| Max Call OI (Resistance) | {a.max_call_oi_strike:,.0f} |
+| Max Put OI (Support) | {a.max_put_oi_strike:,.0f} |
+| Max Pain | {a.max_pain_strike:,.0f} |
+| Put-Call Ratio | {a.put_call_ratio:.3f} ({a.pcr_label}) |
+| Expected Range | {a.range_low:,.0f} - {a.range_high:,.0f} |
+
+---
+
+### Top 5 Call OI Strikes (Resistance Zones)
+{chr(10).join(f"- {s.strike:,.0f} -> OI: {fmt(s.call_oi)} (Chng: {s.call_chng_oi:+,})" for s in top_call)}
+
+### Top 5 Put OI Strikes (Support Zones)
+{chr(10).join(f"- {s.strike:,.0f} -> OI: {fmt(s.put_oi)} (Chng: {s.put_chng_oi:+,})" for s in top_put)}
+
+---
+
+### OI Shift Analysis
+**Call OI**: {a.call_oi_shift.description}
+**Put OI**: {a.put_oi_shift.description}
+
+---
+
+### Full Verdict
+{chr(10).join(a.verdict_points)}
+"""
+        return create_tool_response(response_text.strip(), "get_option_chain_analysis")
+
+    except ValueError as e:
+        return create_tool_response(
+            f"Option chain not available for {symbol}: {str(e)}. "
+            f"This stock may not be F&O eligible on NSE.",
+            "get_option_chain_analysis"
+        )
+    except ConnectionError as e:
+        return create_tool_response(
+            f"Could not connect to NSE for option chain data: {str(e)}. "
+            f"NSE API may be temporarily unavailable. Try again shortly.",
+            "get_option_chain_analysis"
+        )
+    except Exception as e:
+        return create_tool_response(
+            f"Option chain analysis failed for {symbol}: {str(e)}",
+            "get_option_chain_analysis"
+        )

@@ -35,9 +35,10 @@ requests
 httpx
 beautifulsoup4
 lxml
+playwright
 
 # Database
-psycopg2
+psycopg2-binary
 SQLAlchemy
 peewee
 
@@ -47,3 +48,7 @@ pydantic
 pydantic-settings
 python-dateutil
 pytz
+
+# FinBERT sentiment (ProsusAI/finbert — ~440MB model, ~2GB RAM when loaded)
+transformers>=4.36.0
+torch>=2.0.0

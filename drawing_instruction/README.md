@@ -1,322 +1,289 @@
-# 🎨 Auto Drawing Generator
+# Drawing Instruction Module
 
-Automatically generate TradingView drawing instructions from price data analysis with **professional institutional validation**.
+This module auto-generates TradingView-compatible drawing instructions (JSON) from stock price data. It combines rule-based technical analysis with LLM-powered pattern detection to produce supply/demand zones, candlestick patterns, Smart Money Concept (SMC) structures, Fair Value Gaps, liquidity sweeps, and standard indicators — all output as JSON that TradingView can render as chart drawings.
 
-## 🎯 Features
+---
 
-- **Supply/Demand Zone Detection** - Algorithmic detection with professional institutional validation
-- **Candlestick Pattern Recognition** - Engulfing, Doji, Hammer, Shooting Star, Morning/Evening Star
-- **Technical Indicators** - Bollinger Bands, RSI, MACD with signals
-- **Key Level Detection** - Support and resistance levels from swing highs/lows
-- **JSON Output** - TradingView-compatible drawing instruction format
-- **Validation Summary** - Detailed validation metrics for each zone
+## How It Works — The Pipeline
 
-## 📦 Installation
+Every analysis follows the same pipeline regardless of entry point (CLI, API, chat, or Streamlit):
 
-```bash
-cd drawing_instruction
-pip install -r requirements.txt
+```
+User Input (symbol, timeframe, period)
+        |
+        v
+  Symbol Resolver ──── Converts shorthand ("JIO") to NSE format ("JIOFIN.NS")
+        |
+        v
+  Price Fetcher ─────── Fetches OHLCV DataFrame via yfinance or external API
+        |
+        v
+  Analysis Layer ─────── Runs selected detectors in parallel:
+        |                  - Zone Detector (supply/demand)
+        |                  - Pattern Detector (candlestick patterns)
+        |                  - SMC Indicator (BOS, CHoCH, order blocks, FVGs)
+        |                  - Supply/Demand Indicator (volume profile zones)
+        |                  - Liquidity Sweeps (pivot level sweeps)
+        |                  - Indicator Calculator (Bollinger, RSI)
+        |                  - MACD Indicator (crossovers, 4-color histogram)
+        |                  - LLM Pattern Detector (AI-powered FVG + patterns)
+        |
+        v
+  JSON Builder ────────── Converts all detections to TradingView drawing JSON
+        |
+        v
+  Output ─────────────── JSON array of drawing objects (zones, markers, lines)
 ```
 
-## 🚀 Usage
+---
 
-### 1. Command Line
+## File-by-File Breakdown
+
+### Data Layer
+
+| File | What It Does |
+|------|-------------|
+| `symbol_resolver.py` | Maps shorthand stock names to NSE-format symbols. Contains `SYMBOL_MAP` dictionary with 100+ Indian stock mappings. Key function: `resolve_symbol(symbol)`. |
+| `price_fetcher.py` | Fetches OHLCV data via **yfinance**. Returns a pandas DataFrame with `[Open, High, Low, Close, Volume, timestamp]` columns. Auto-tries `.NS` suffix for Indian stocks. Key function: `fetch_price_data(symbol, timeframe, period)`. |
+| `api_price_fetcher.py` | Alternative data source using an authenticated external API (`/api/v1/mentor/get-forex-data/`). Class `APIPriceFetcher` takes `base_url`, `bearer_token`, `csrf_token`. Supports stocks, forex, crypto. Handles multiple response field naming conventions. Alerts on 401 token expiry. |
+
+### Rule-Based Detection
+
+| File | What It Does |
+|------|-------------|
+| `zone_detector.py` | Detects institutional supply/demand zones using 3-step validation: **(1)** tight consolidation base (range < 1.5x ATR, body < 50% of range, min 3 candles), **(2)** explosive impulse move (range > 2x base, body > 40% of impulse), **(3)** clean departure (wick ratio < 25%). Outputs Rally-Base-Rally (demand) and Drop-Base-Drop (supply) zones. Key function: `detect_supply_demand_zones(df)`. Also has `filter_overlapping_zones()` to remove duplicates keeping strongest. |
+| `pattern_detector.py` | Detects classical candlestick patterns: Hammer, Inverted Hammer, Engulfing (bullish/bearish), Morning/Evening Star, Three White Soldiers, Three Black Crows, Doji variants, Harami, Tweezer, Piercing Line, Dark Cloud Cover. Each pattern returns type, signal (bullish/bearish/neutral), timestamp, price, and human-readable reason. Key function: `detect_candlestick_patterns(df, max_patterns=15)`. |
+| `indicator_calculator.py` | Calculates standard technical indicators. Functions: `calculate_bollinger_bands(df, period=20, std_dev=2)` with squeeze detection, `calculate_rsi(df, period=14)` with overbought/oversold signals, `calculate_macd(df, fast=12, slow=26, signal=9)` with crossovers, `calculate_moving_averages(df, periods)`. All return lists of time/price point dicts for TradingView. |
+
+### Advanced Indicators (Smart Money / Institutional)
+
+| File | What It Does |
+|------|-------------|
+| `smc_indicator.py` | **Smart Money Concepts** — class `SMCIndicator`. Detects: Break Of Structure (BOS), Change of Character (CHoCH), Order Blocks (bullish/bearish), Fair Value Gaps with fill tracking, Equal Highs/Lows, Strong/Weak premium/discount levels. Uses data classes `Pivot`, `OrderBlock`, `FairValueGap`, `StructureEvent`. Key params: `swing_length=50`, `internal_length=5`, `ob_filter="atr"`. Methods: `run()`, `plot()`. |
+| `supply_demand_indicator.py` | **Volume Profile Zones** — class `SupplyDemandIndicator` (LuxAlgo conversion). Builds volume-at-price profile by distributing bar volume across price bins, then scans top-down for supply and bottom-up for demand where cumulative volume crosses threshold. Key params: `threshold=10%`, `resolution=50`, `last_n_bars=200`. Output: `Zone` objects with top/bottom/avg/vwap. Methods: `run()`, `get_zones()`, `plot()`. |
+| `liquidity_sweeps.py` | **Liquidity Sweep Detection** — class `LiquiditySweeps`. Identifies when price wicks through or breaks past pivot levels then reverses back, signaling institutional stop hunts. Two modes: `'wicks'` (wick pierces pivot, closes back) and `'outbreaks'` (close beyond pivot, later closes back). Output: `SweepEvent` with pivot price, sweep bar, direction, and box coordinates. Key params: `swing_len=5`, `mode='wicks'`, `max_bars=300`. |
+| `macd_indicator.py` | **MACD with 4-Color Histogram** — class `MACDIndicator` (TradingView-faithful). Histogram uses 4 states: green-strong (positive + rising), green-weak (positive + falling), red-weak (negative + rising), red-strong (negative + falling). Generates crossover alerts for buy/sell signals. Methods: `run()`, `get_data()`, `get_alerts()`, `plot()`. |
+
+### LLM-Powered Detection
+
+| File | What It Does |
+|------|-------------|
+| `llm_pattern_detector.py` | Class `LLMPatternDetector`. Sends OHLCV data to OpenRouter LLM (`openai/gpt-oss-120b`, temperature=0.1) for three tasks: **(A)** Fair Value Gap detection with gap size validation (>0.1%), fill status, and confidence scoring, **(B)** candlestick pattern recognition on last 15 candles, **(C)** RSI/MACD/support-resistance levels. Has a full **fallback chain** that uses `SupplyDemandIndicator` + `SMCIndicator` + `LiquiditySweeps` + `MACDIndicator` when LLM fails or returns no results. |
+| `chat_drawing_agent.py` | Class `ChatDrawingAgent`. Natural language interface — parses user messages like "show me supply demand zones and FVGs" into structured intents using LLM, with keyword-based fallback. Maps keywords to drawing types (e.g., "sweep" -> `liquidity_sweeps`, "smc" -> `smc`). Key method: `generate_from_chat(user_message, symbol, timeframe)`. |
+
+### JSON Output & Orchestration
+
+| File | What It Does |
+|------|-------------|
+| `json_builder.py` | Converts all detections into TradingView drawing JSON. Zones become `LineToolRectangle` (red=supply, green=demand), patterns become `LineToolNote` markers (positioned above/below candle based on signal), indicators become `TrendLine` objects. Every drawing has: `id`, `type`, `state` (colors, text, visibility), `points` (price + unix timestamp), `metadata` (validation, strength, reason). Key function: `build_drawing_json(symbol, zones, patterns, bollinger, rsi, macd, levels)`. |
+| `drawing_generator.py` | **Main orchestrator for rule-based pipeline**. Coordinates: resolve symbol -> fetch data -> run selected detectors -> build JSON. Key function: `generate_drawings(symbol, timeframe, period, tasks, use_api, api_config)`. Convenience wrappers: `generate_zones_only()`, `generate_patterns_only()`, `generate_indicators_only()`, `generate_complete_analysis()`. The `tasks` param controls which detectors run: `["zones", "patterns", "bollinger", "rsi", "macd", "levels"]`. |
+| `llm_drawing_generator.py` | **Orchestrator for AI-powered pipeline**. Uses LLM analysis first, then fills gaps with fallback indicators. If LLM returns no zones, adds from `SupplyDemandIndicator`. If no FVGs, adds from fallback. Always includes SMC, liquidity sweeps, and MACD data. Returns drawings + candle data + validation stats. Key function: `generate_drawings_with_llm(symbol, timeframe, use_api, api_config)`. |
+| `api_server.py` | Flask REST API (port 5001) with web dashboard. Endpoints: `POST /api/generate` (full analysis), `POST /api/zones`, `POST /api/patterns`, `POST /api/indicators`. Request body accepts `symbol`, `timeframe`, `period`, `tasks`, `use_api`, `api_config`. |
+| `__init__.py` | Public API exports: `fetch_price_data`, `detect_supply_demand_zones`, `detect_candlestick_patterns`, `calculate_bollinger_bands`, `build_drawing_json`. |
+
+### Reference Docs
+
+| File | What It Does |
+|------|-------------|
+| `ZONE_VALIDATION_GUIDE.md` | Detailed methodology document explaining the 3-step institutional zone validation logic. |
+| `requirements.txt` | Module-specific dependencies: yfinance, pandas, numpy, flask, flask-cors, python-dateutil. |
+
+---
+
+## How to Run
+
+### CLI — Generate drawings to JSON file
 
 ```bash
-# Generate complete analysis
-python -m drawing_instruction.drawing_generator AAPL 1d 1y
-
-# Output: drawing_output_AAPL_1d.json
+# From the project root
+python -m drawing_instruction.drawing_generator RELIANCE.NS 1d 1y
+# Output: drawing_output_RELIANCE.NS_1d.json
 ```
 
-### 2. Python API
+### Python — Import and call directly
 
 ```python
 from drawing_instruction.drawing_generator import generate_complete_analysis
 
-# Generate all drawings
-result = generate_complete_analysis("AAPL", timeframe="1d", period="1y")
-
+# Rule-based analysis
+result = generate_complete_analysis("TCS.NS", timeframe="1d", period="1y")
 print(f"Generated {result['total_drawings']} drawings")
-print(f"Valid zones: {result['validation_summary']['valid_zones']}")
+
+# Only zones
+from drawing_instruction.drawing_generator import generate_zones_only
+zones = generate_zones_only("RELIANCE.NS", timeframe="1d", period="6mo")
+
+# LLM-powered analysis (uses AI + fallback indicators)
+from drawing_instruction.llm_drawing_generator import generate_drawings_with_llm
+result = generate_drawings_with_llm("INFY.NS", timeframe="1d")
+
+# Chat-based (natural language)
+from drawing_instruction.chat_drawing_agent import ChatDrawingAgent
+agent = ChatDrawingAgent()
+result = agent.generate_from_chat("show me supply demand zones and FVGs", symbol="TCS.NS", timeframe="1d")
 ```
 
-### 3. Flask API Server
+### Flask API
 
 ```bash
-# Start API server
 python -m drawing_instruction.api_server
-
-# Open: http://localhost:5001
+# Dashboard: http://localhost:5001
 ```
 
-### 4. Streamlit Integration
+```bash
+# POST request example
+curl -X POST http://localhost:5001/api/generate \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "RELIANCE.NS", "timeframe": "1d", "period": "1y", "tasks": ["zones", "patterns"]}'
+```
 
-The Drawing Generator is integrated into `app_advanced.py`:
+### Using external API data source instead of yfinance
 
-1. Run the app: `streamlit run app_advanced.py`
-2. Select **🎨 Drawing Generator** from sidebar
-3. Configure symbol, timeframe, and tasks
-4. Click **Generate Drawings**
-5. Download JSON output
-
-## 📊 Output Format
-
-```json
-{
-  "symbol": "AAPL",
-  "total_drawings": 25,
-  "drawings": [
-    {
-      "id": "unique-uuid",
-      "type": "RectangleTool",
-      "state": {
-        "fillColor": "#FF5252",
-        "text": "🔴 SUPPLY ZONE",
-        ...
-      },
-      "points": [
-        {"price": 150.25, "time_t": 1234567890},
-        {"price": 148.50, "time_t": 1234567900}
-      ],
-      "metadata": {
-        "zone_type": "supply",
-        "strength": 2.5,
-        "reason": "Detailed explanation...",
-        "validation": {
-          "base_tight": true,
-          "impulse_strong": true,
-          "departure_clean": true,
-          "all_criteria_met": true
-        }
-      }
+```python
+result = generate_complete_analysis(
+    "RELIANCE",
+    timeframe="1d",
+    period="1y",
+    use_api=True,
+    api_config={
+        "base_url": "http://192.168.0.126:8000",
+        "bearer_token": "your-token",
+        "csrf_token": "your-csrf",
+        "from_date": "2025-01-01",
+        "to_date": "2026-03-03",
+        "market": "stocks"
     }
+)
+```
+
+### Streamlit Integration
+
+The module is integrated into the main app's sidebar under "Drawing Generator":
+
+```bash
+streamlit run app_advanced.py
+# Then select Drawing Generator from sidebar
+```
+
+---
+
+## Output JSON Format
+
+Every drawing object follows TradingView's format:
+
+```json
+{
+  "id": "unique-uuid",
+  "type": "LineToolRectangle",
+  "state": {
+    "symbol": "NSE:RELIANCE",
+    "interval": "1D",
+    "fillColor": "#FF5252",
+    "transparency": 80,
+    "text": "SUPPLY ZONE",
+    "visible": true
+  },
+  "points": [
+    { "price": 2450.50, "time_t": 1710000000, "offset": 0 },
+    { "price": 2430.00, "time_t": 1710500000, "offset": 0 }
   ],
-  "validation_summary": {
-    "total_zones": 5,
-    "valid_zones": 2,
-    "zones_with_validation": ["supply", "demand"]
+  "zorder": 0,
+  "metadata": {
+    "zone_type": "supply",
+    "impulse_strength": 2.5,
+    "is_fresh": true,
+    "reason": "DBD pattern: 4-candle base, impulse 2.5x base range, clean departure",
+    "validation": {
+      "base_tight": true,
+      "impulse_strong": true,
+      "departure_clean": true,
+      "all_criteria_met": true
+    }
   }
 }
 ```
 
-## 🔧 API Endpoints
+Drawing types used: `LineToolRectangle` (zones), `LineToolNote` (pattern markers), `TrendLine` (indicator lines/bands).
 
-### POST /api/generate
-Generate drawing instructions
+---
 
-**Request:**
-```json
-{
-  "symbol": "AAPL",
-  "timeframe": "1d",
-  "period": "1y",
-  "tasks": ["zones", "patterns", "bollinger"]
-}
-```
+## Two Analysis Pipelines
 
-**Response:**
-```json
-{
-  "symbol": "AAPL",
-  "total_drawings": 15,
-  "drawings": [...],
-  "validation_summary": {
-    "total_zones": 5,
-    "valid_zones": 2
-  }
-}
-```
+### 1. Rule-Based Pipeline (`drawing_generator.py`)
 
-### POST /api/zones
-Generate only supply/demand zones
+Uses deterministic algorithms only. You pick which tasks to run:
 
-### POST /api/patterns
-Generate only candlestick patterns
+| Task | Detector | What It Finds |
+|------|----------|---------------|
+| `zones` | `zone_detector.py` | Supply/demand zones with 3-step institutional validation |
+| `patterns` | `pattern_detector.py` | 15+ candlestick patterns (hammer, engulfing, doji, star, etc.) |
+| `bollinger` | `indicator_calculator.py` | Bollinger Bands with squeeze detection |
+| `rsi` | `indicator_calculator.py` | RSI overbought/oversold signals |
+| `macd` | `indicator_calculator.py` | MACD crossovers |
+| `levels` | `indicator_calculator.py` | Key support/resistance levels |
 
-### POST /api/indicators
-Generate only technical indicators
+### 2. LLM-Powered Pipeline (`llm_drawing_generator.py`)
 
-## 📚 Module Structure
+Sends OHLCV data to OpenRouter LLM for analysis, then fills gaps with fallback indicators:
 
-```
-drawing_instruction/
-├── __init__.py                 # Package initialization
-├── price_fetcher.py            # Fetch OHLCV data from yfinance
-├── zone_detector.py            # Supply/demand zone detection
-├── pattern_detector.py         # Candlestick pattern recognition
-├── indicator_calculator.py     # Technical indicators (BB, RSI, MACD)
-├── json_builder.py             # Build TradingView JSON format
-├── drawing_generator.py        # Main orchestrator
-├── api_server.py               # Flask API server
-├── llm_drawing_generator.py    # LLM-powered drawing generation
-├── llm_pattern_detector.py     # LLM-powered pattern detection
-├── requirements.txt            # Dependencies
-├── README.md                   # This file
-└── ZONE_VALIDATION_GUIDE.md    # Zone validation methodology
-```
+1. LLM analyzes candle data for FVGs, patterns, and indicator levels
+2. If LLM returns no zones -> `SupplyDemandIndicator` (volume profile) fills in
+3. If LLM returns no FVGs -> fallback analysis adds them
+4. Always appends: SMC structures, liquidity sweeps, MACD data
+5. Builds combined TradingView JSON
 
-## 🎓 Detection Logic
+The fallback chain ensures you always get results even if the LLM call fails or times out.
 
-### Supply/Demand Zones (Professional Institutional Methodology)
+---
 
-**Three-Step Validation:**
+## Key Detection Algorithms
 
-1. **Consolidation/Base Formation**: Tight sideways range with small-bodied candles (where orders accumulate)
-   - Minimum 3 candles (ideally 3-7)
-   - Base range ≤ 1.5x ATR(14)
+### Supply/Demand Zone Validation (zone_detector.py)
+
+Three-step institutional methodology. A zone is only marked valid when ALL three pass:
+
+1. **Base Formation** — tight sideways consolidation where institutional orders accumulate
+   - Min 3 candles, max 10
+   - Range < 1.5x ATR(14)
    - Body-to-range ratio < 0.5
 
-2. **Strong Impulsive Move**: Explosive directional move (proves order imbalance)
-   - Impulse range ≥ 2x base range
-   - Impulse body-to-range ratio > 0.4
-   - Net move ≥ 2% of base range
+2. **Impulse Move** — explosive breakout proving order imbalance
+   - Range > 2x base range
+   - Body-to-range ratio > 0.4
 
-3. **Speed of Departure**: Quick exit with minimal wicks back into base (confirms strong rejection)
-   - Wick ratio ≤ 0.25 (≤ 25% of base range)
+3. **Departure Speed** — clean exit confirming strong rejection
+   - Wick ratio < 25% of base range
    - No retests within 3 candles
 
-**Zone Types:**
-- **Demand Zone (Green)**: Rally → Base → Rally (RBR) - Institutional buying
-- **Supply Zone (Red)**: Drop → Base → Drop (DBD) - Institutional selling
+Zone types: **RBR** (Rally-Base-Rally = demand), **DBD** (Drop-Base-Drop = supply).
 
-### Candlestick Patterns
+### Smart Money Concepts (smc_indicator.py)
 
-- **Engulfing**: Current candle engulfs previous (>1.2x body size)
-- **Doji**: Body < 10% of total range
-- **Hammer**: Lower shadow > 2x body, upper shadow < 0.5x body
-- **Shooting Star**: Upper shadow > 2x body, lower shadow < 0.5x body
-- **Morning/Evening Star**: 3-candle reversal pattern
+Detects institutional footprints: Break Of Structure (BOS) for trend continuation, Change of Character (CHoCH) for reversals, Order Blocks where institutions placed large orders, Fair Value Gaps showing price imbalance, and Equal Highs/Lows marking liquidity pools.
 
-### Technical Indicators
+### Liquidity Sweeps (liquidity_sweeps.py)
 
-- **Bollinger Bands**: 20-period SMA ± 2 standard deviations
-- **RSI**: 14-period relative strength (overbought >70, oversold <30)
-- **MACD**: 12/26/9 EMA with crossover detection
+Identifies stop hunts where price wicks through or breaks past a pivot level then reverses back. Two detection modes: wick sweeps (intra-bar) and outbreak retests (close beyond, then return).
 
-## 🔍 Example Use Cases
+---
 
-### 1. Automated Trading Bot
-```python
-result = generate_complete_analysis("AAPL")
-for drawing in result['drawings']:
-    if drawing['type'] == 'RectangleTool':
-        zone = drawing['metadata']
-        if zone['validation']['all_criteria_met'] and zone['zone_type'] == 'demand':
-            # Strong demand zone - potential buy signal
-            place_buy_order(drawing['points'][0]['price'])
-```
+## Adding a New Indicator or Detector
 
-### 2. Chart Annotation
-```python
-result = generate_zones_only("RELIANCE.NS")
-# Import zones into your charting platform
-import_to_tradingview(result['drawings'])
-```
+1. Create your detector function/class in a new `.py` file in this folder
+2. It should accept a pandas DataFrame (OHLCV) and return a list of detection dicts
+3. Add a builder function in `json_builder.py` to convert detections to TradingView JSON
+4. Wire it into `drawing_generator.py` — add a new task name and call your detector when that task is selected
+5. Export from `__init__.py` if it should be part of the public API
 
-### 3. Backtesting
-```python
-result = generate_complete_analysis("TCS.NS", period="5y")
-# Test strategy against historical zones and patterns
-backtest_strategy(result)
-```
+---
 
-## ⚙️ Configuration
+## Environment Variables
 
-### Timeframes
-- `1m`, `5m`, `15m` - Intraday
-- `1h` - Hourly
-- `1d` - Daily (recommended)
-- `1wk`, `1mo` - Weekly/Monthly
+The LLM-powered features require these (loaded from `.env` in project root):
 
-### Periods
-- `1d`, `5d` - Short term
-- `1mo`, `3mo`, `6mo` - Medium term
-- `1y`, `2y`, `5y` - Long term
+- `OPENROUTER_API_KEY` — for LLM calls in `llm_pattern_detector.py` and `chat_drawing_agent.py`
+- `OPENROUTER_BASE_URL` — OpenRouter endpoint (default: `https://openrouter.ai/api/v1`)
 
-### Tasks
-- `zones` - Supply/demand zones (with professional validation)
-- `patterns` - Candlestick patterns
-- `bollinger` - Bollinger Bands
-- `rsi` - RSI signals
-- `macd` - MACD crossovers
-- `levels` - Key support/resistance
+The rule-based pipeline (`drawing_generator.py`) has no env var requirements — it only needs yfinance (public API).
 
-## 🐛 Troubleshooting
-
-### No data fetched
-- Check symbol format (add `.NS` for Indian stocks)
-- Verify internet connection
-- Try different period/timeframe
-
-### Few detections
-- Increase period (more data = more patterns)
-- Lower detection thresholds in code
-- Check if symbol has sufficient trading history
-
-### API errors
-- Ensure Flask is installed: `pip install flask flask-cors`
-- Check port 5001 is available
-- Verify yfinance is working: `pip install --upgrade yfinance`
-
-### No valid zones detected
-- This is GOOD! It means the system is being strict
-- Check the validation summary: `result['validation_summary']`
-- Look for zones with `all_criteria_met: true`
-- If no zones pass, the market may not have clear institutional zones
-
-## 📝 Validation Summary
-
-The system provides detailed validation for each zone:
-
-```json
-{
-  "validation_summary": {
-    "total_zones": 5,
-    "valid_zones": 2,
-    "zones_with_validation": ["supply", "demand"]
-  }
-}
-```
-
-Each zone includes:
-- `validation.base_tight`: Base is properly consolidated
-- `validation.impulse_strong`: Impulse move is strong enough
-- `validation.departure_clean`: Price left cleanly without retest
-- `validation.all_criteria_met`: Zone passes ALL requirements
-- `confidence`: Overall confidence level (0-100)
-- `is_fresh`: Zone hasn't been retested yet
-
-## 📚 Additional Documentation
-
-- **[ZONE_VALIDATION_GUIDE.md](ZONE_VALIDATION_GUIDE.md)** - Detailed methodology for zone validation
-
-## 🤝 Contributing
-
-To add new pattern detectors or indicators:
-
-1. Add detection function to appropriate module
-2. Update `drawing_generator.py` to call it
-3. Add JSON builder in `json_builder.py`
-4. Update this README
-
-## 📞 Support
-
-For issues or questions, refer to the main project documentation.
-
-## 🎯 Why This Matters
-
-**90% of supply/demand detection algorithms are wrong** because they:
-- Mark random price levels without proper consolidation
-- Ignore the institutional order flow perspective
-- Don't validate the strength of the impulsive move
-- Fail to check for clean departures from zones
-
-**Our system ensures:**
-- ✅ Only professional-grade zones are marked
-- ✅ Institutional order flow methodology is followed
-- ✅ All validation criteria are met before marking zones
-- ✅ Confidence levels reflect actual zone quality
-- ✅ Clear explanation of why each zone is valid/invalid
-
-**Result: 90%+ accuracy on supply/demand zone detection**
+The external API data source (`api_price_fetcher.py`) requires bearer/CSRF tokens passed at runtime, not from env vars.

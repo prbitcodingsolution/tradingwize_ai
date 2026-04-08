@@ -156,7 +156,7 @@ Return ONLY valid JSON:
             
             try:
                 response = self.client.chat.completions.create(
-                    model="openai/gpt-4o-mini",
+                    model="openai/gpt-oss-20b",
                     messages=[
                         {"role": "system", "content": "You are a financial sentiment analysis expert. Analyze news sentiment and return ONLY valid JSON."},
                         {"role": "user", "content": sentiment_prompt}
@@ -222,7 +222,7 @@ Return ONLY valid JSON:
             
             try:
                 response = self.client.chat.completions.create(
-                    model="openai/gpt-4o-mini",
+                    model="openai/gpt-oss-20b",
                     messages=[
                         {"role": "system", "content": "You are a financial analyst expert. Extract sentiment data and return ONLY valid JSON."},
                         {"role": "user", "content": sentiment_prompt}
@@ -390,7 +390,7 @@ Return ONLY valid JSON:
         
         try:
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-20b",
                 messages=[
                     {"role": "system", "content": "You are a Twitter sentiment analysis expert specializing in stock market discussions. Analyze sentiment and return ONLY valid JSON."},
                     {"role": "user", "content": sentiment_prompt}
@@ -599,7 +599,7 @@ Be specific, balanced, and actionable. Highlight consensus and divergences acros
         
         try:
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-20b",
                 messages=[
                     {"role": "system", "content": "You are a senior market analyst creating unified sentiment reports from multiple data sources."},
                     {"role": "user", "content": analysis_prompt}
@@ -696,7 +696,7 @@ Return ONLY valid JSON:
 }}"""
             
             response = self.client.chat.completions.create(
-                model="openai/gpt-4o-mini",
+                model="openai/gpt-oss-20b",
                 messages=[
                     {"role": "system", "content": f"You are a {source} sentiment analyst. Return ONLY valid JSON."},
                     {"role": "user", "content": sentiment_prompt}

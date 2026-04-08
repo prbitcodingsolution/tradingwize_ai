@@ -518,7 +518,12 @@ class PDFSummarizerPipeline:
         try:
             # Step 1: Download all PDFs
             print(f"\n📥 Step 1: Downloading {num_pdfs} PDFs...")
-            pdf_paths = download_stock_pdf(stock_name, num_pdfs=num_pdfs)
+            # Use a per-thread download directory to prevent file collisions
+            # when multiple users analyze the same stock simultaneously.
+            import threading
+            _thread_id = threading.current_thread().ident or 0
+            _dl_dir = f"downloads/{_thread_id}"
+            pdf_paths = download_stock_pdf(stock_name, save_dir=_dl_dir, num_pdfs=num_pdfs)
             
             if not pdf_paths or len(pdf_paths) == 0:
                 raise ValueError("Failed to download PDFs")

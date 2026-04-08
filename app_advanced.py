@@ -5,22 +5,17 @@
 import streamlit as st
 import streamlit.components.v1 as components
 from agent1 import agent, ConversationState, ToolResponse, agent_system_prompt
-from mcp_agent import mcp_agent, MCPConversationState, create_mcp_state, is_mcp_enabled
 from datetime import datetime
 import plotly.graph_objects as go
 import plotly.express as px
-from plotly.subplots import make_subplots
 import pandas as pd
-import numpy as np
-from tools import StockTools
 from langsmith import traceable
-from langsmith.integrations.otel import configure
 import re
 import os
 import time
 import json
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart, SystemPromptPart
-from agent1 import agent_system_prompt
+from utils.option_chain_analyzer import get_option_chain_analysis as fetch_option_chain, _clean_symbol_for_nse
 
 def fix_response_formatting(response: str) -> str:
     """
@@ -174,32 +169,17 @@ def streamlit_markdown_formatter(content: str) -> str:
     print(f"✅ Compact formatting complete")
     
     return content.strip()
-    
-    return content.strip()
 
-# Debug LangSmith configuration
-print(f"🔍 LangSmith Debug:")
-print(f"  API Key: {'✅ Set' if os.getenv('LANGSMITH_API_KEY') else '❌ Missing'}")
-print(f"  Project: {os.getenv('LANGSMITH_PROJECT')}")
-print(f"  Tracing: {os.getenv('LANGSMITH_TRACING')}")
-
-# Ensure LangSmith environment variables are set
-os.environ["LANGSMITH_API_KEY"] = os.getenv("LANGSMITH_API_KEY", "")
-os.environ["LANGSMITH_PROJECT"] = os.getenv("LANGSMITH_PROJECT", "trader_agent")
-os.environ["LANGSMITH_ENDPOINT"] = os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
-os.environ["LANGSMITH_TRACING"] = os.getenv("LANGSMITH_TRACING", "true")
-
-configure(project_name=os.getenv("LANGSMITH_PROJECT"))
-
-# Test LangSmith tracing on app startup
-@traceable(name="streamlit_app_startup")
-def test_langsmith_on_startup():
-    """Test function to verify LangSmith is working on app startup"""
-    return f"Streamlit app started with LangSmith tracing - Project: {os.getenv('LANGSMITH_PROJECT')}"
-
-# Call the test function
-startup_result = test_langsmith_on_startup()
-print(f"🚀 {startup_result}")
+# ── LangSmith initialisation (once per process, not per Streamlit rerun) ──
+if "langsmith_initialised" not in st.session_state:
+    from langsmith.integrations.otel import configure as _ls_configure
+    os.environ.setdefault("LANGSMITH_API_KEY", os.getenv("LANGSMITH_API_KEY", ""))
+    os.environ.setdefault("LANGSMITH_PROJECT", os.getenv("LANGSMITH_PROJECT", "trader_agent"))
+    os.environ.setdefault("LANGSMITH_ENDPOINT", os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com"))
+    os.environ.setdefault("LANGSMITH_TRACING", os.getenv("LANGSMITH_TRACING", "true"))
+    _ls_configure(project_name=os.getenv("LANGSMITH_PROJECT"))
+    print(f"🚀 LangSmith configured — project: {os.getenv('LANGSMITH_PROJECT')}")
+    st.session_state.langsmith_initialised = True
 
 # Page configuration
 st.set_page_config(
@@ -216,7 +196,7 @@ st.markdown("""
 
     /* Remove Streamlit default top padding */
     .block-container {
-        padding-top: 1rem !important;
+        padding-top: 3rem !important;
     }
     header[data-testid="stHeader"] {
         height: 2.5rem !important;
@@ -243,7 +223,7 @@ st.markdown("""
     
     .hero-section {
         background: #9EF04D;
-        padding: 2.0rem 3rem;
+        padding: 1.3rem 3rem;
         border-radius: 1rem;
         text-align: center;
         margin-bottom: 2rem;
@@ -251,7 +231,7 @@ st.markdown("""
     }
     
     .hero-title {
-        font-size: 2.5rem;
+        font-size: 2.0rem;
         font-weight: 700;
         margin-bottom: 0.5rem;
         color: #222222;
@@ -750,6 +730,10 @@ if 'ppt_path' not in st.session_state:
     st.session_state.ppt_path = None
 if 'pdf_path' not in st.session_state:
     st.session_state.pdf_path = None
+if 'pending_user_input' not in st.session_state:
+    st.session_state.pending_user_input = None
+if 'is_processing' not in st.session_state:
+    st.session_state.is_processing = False
 
 
 
@@ -758,7 +742,7 @@ print(f"📊 Session state - Messages: {len(st.session_state.messages)}, Stock: 
 
 # Sidebar
 with st.sidebar:
-    # Theme-aware logo: dark logo on light theme, light logo on dark theme
+    # Always use the dark logo regardless of theme
     import base64
 
     def img_to_base64(path):
@@ -766,30 +750,18 @@ with st.sidebar:
             return base64.b64encode(f.read()).decode()
 
     try:
-        dark_b64  = img_to_base64("static/tradingwize-logo-dark.png")
-        light_b64 = img_to_base64("static/tradingwize-logo-light.png")
+        dark_b64 = img_to_base64("static/tradingwize-logo-dark.png")
         st.markdown(f"""
         <style>
-            /* light theme → show dark logo, hide light logo */
-            [data-theme="light"] .logo-for-dark  {{ display: none !important; }}
-            [data-theme="light"] .logo-for-light {{ display: block !important; }}
-            /* dark theme → show light logo, hide dark logo */
-            [data-theme="dark"]  .logo-for-light {{ display: none !important; }}
-            [data-theme="dark"]  .logo-for-dark  {{ display: block !important; }}
-            /* default fallback (no attribute yet) → show dark logo */
-            .logo-for-dark  {{ display: block; }}
-            .logo-for-light {{ display: none; }}
-            .sidebar-logo img {{ max-width: 270px; width: 100%; height: auto; margin-bottom: 0.25rem; }}
+            .sidebar-logo img {{ max-width: 270px; width: 100%; height: auto; margin-bottom: 0.25rem; border-radius: 8px; mix-blend-mode: screen; }}
         </style>
         <div class="sidebar-logo">
-            <img class="logo-for-dark"  src="data:image/png;base64,{dark_b64}" />
-            <img class="logo-for-light" src="data:image/png;base64,{light_b64}" />
+            <img src="data:image/png;base64,{dark_b64}" />
         </div>
         """, unsafe_allow_html=True)
     except Exception as e:
         print(f"Logo load error: {e}")
 
-    st.title("Stock Analysis")
     st.markdown("---")
     
     # Current Analysis
@@ -933,7 +905,7 @@ with st.sidebar:
             # Open PPT button (shows PDF viewer)
             with col2:
                 # Check if viewer is currently active
-                current_view = st.session_state.get("view_selector", "💬 Chat")
+                current_view = st.session_state.get("view_selector", "🏦 Fundamental Analysis")
                 is_viewer_active = current_view == "📖 Presentation Viewer"
                 
                 if is_viewer_active:
@@ -1070,34 +1042,49 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # View Navigation (NEW - moved from top tabs)
-    st.subheader("📑 View")
-    
-    # Build view options in the desired order
-    # Order: Chat → Data Dashboard → Sentiment Analysis → Presentation Viewer → Drawing Generator → Bulk Stock Analyzer → Technical Scanner → System Info
+    # View Navigation
+    st.markdown("""
+    <style>
+        /* Style the sidebar radio buttons as pill-like nav items */
+        div[data-testid="stSidebar"] div[role="radiogroup"] {
+            gap: 2px !important;
+        }
+        div[data-testid="stSidebar"] div[role="radiogroup"] label {
+            padding: 6px 10px !important;
+            border-radius: 8px !important;
+            transition: all 0.2s ease !important;
+            font-size: 0.92rem !important;
+        }
+        div[data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+            background-color: rgba(116, 229, 4, 0.1) !important;
+        }
+        div[data-testid="stSidebar"] div[role="radiogroup"] label[data-checked="true"],
+        div[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
+            background: linear-gradient(135deg, rgba(116, 229, 4, 0.15), rgba(116, 229, 4, 0.05)) !important;
+            border-left: 3px solid #74e504 !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+    st.subheader("🧭 Navigate")
+
+    # Build view options with distinctive emojis
     view_options = [
-        "💬 Chat",
-        "📊 Data Dashboard",
-        "📈 Sentiment Analysis"
+        "🏦 Fundamental Analysis",
+        "📈 Data Dashboard"
     ]
-    
+
     # Add Presentation Viewer if PPT was generated
     if hasattr(st.session_state, 'ppt_path') and st.session_state.ppt_path:
         view_options.append("📖 Presentation Viewer")
-    
+
     # Add Drawing Generator (always available)
-    view_options.append("🎨 Drawing Generator")
-    
+    view_options.append("🖊️ Drawing Generator")
+
     # Add Bulk Stock Analyzer
-    view_options.append("🔍 Bulk Stock Analyzer")
-    
-    # Add Technical Scanner if MCP is enabled
-    use_mcp = os.getenv("USE_MCP", "false").lower() == "true"
-    if use_mcp:
-        view_options.append("📊 Technical Scanner")
-    
+    view_options.append("⚡ Bulk Stock Analyzer")
+
     # Add System Info at the end
-    view_options.append("🔧 System Info")
+    view_options.append("⚙️ System Info")
     
     view_option = st.radio(
         "Select View",
@@ -1107,26 +1094,7 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    
-    # MCP Technical Analysis Scanner (NEW)
-    st.subheader("📈 Technical Scanner")
-    
-    # Check if MCP is enabled
-    use_mcp = os.getenv("USE_MCP", "false").lower() == "true"
-    
-    if use_mcp:
-        st.caption("🔧 TradingView MCP Tools Active")
-        
-        if st.button("🔍 Scan Bollinger Squeeze", use_container_width=True, type="primary", key="scan_bollinger"):
-            st.session_state.show_mcp_scanner = True
-            st.session_state.view_selector = "📊 Technical Scanner"
-            st.rerun()
-    else:
-        st.caption("⚠️ MCP Disabled")
-        st.caption("Set USE_MCP=true in .env to enable technical analysis tools")
-    
-    st.markdown("---")
-    
+
     # Session Stats
     st.subheader("📈 Session Statistics")
     col1, col2 = st.columns(2)
@@ -1182,2256 +1150,2182 @@ with st.sidebar:
         with st.expander(f"{icon} {name}"):
             st.caption(desc)
 
-# Main content
-st.markdown('<h1 class="main-header">Stock Analysis</h1>', unsafe_allow_html=True)
+# Main content area - render based on sidebar selection
+view_option = st.session_state.get("view_selector", "🏦 Fundamental Analysis")
 
-# Simplified hero section - only show if no messages
-if len(st.session_state.messages) == 0:
+if view_option == "🏦 Fundamental Analysis":
+    # ── Clean CSS: hide the border on st.container(height=...) so chat looks seamless ──
     st.markdown("""
-    <div class="hero-section">
-        <div class="hero-title">AI-Powered Stock Analysis</div>
-        <div class="hero-subtitle">
-            Get comprehensive insights with real-time data and expert analysis
-        </div>
-    </div>
+    <style>
+        /* Remove the default border/outline Streamlit adds to height-constrained containers */
+        div[data-testid="stVerticalBlockBorderWrapper"]:has(> div[style*="overflow"]) {
+            border: none !important;
+            box-shadow: none !important;
+            outline: none !important;
+        }
+    </style>
     """, unsafe_allow_html=True)
 
-# Main content area - render based on sidebar selection
-view_option = st.session_state.get("view_selector", "💬 Chat")
+    # Fundamental Analysis - tabs for Chat, Sentiment, and Trade Ideas
+    fund_tab1, fund_tab2, fund_tab3, fund_tab4, fund_tab5 = st.tabs(["💬 Chat", "📈 Sentiment Analysis", "📊 Trade Ideas", "🤖 FinRobot Agent", "📊 Option Chain"])
 
-if view_option == "💬 Chat":
-    # Chat interface - cleaner header
-    st.markdown("### 💬 Chat")
-    
-    # Show welcome message if no messages yet with light green styling
-    if len(st.session_state.messages) == 0:
-        st.markdown("""
-        <div style="
-            background-color: #E1FDC6;
-            color: #2E590E;
-            padding: 1rem 1.5rem;
-            border-radius: 0.75rem;
-            border-left: 4px solid #74e504;
-            margin: 1rem 0;
-            font-weight: 500;
-        ">
-            👋 Hello! I'm your AI stock analyst. Tell me which stock to analyze!
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Chat messages - using inline HTML for complete control
-    for idx, message in enumerate(st.session_state.messages):
-        if message["role"] == "user":
-            # User message - right aligned with green background
-            import html
-            # Escape HTML to prevent code from being rendered
-            safe_content = html.escape(message["content"])
-            
-            # Use single-line HTML to avoid whitespace issues
-            st.markdown(
-                f'<div style="display: flex; justify-content: flex-end; align-items: flex-start; margin: 1rem 0; gap: 0.75rem;">'
-                f'<div style="background: #74e504; color: white; padding: 1rem 1.5rem; border-radius: 1.5rem 1.5rem 0.3rem 1.5rem; box-shadow: 0 4px 12px rgba(116, 229, 4, 0.3); max-width: 70%; word-wrap: break-word;">'
-                f'{safe_content}'
-                f'</div>'
-                f'<div style="width: 40px; height: 40px; border-radius: 50%; background: #74e504; display: flex; align-items: center; justify-content: center; font-size: 1.3rem; flex-shrink: 0;">'
-                f'👤'
-                f'</div>'
-                f'</div>',
-                unsafe_allow_html=True
-            )
-        else:
-            # Assistant message - left aligned with white background
-            # Use proper CSS classes for better overflow handling
-            import re
-            content = message["content"]
-            
-            # DEBUG: Log content length
-            print(f"🔍 Rendering assistant message: {len(content)} characters, {content.count(chr(10))} lines")
-            
-            # Convert markdown bold to HTML
-            content = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', content)
-            
-            # Convert markdown italic to HTML
-            content = re.sub(r'\*([^*]+)\*', r'<em>\1</em>', content)
-            
-            # Process line by line with proper word-wrap styling
-            lines = content.split('\n')
-            html_lines = []
-            in_list = False
-            
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-                
-                # Empty line - close list if open, add spacing
-                if not stripped:
-                    if in_list:
-                        html_lines.append('</ul>')
-                        in_list = False
-                    # Only add spacing between sections, not excessive breaks
-                    if i > 0 and i < len(lines) - 1:
-                        html_lines.append('<div style="height: 0.5rem;"></div>')
-                    continue
-                
-                # Section headers (with emojis and bold)
-                if stripped.startswith(('📊', '🏢', '📋', '💰', '📈', '📊', '🏆', '🎯', '📰', '👨‍💼', '🦈', '✅')):
-                    if in_list:
-                        html_lines.append('</ul>')
-                        in_list = False
-                    html_lines.append(f'<h3 style="margin: 0.8rem 0 0.4rem 0; font-size: 1.1rem; font-weight: 600; line-height: 1.3; word-wrap: break-word; overflow-wrap: break-word; hyphens: auto;">{stripped}</h3>')
-                
-                # Subsection headers (bold text without emoji, like "Income Statement:")
-                elif '<strong>' in stripped and stripped.endswith('</strong>:'):
-                    if in_list:
-                        html_lines.append('</ul>')
-                        in_list = False
-                    html_lines.append(f'<p style="margin: 0.5rem 0 0.2rem 0; font-weight: 600; line-height: 1.35; word-wrap: break-word; overflow-wrap: break-word; hyphens: auto;">{stripped}</p>')
-                
-                # Bullet points
-                elif stripped.startswith('• ') or stripped.startswith('- '):
-                    if not in_list:
-                        html_lines.append('<ul style="margin: 0.2rem 0; padding-left: 1.5rem; list-style-type: disc; word-wrap: break-word; overflow-wrap: break-word;">')
-                        in_list = True
-                    item_text = stripped[2:]
-                    html_lines.append(f'<li style="margin: 0.1rem 0; line-height: 1.35; word-wrap: break-word; overflow-wrap: break-word; hyphens: auto;">{item_text}</li>')
-                
-                # Regular paragraph
-                else:
-                    if in_list:
-                        html_lines.append('</ul>')
-                        in_list = False
-                    html_lines.append(f'<p style="margin: 0.2rem 0; line-height: 1.35; word-wrap: break-word; overflow-wrap: break-word; hyphens: auto;">{stripped}</p>')
-            
-            # Close list if still open
-            if in_list:
-                html_lines.append('</ul>')
-            
-            # Join without newlines to avoid Streamlit parsing issues
-            html_content = ''.join(html_lines)
-            
-            # Use CSS classes for proper rendering
-            st.markdown(f"""
-            <div class="assistant-message-container">
-                <div class="assistant-avatar-fixed">🤖</div>
-                <div class="assistant-content-box">
-                    {html_content}
+    with fund_tab1:
+        # Initial state: show hero + welcome, no fixed-height container
+        # After chat starts: use height=650 scrollable container
+        has_messages = len(st.session_state.messages) > 0
+
+        if not has_messages:
+            # Hero section — only on initial state
+            st.markdown("""
+            <div class="hero-section">
+                <div class="hero-title">AI-Powered Stock Analysis</div>
+                <div class="hero-subtitle">
+                    Get comprehensive insights with real-time data and expert analysis
                 </div>
             </div>
             """, unsafe_allow_html=True)
-            
-            # Add download PDF button if this is a stock analysis report
-            if len(message["content"]) > 500 and st.session_state.current_stock:
-                from utils.pdf_generator import generate_pdf_report
-                
-                # Generate PDF
-                pdf_buffer = generate_pdf_report(
-                    message["content"], 
-                    st.session_state.current_stock
-                )
-                
-                # Use the enumerate index directly - it's unique per render
-                # Add role to make it even more unique (in case of re-ordering)
-                unique_key = f"download_{message['role']}_{idx}"
-                
-                # Create download button with unique key
-                st.download_button(
-                    label="📥 Download PDF Report",
-                    data=pdf_buffer,
-                    file_name=f"{st.session_state.current_stock}_Analysis_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                    mime="application/pdf",
-                    key=unique_key,
-                    help="Download this analysis as a formatted PDF report"
-                )
-    
-    # Chat input - ALWAYS visible at bottom
-    user_input = st.chat_input("💬 Type your message here... (e.g., 'analyze ONGC' or 'tell me about reliance')", key="chat_input_main")
-    
-    if user_input:
-        print(f"\n{'='*60}")
-        print(f"📝 User input: {user_input}")
-        print(f"{'='*60}")
-        
-        # Ensure session state is properly initialized
-        if 'message_history' not in st.session_state:
-            st.session_state.message_history = []  # system prompt managed by agent internally
-        if 'deps' not in st.session_state:
-            st.session_state.deps = ConversationState()
-        
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        
-        with st.spinner("🤔 Analyzing..."):
-            @traceable(name="pydantic_ai_agent_run")
-            async def run_agent_async(user_input, message_history, deps):
-                """Async wrapper for agent.run - Fundamental analysis only (no MCP)"""
-                try:
-                    # Run agent for fundamental stock analysis
-                    # Note: MCP tools are only available in Technical Scanner (uses mcp_agent)
-                    result = await agent.run(
-                        user_input, 
-                        message_history=message_history, 
-                        deps=deps
+
+            st.markdown("""
+            <div style="
+                background-color: #E1FDC6;
+                color: #2E590E;
+                padding: 1rem 1.5rem;
+                border-radius: 0.75rem;
+                border-left: 4px solid #74e504;
+                margin: 1rem 0;
+                font-weight: 500;
+            ">
+                👋 Hello! I'm your AI stock analyst. Tell me which stock to analyze!
+            </div>
+            """, unsafe_allow_html=True)
+
+        if has_messages:
+            # Scrollable chat container — only this area scrolls, tabs stay fixed
+            chat_container = st.container(height=650, border=False)
+        else:
+            # No fixed height at initial state so text input is visible
+            chat_container = st.container(border=False)
+
+        with chat_container:
+            # Only render messages when they exist (welcome already shown above)
+            if not has_messages:
+                pass  # welcome already rendered above
+
+            # Chat messages - using inline HTML for complete control
+            for idx, message in enumerate(st.session_state.messages):
+                if message["role"] == "user":
+                    # User message - right aligned with green background
+                    import html
+                    # Escape HTML to prevent code from being rendered
+                    safe_content = html.escape(message["content"])
+
+                    # Use single-line HTML to avoid whitespace issues
+                    st.markdown(
+                        f'<div style="display: flex; justify-content: flex-end; align-items: flex-start; margin: 1rem 0; gap: 0.75rem;">'
+                        f'<div style="background: #74e504; color: white; padding: 1rem 1.5rem; border-radius: 1.5rem 1.5rem 0.3rem 1.5rem; box-shadow: 0 4px 12px rgba(116, 229, 4, 0.3); max-width: 70%; word-wrap: break-word;">'
+                        f'{safe_content}'
+                        f'</div>'
+                        f'<div style="width: 40px; height: 40px; border-radius: 50%; background: #74e504; display: flex; align-items: center; justify-content: center; font-size: 1.3rem; flex-shrink: 0;">'
+                        f'👤'
+                        f'</div>'
+                        f'</div>',
+                        unsafe_allow_html=True
                     )
-                    return result, None
-                    
-                except Exception as e:
-                    error_msg = str(e)
-                    print(f"❌ Agent.run() failed: {error_msg}")
-                    
-                    # Check for specific API validation errors
-                    if "validation errors for ChatCompletion" in error_msg:
-                        return None, "API response validation error. This is usually temporary - please try again."
-                    elif "Invalid response from openai" in error_msg:
-                        return None, "Invalid API response received. Please try again in a moment."
-                    elif "timeout" in error_msg.lower():
-                        return None, "Request timed out. Please try again."
-                    else:
-                        return None, f"Error: {error_msg}"
-            
-            def run_agent_sync(user_input):
-                """Simplified synchronous wrapper with fallback and retry"""
-                max_retries = 1  # Reduced to 1 - if tool generates response, accept it
-                
-                for attempt in range(max_retries):
-                    try:
-                        print(f"🔄 Attempt {attempt + 1}/{max_retries}")
-                        print(f"🚀 Starting agent.run() for input: {user_input[:50]}...")
-                        
-                        # Capture session state values
-                        message_history = st.session_state.message_history.copy() if hasattr(st.session_state, 'message_history') else []
-                        deps = st.session_state.deps if hasattr(st.session_state, 'deps') else ConversationState()
-                        
-                        # Reset per-turn guards and store current user input
-                        deps.current_user_input = user_input.strip()
-                        deps.validation_done_this_turn = False  # Allow validate_and_get_stock once per turn
-                        
-                        # Trim message history to last MAX_HISTORY turns to prevent the LLM
-                        # from re-calling tools it already called in previous turns.
-                        # We work on a local trimmed copy — session state keeps the full list
-                        # so new_messages() can always be appended correctly.
-                        MAX_HISTORY = 10  # keep last 10 messages (5 user+assistant pairs)
-                        if len(message_history) > MAX_HISTORY:
-                            message_history = message_history[-MAX_HISTORY:]
-                            print(f"✂️ Trimmed message history to {len(message_history)} messages for this call")
-                        
-                        # Run the async function directly
-                        import asyncio
-                        import concurrent.futures
-                        import time as time_module
-                        
-                        start_time = time_module.time()
-                        
-                        try:
-                            # Use ThreadPoolExecutor to run async code with timeout
-                            # Reduced timeout to 180 seconds (3 minutes) for faster failure detection
-                            with concurrent.futures.ThreadPoolExecutor() as executor:
-                                future = executor.submit(
-                                    lambda: asyncio.run(run_agent_async(user_input, message_history, deps))
-                                )
-                                result, error = future.result(timeout=180)  # 3 minute timeout (reduced from 5)
-                                
-                            elapsed_time = time_module.time() - start_time
-                            print(f"✅ Agent.run() completed in {elapsed_time:.2f} seconds")
-                            
-                        except concurrent.futures.TimeoutError:
-                            elapsed_time = time_module.time() - start_time
-                            print(f"⏱️ Agent execution exceeded {elapsed_time:.2f} seconds (timeout: 180s / 3 minutes)")
-                            
-                            if attempt < max_retries - 1:
-                                print(f"⚠️ Attempt {attempt + 1} timed out after {elapsed_time:.2f}s, retrying...")
-                                continue
-                            else:
-                                print("⚠️ All attempts timed out, trying fallback approach...")
-                                # Fallback: Try a simpler approach
-                                try:
-                                    loop = asyncio.new_event_loop()
-                                    asyncio.set_event_loop(loop)
-                                    try:
-                                        result, error = loop.run_until_complete(run_agent_async(user_input, message_history, deps))
-                                    finally:
-                                        loop.close()
-                                        asyncio.set_event_loop(None)
-                                except Exception as fallback_error:
-                                    return None, f"All methods failed. Last error: {str(fallback_error)}"
-                        except Exception as e:
-                            elapsed_time = time_module.time() - start_time
-                            print(f"❌ Agent execution failed after {elapsed_time:.2f} seconds: {str(e)}")
-                            
-                            if attempt < max_retries - 1:
-                                print(f"⚠️ Attempt {attempt + 1} failed: {str(e)}, retrying...")
-                                continue
-                            else:
-                                return None, f"Execution error after {max_retries} attempts: {str(e)}"
-                        
-                        # Check if we got an error from the agent
-                        if error:
-                            print(f"⚠️ Agent returned error: {error}")
-                            if "validation error" in error.lower() or "invalid response" in error.lower():
-                                if attempt < max_retries - 1:
-                                    print(f"⚠️ API validation error on attempt {attempt + 1}, retrying...")
-                                    time.sleep(2)  # Brief delay before retry
-                                    continue
-                            return None, error
-                        
-                        # Accept the result — actual response is resolved from deps cache later
-                        st.session_state.deps = deps
+                else:
+                    # Assistant message - left aligned with white background
+                    import re
+                    content = message["content"]
 
-                        # Update message history with new messages from this turn
-                        if hasattr(result, 'new_messages'):
-                            new_messages = result.new_messages()
-                            if new_messages:
-                                print(f"📝 Processing {len(new_messages)} new messages from agent")
-                                st.session_state.message_history.extend(list(new_messages))
-                                print(f"✅ Updated message history: {len(st.session_state.message_history)} total messages")
-                            else:
-                                # Recovery path — manually record the exchange
-                                cached = getattr(deps, 'last_analysis_response', None) or getattr(deps, 'last_validation_response', None) or ""
-                                st.session_state.message_history.extend([
-                                    ModelRequest(parts=[UserPromptPart(content=user_input)]),
-                                    ModelResponse(parts=[TextPart(content=cached)]),
-                                ])
-                                print(f"📝 Manually appended exchange to history ({len(st.session_state.message_history)} total)")
+                    # DEBUG: Log content length
+                    print(f"🔍 Rendering assistant message: {len(content)} characters, {content.count(chr(10))} lines")
 
-                        return result, None
-                        
-                    except Exception as e:
-                        if attempt < max_retries - 1:
-                            print(f"⚠️ Attempt {attempt + 1} failed with exception: {str(e)}, retrying...")
-                            time.sleep(2)  # Brief delay before retry
+                    # Convert markdown bold to HTML
+                    content = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', content)
+
+                    # Convert markdown italic to HTML
+                    content = re.sub(r'\*([^*]+)\*', r'<em>\1</em>', content)
+
+                    # Process line by line with proper word-wrap styling
+                    lines = content.split('\n')
+                    html_lines = []
+                    in_list = False
+
+                    for i, line in enumerate(lines):
+                        stripped = line.strip()
+
+                        # Empty line - close list if open, add spacing
+                        if not stripped:
+                            if in_list:
+                                html_lines.append('</ul>')
+                                in_list = False
+                            # Only add spacing between sections, not excessive breaks
+                            if i > 0 and i < len(lines) - 1:
+                                html_lines.append('<div style="height: 0.5rem;"></div>')
                             continue
+
+                        # Section headers (with emojis and bold)
+                        if stripped.startswith(('📊', '🏢', '📋', '💰', '📈', '📊', '🏆', '🎯', '📰', '👨‍💼', '🦈', '✅', '👋', '🤖', '🔍', '🎤', '🔮', '❌', '⏰', '🚀')):
+                            if in_list:
+                                html_lines.append('</ul>')
+                                in_list = False
+                            html_lines.append(f'<h3 style="margin: 0.8rem 0 0.4rem 0; font-size: 1.1rem; font-weight: 600; line-height: 1.3; word-wrap: break-word; overflow-wrap: break-word; hyphens: auto;">{stripped}</h3>')
+
+                        # Subsection headers - bold-only lines
+                        elif re.match(r'^<strong>[^<]+</strong>:?$', stripped):
+                            if in_list:
+                                html_lines.append('</ul>')
+                                in_list = False
+                            html_lines.append(f'<p style="margin: 0.6rem 0 0.2rem 0; font-weight: 700; font-size: 1rem; line-height: 1.35; word-wrap: break-word; overflow-wrap: break-word; hyphens: auto;">{stripped}</p>')
+
+                        # Bullet points
+                        elif stripped.startswith('• ') or stripped.startswith('- '):
+                            if not in_list:
+                                html_lines.append('<ul style="margin: 0.2rem 0; padding-left: 1.5rem; list-style-type: disc; word-wrap: break-word; overflow-wrap: break-word;">')
+                                in_list = True
+                            item_text = stripped[2:]
+                            html_lines.append(f'<li style="margin: 0.1rem 0; line-height: 1.35; word-wrap: break-word; overflow-wrap: break-word; hyphens: auto;">{item_text}</li>')
+
+                        # Regular paragraph
                         else:
-                            return None, f"Failed after {max_retries} attempts: {str(e)}"
-                
-                return None, f"All {max_retries} attempts failed"
+                            if in_list:
+                                html_lines.append('</ul>')
+                                in_list = False
+                            html_lines.append(f'<p style="margin: 0.2rem 0; line-height: 1.35; word-wrap: break-word; overflow-wrap: break-word; hyphens: auto;">{stripped}</p>')
 
-            print("� Calling agent.run()...")
-            print(f"📋 Current message history length: {len(st.session_state.message_history)}")
-            
-            result, error_msg = run_agent_sync(user_input)
-            
-            if error_msg:
-                # Error Handling
-                print(f"❌ Error in agent.run(): {error_msg}")
-                
-                # Provide user-friendly error messages
-                if "validation error" in error_msg.lower():
-                    response = """❌ **Temporary API Issue**
+                    # Close list if still open
+                    if in_list:
+                        html_lines.append('</ul>')
 
-The AI service returned an invalid response. This is usually temporary and resolves quickly.
+                    # Join without newlines to avoid Streamlit parsing issues
+                    html_content = ''.join(html_lines)
 
-**What you can do:**
-• Try your request again in a few seconds
-• The system has automatic retry logic built-in
-• If the issue persists, try rephrasing your question
+                    # Use CSS classes for proper rendering
+                    st.markdown(f"""
+                    <div class="assistant-message-container">
+                        <div class="assistant-avatar-fixed">🤖</div>
+                        <div class="assistant-content-box">
+                            {html_content}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-*This is a known issue with the OpenRouter API that occurs occasionally.*"""
-                elif "timed out" in error_msg.lower():
-                    response = """⏰ **Request Timed Out**
+                    # Add download PDF button if this is a stock analysis report
+                    if len(message["content"]) > 500 and st.session_state.current_stock:
+                        from utils.pdf_generator import generate_pdf_report
 
-Your request took longer than expected to process.
+                        # Generate PDF
+                        pdf_buffer = generate_pdf_report(
+                            message["content"],
+                            st.session_state.current_stock
+                        )
 
-**What you can do:**
-• Try your request again - it may work faster the second time
-• For complex analysis, try asking for specific information first
-• Check your internet connection
+                        # Use the enumerate index directly - it's unique per render
+                        unique_key = f"download_{message['role']}_{idx}"
 
-*The system will automatically retry failed requests.*"""
-                elif "exceeded maximum retries" in error_msg.lower() or "output validation" in error_msg.lower():
-                    # Try to get existing analysis from database
-                    print(f"🔄 Validation failed, attempting to retrieve from database...")
-                    
+                        # Create download button with unique key
+                        st.download_button(
+                            label="📥 Download PDF Report",
+                            data=pdf_buffer,
+                            file_name=f"{st.session_state.current_stock}_Analysis_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                            mime="application/pdf",
+                            key=unique_key,
+                            help="Download this analysis as a formatted PDF report"
+                        )
+
+            # Auto-scroll: use components.html INSIDE the chat container so
+            # the iframe shares the same scrollable parent. The script walks up
+            # to find the scrollable ancestor and scrolls it.
+            import streamlit.components.v1 as _components
+            _last_msg = st.session_state.messages[-1] if st.session_state.messages else None
+            _is_long_response = (
+                _last_msg
+                and _last_msg["role"] == "assistant"
+                and len(_last_msg.get("content", "")) > 800
+            )
+            _scroll_mode = "top_of_last" if _is_long_response else "bottom"
+            # Use message count as a cache-buster so the script re-executes on every rerun
+            _msg_count = len(st.session_state.messages)
+            _components.html(f"""
+            <div id="autoscroll-anchor-{_msg_count}"></div>
+            <script>
+            (function() {{
+                var mode = "{_scroll_mode}";
+                function doScroll() {{
+                    // Walk up from this iframe to find the scrollable container
+                    var el = window.frameElement;
+                    if (!el) return;
+                    var scrollable = null;
+                    var node = el.parentElement;
+                    while (node) {{
+                        if (node.scrollHeight > node.clientHeight + 50) {{
+                            var style = window.getComputedStyle(node);
+                            var ov = style.overflowY;
+                            if (ov === 'auto' || ov === 'scroll') {{
+                                scrollable = node;
+                                break;
+                            }}
+                        }}
+                        node = node.parentElement;
+                    }}
+                    if (!scrollable) return;
+
+                    if (mode === "top_of_last") {{
+                        // For long responses: find the last assistant message and
+                        // scroll so its TOP is at the top of the visible area
+                        var msgs = scrollable.querySelectorAll('.assistant-message-container');
+                        if (msgs.length > 0) {{
+                            var lastMsg = msgs[msgs.length - 1];
+                            scrollable.scrollTop = lastMsg.offsetTop - scrollable.offsetTop - 10;
+                            return;
+                        }}
+                    }}
+                    // Default: scroll to bottom so latest message is visible
+                    scrollable.scrollTop = scrollable.scrollHeight;
+                }}
+                // Multiple attempts to handle Streamlit's async rendering
+                setTimeout(doScroll, 100);
+                setTimeout(doScroll, 300);
+                setTimeout(doScroll, 600);
+            }})();
+            </script>
+            """, height=0)
+
+        # Chat input - ALWAYS visible at bottom (outside chat_container)
+        # User can always type, but sending is silently ignored while agent is busy
+        _is_busy = st.session_state.is_processing or st.session_state.pending_user_input is not None
+        user_input = st.chat_input(
+            "⏳ Please wait, analyzing..." if _is_busy else "💬 Type your message here... (e.g., 'analyze ONGC' or 'tell me about reliance')",
+            key="chat_input_main",
+        )
+
+        if user_input and not _is_busy:
+            # Store user message and rerun so it renders before processing
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            st.session_state.pending_user_input = user_input
+            st.rerun()
+
+        # Process pending input (after rerun so user message is visible)
+        if st.session_state.pending_user_input:
+            user_input = st.session_state.pending_user_input
+            st.session_state.pending_user_input = None
+            st.session_state.is_processing = True
+
+            import time as _timer
+            _request_start = _timer.time()
+
+            print(f"\n{'='*60}")
+            print(f"📝 User input: {user_input}")
+            print(f"{'='*60}")
+
+            # Ensure session state is properly initialized
+            if 'message_history' not in st.session_state:
+                st.session_state.message_history = []  # system prompt managed by agent internally
+            if 'deps' not in st.session_state:
+                st.session_state.deps = ConversationState()
+
+            with st.spinner("🤔 Analyzing..."):
+                @traceable(name="pydantic_ai_agent_run")
+                async def run_agent_async(user_input, message_history, deps):
+                    """Async wrapper for agent.run"""
+                    # Pre-check: handle simple greetings without calling the LLM
+                    # This avoids output validation failures with weaker models
+                    _greeting_words = {"hi", "hello", "hey", "hola", "namaste", "good morning", "good evening", "good afternoon", "howdy", "greetings", "sup", "yo"}
+                    _input_clean = user_input.strip().lower().rstrip("!.,?")
+                    _is_simple_greeting = _input_clean in _greeting_words
+                    _has_stock_loaded = bool(getattr(deps, 'company_data', None))
+
+                    if _is_simple_greeting and not _has_stock_loaded:
+                        print(f"👋 Pre-check: greeting detected, returning directly without LLM call")
+                        greeting_response = """Hello! 👋 I'm your AI stock analyst.
+
+I can help you with comprehensive stock analysis for Indian and global markets.
+
+**What I can do:**
+• Analyze any stock with detailed financial metrics
+• Answer questions about companies and their performance
+• Provide scenario analysis and market insights
+• Compare competitors and identify trends
+
+**To get started, just tell me:**
+• A company name (e.g., "Reliance", "Tata", "Infosys")
+• A stock ticker (e.g., "RELIANCE.NS", "TCS.NS")
+• Or ask me a question about any stock
+
+What stock would you like to analyze today?"""
+                        deps.last_validation_response = greeting_response
+                        # Return a minimal result-like object
+                        class _GreetingResult:
+                            output = greeting_response
+                            data = greeting_response
+                            def new_messages(self): return []
+                        return _GreetingResult(), None
+
                     try:
-                        from database_utility.database import StockDatabase
+                        result = await agent.run(
+                            user_input,
+                            message_history=message_history,
+                            deps=deps
+                        )
+                        return result, None
+
+                    except Exception as e:
+                        error_msg = str(e)
+                        print(f"❌ Agent.run() failed: {error_msg}")
+
+                        # Check for specific API validation errors
+                        if "validation errors for ChatCompletion" in error_msg:
+                            return None, "API response validation error. This is usually temporary - please try again."
+                        elif "Invalid response from openai" in error_msg:
+                            return None, "Invalid API response received. Please try again in a moment."
+                        elif "timeout" in error_msg.lower():
+                            return None, "Request timed out. Please try again."
+                        else:
+                            return None, f"Error: {error_msg}"
+            
+                def run_agent_sync(user_input):
+                    """Simplified synchronous wrapper with fallback and retry"""
+                    max_retries = 1  # Reduced to 1 - if tool generates response, accept it
+                
+                    for attempt in range(max_retries):
+                        try:
+                            print(f"🔄 Attempt {attempt + 1}/{max_retries}")
+                            print(f"🚀 Starting agent.run() for input: {user_input[:50]}...")
                         
-                        db = StockDatabase()
-                        if db.connect():
-                            # Get the most recent analysis
-                            latest = db.get_latest_analysis()
+                            # Capture session state values
+                            message_history = st.session_state.message_history.copy() if hasattr(st.session_state, 'message_history') else []
+                            deps = st.session_state.deps if hasattr(st.session_state, 'deps') else ConversationState()
+                        
+                            # Reset per-turn guards and store current user input
+                            deps.current_user_input = user_input.strip()
+                            deps.validation_done_this_turn = False  # Allow validate_and_get_stock once per turn
+
+                            # Clear cached responses from previous turns so follow-up questions
+                            # (e.g. handle_trader_question) use result.output instead of stale cache
+                            deps.last_analysis_response = None
+                            deps.last_validation_response = None
+
+                            # Reset analysis_complete when user is selecting a new stock
+                            # from the pending variants list (e.g. "1", "analyze 1", "analyze 2")
+                            import re as _re_reset
+                            _input_stripped = user_input.strip().lower()
+                            _is_number_selection = _input_stripped.isdigit() or bool(_re_reset.match(r'^(analyze|select|choose|pick|option)\s*\d+', _input_stripped))
+                            _has_pending = bool(getattr(deps, 'pending_variants', None))
+                            if _is_number_selection and _has_pending:
+                                deps.analysis_complete = False
+                                deps.company_data = None
+                                deps.stock_symbol = None
+                                deps.stock_name = None
+                                print(f"🔄 Reset analysis state for new stock selection: '{user_input.strip()}'")
+                        
+                            # Trim message history to last MAX_HISTORY turns to prevent the LLM
+                            # from re-calling tools it already called in previous turns.
+                            # We work on a local trimmed copy — session state keeps the full list
+                            # so new_messages() can always be appended correctly.
+                            MAX_HISTORY = 10  # keep last 10 messages (5 user+assistant pairs)
+                            if len(message_history) > MAX_HISTORY:
+                                message_history = message_history[-MAX_HISTORY:]
+                                print(f"✂️ Trimmed message history to {len(message_history)} messages for this call")
+                        
+                            # Run the async function directly
+                            import asyncio
+                            import concurrent.futures
+                            import time as time_module
+                        
+                            start_time = time_module.time()
+                        
+                            try:
+                                # Use ThreadPoolExecutor to run async code with timeout
+                                # Reduced timeout to 180 seconds (3 minutes) for faster failure detection
+                                with concurrent.futures.ThreadPoolExecutor() as executor:
+                                    future = executor.submit(
+                                        lambda: asyncio.run(run_agent_async(user_input, message_history, deps))
+                                    )
+                                    result, error = future.result(timeout=180)  # 3 minute timeout (reduced from 5)
+                                
+                                elapsed_time = time_module.time() - start_time
+                                print(f"✅ Agent.run() completed in {elapsed_time:.2f} seconds")
                             
-                            if latest and latest.get('formatted_report'):
-                                print(f"✅ Retrieved analysis from database: {len(latest['formatted_report'])} chars")
-                                response = latest['formatted_report']
-                                
-                                # Update session state with retrieved data
-                                if latest.get('stock_symbol'):
-                                    st.session_state.current_stock = latest.get('stock_name', latest.get('stock_symbol'))
-                                    
-                                    # Create minimal company data for session state
-                                    if not st.session_state.deps.company_data:
-                                        from models import CompanyData
-                                        st.session_state.deps.company_data = CompanyData(
-                                            symbol=latest.get('stock_symbol'),
-                                            name=latest.get('stock_name', latest.get('stock_symbol')),
-                                            current_price=0,  # Will be updated if needed
-                                            market_cap=0,
-                                            pe_ratio=0,
-                                            dividend_yield=0,
-                                            revenue=0,
-                                            net_income=0,
-                                            total_assets=0,
-                                            total_debt=0,
-                                            free_cash_flow=0,
-                                            roe=0,
-                                            debt_to_equity=0,
-                                            current_ratio=0,
-                                            gross_margin=0,
-                                            operating_margin=0,
-                                            net_margin=0,
-                                            revenue_growth=0,
-                                            earnings_growth=0,
-                                            book_value=0,
-                                            price_to_book=0,
-                                            enterprise_value=0,
-                                            ebitda=0,
-                                            ev_to_ebitda=0,
-                                            price_to_sales=0,
-                                            peg_ratio=0,
-                                            beta=0,
-                                            fifty_two_week_high=0,
-                                            fifty_two_week_low=0,
-                                            avg_volume=0,
-                                            shares_outstanding=0,
-                                            float_shares=0,
-                                            insider_ownership=0,
-                                            institutional_ownership=0,
-                                            short_ratio=0,
-                                            analyst_rating="",
-                                            target_price=0,
-                                            recommendation=""
-                                        )
-                                        st.session_state.deps.stock_symbol = latest.get('stock_symbol')
-                                        st.session_state.deps.stock_name = latest.get('stock_name', latest.get('stock_symbol'))
-                                        st.session_state.deps.analysis_complete = True
-                                
+                            except concurrent.futures.TimeoutError:
+                                elapsed_time = time_module.time() - start_time
+                                print(f"⏱️ Agent execution exceeded {elapsed_time:.2f} seconds (timeout: 180s / 3 minutes)")
+
+                                # FAST RECOVERY: Check if the tool already generated and cached
+                                # the response before the timeout. If so, return it immediately
+                                # instead of re-running the agent.
+                                _cached_analysis = getattr(deps, 'last_analysis_response', None)
+                                _cached_validation = getattr(deps, 'last_validation_response', None)
+
+                                if _cached_analysis:
+                                    print(f"✅ FAST RECOVERY: Analysis already cached ({len(_cached_analysis)} chars) — returning immediately")
+                                    st.session_state.deps = deps
+                                    # Manually record the exchange in message history
+                                    st.session_state.message_history.extend([
+                                        ModelRequest(parts=[UserPromptPart(content=user_input)]),
+                                        ModelResponse(parts=[TextPart(content=_cached_analysis)]),
+                                    ])
+                                    # Create a simple result-like object so downstream code works
+                                    class _CachedResult:
+                                        output = _cached_analysis
+                                        data = _cached_analysis
+                                        def new_messages(self): return []
+                                    return _CachedResult(), None
+
+                                if _cached_validation:
+                                    print(f"✅ FAST RECOVERY: Validation already cached ({len(_cached_validation)} chars) — returning immediately")
+                                    st.session_state.deps = deps
+                                    st.session_state.message_history.extend([
+                                        ModelRequest(parts=[UserPromptPart(content=user_input)]),
+                                        ModelResponse(parts=[TextPart(content=_cached_validation)]),
+                                    ])
+                                    class _CachedResult:
+                                        output = _cached_validation
+                                        data = _cached_validation
+                                        def new_messages(self): return []
+                                    return _CachedResult(), None
+
+                                # No cached response available — genuine timeout with no result
+                                if attempt < max_retries - 1:
+                                    print(f"⚠️ Attempt {attempt + 1} timed out after {elapsed_time:.2f}s, retrying...")
+                                    continue
+                                else:
+                                    return None, f"Request timed out after {elapsed_time:.0f} seconds. Please try again."
+                            except Exception as e:
+                                elapsed_time = time_module.time() - start_time
+                                print(f"❌ Agent execution failed after {elapsed_time:.2f} seconds: {str(e)}")
+                            
+                                if attempt < max_retries - 1:
+                                    print(f"⚠️ Attempt {attempt + 1} failed: {str(e)}, retrying...")
+                                    continue
+                                else:
+                                    return None, f"Execution error after {max_retries} attempts: {str(e)}"
+                        
+                            # Check if we got an error from the agent
+                            if error:
+                                print(f"⚠️ Agent returned error: {error}")
+                                if "validation error" in error.lower() or "invalid response" in error.lower():
+                                    if attempt < max_retries - 1:
+                                        print(f"⚠️ API validation error on attempt {attempt + 1}, retrying...")
+                                        time.sleep(2)  # Brief delay before retry
+                                        continue
+                                return None, error
+                        
+                            # Accept the result — actual response is resolved from deps cache later
+                            st.session_state.deps = deps
+
+                            # Update message history with new messages from this turn
+                            if hasattr(result, 'new_messages'):
+                                new_messages = result.new_messages()
+                                if new_messages:
+                                    print(f"📝 Processing {len(new_messages)} new messages from agent")
+                                    st.session_state.message_history.extend(list(new_messages))
+                                    print(f"✅ Updated message history: {len(st.session_state.message_history)} total messages")
+                                else:
+                                    # Recovery path — manually record the exchange
+                                    cached = getattr(deps, 'last_analysis_response', None) or getattr(deps, 'last_validation_response', None) or ""
+                                    st.session_state.message_history.extend([
+                                        ModelRequest(parts=[UserPromptPart(content=user_input)]),
+                                        ModelResponse(parts=[TextPart(content=cached)]),
+                                    ])
+                                    print(f"📝 Manually appended exchange to history ({len(st.session_state.message_history)} total)")
+
+                            return result, None
+                        
+                        except Exception as e:
+                            if attempt < max_retries - 1:
+                                print(f"⚠️ Attempt {attempt + 1} failed with exception: {str(e)}, retrying...")
+                                time.sleep(2)  # Brief delay before retry
+                                continue
                             else:
-                                print(f"❌ No formatted report found in database")
-                                response = """❌ **Analysis Generation Failed**
+                                return None, f"Failed after {max_retries} attempts: {str(e)}"
+                
+                    return None, f"All {max_retries} attempts failed"
+
+                print("� Calling agent.run()...")
+                print(f"📋 Current message history length: {len(st.session_state.message_history)}")
+            
+                result, error_msg = run_agent_sync(user_input)
+            
+                if error_msg:
+                    # Error Handling
+                    print(f"❌ Error in agent.run(): {error_msg}")
+                
+                    # Provide user-friendly error messages
+                    if "validation error" in error_msg.lower():
+                        response = """❌ **Temporary API Issue**
+
+    The AI service returned an invalid response. This is usually temporary and resolves quickly.
+
+    **What you can do:**
+    • Try your request again in a few seconds
+    • The system has automatic retry logic built-in
+    • If the issue persists, try rephrasing your question
+
+    *This is a known issue with the OpenRouter API that occurs occasionally.*"""
+                    elif "timed out" in error_msg.lower():
+                        response = """⏰ **Request Timed Out**
+
+    Your request took longer than expected to process.
+
+    **What you can do:**
+    • Try your request again - it may work faster the second time
+    • For complex analysis, try asking for specific information first
+    • Check your internet connection
+
+    *The system will automatically retry failed requests.*"""
+                    elif "exceeded maximum retries" in error_msg.lower() or "output validation" in error_msg.lower():
+                        # Check if this is a non-stock query (greeting, casual chat, etc.)
+                        # If so, respond directly instead of hitting the database
+                        _greeting_words = {"hi", "hello", "hey", "hola", "namaste", "good morning", "good evening", "good afternoon", "howdy", "greetings", "sup", "yo"}
+                        _input_lower = user_input.strip().lower().rstrip("!.,?")
+                        _is_greeting = _input_lower in _greeting_words or (_input_lower.split()[0] in _greeting_words if _input_lower else False)
+                        _has_stock_context = bool(getattr(st.session_state, 'current_stock', None)) or any(
+                            kw in _input_lower for kw in [".ns", ".bs", "stock", "share", "analyze", "analysis", "company"]
+                        )
+
+                        if not _has_stock_context:
+                            if _is_greeting:
+                                # Simple greeting — no need to hit the database
+                                print(f"👋 Greeting detected, returning friendly response directly")
+                                response = """Hello! 👋 I'm your AI stock analyst.
+
+I can help you with comprehensive stock analysis for Indian and global markets.
+
+**What I can do:**
+• Analyze any stock with detailed financial metrics
+• Answer questions about companies and their performance
+• Provide scenario analysis and market insights
+• Compare competitors and identify trends
+
+**To get started, just tell me:**
+• A company name (e.g., "Reliance", "Tata", "Infosys")
+• A stock ticker (e.g., "RELIANCE.NS", "TCS.NS")
+• Or ask me a question about any stock
+
+What stock would you like to analyze today?"""
+                            else:
+                                # Non-stock casual message — respond helpfully without DB
+                                print(f"💬 Non-stock query detected, returning helpful response")
+                                response = """I'm your AI stock analyst! 📊
+
+I can analyze any stock for you. Just tell me a **company name** or **ticker symbol** and I'll provide a comprehensive analysis.
+
+**Examples:**
+• "Reliance" or "RELIANCE.NS"
+• "Tata Motors" or "TATAMOTORS.NS"
+• "Infosys" or "INFY.NS"
+
+What stock would you like to analyze?"""
+                        else:
+                            # Stock-related query failed — try to retrieve from database
+                            print(f"🔄 Validation failed for stock query, attempting to retrieve from database...")
+                            try:
+                                from database_utility.database import StockDatabase
+
+                                db = StockDatabase()
+                                if db.connect():
+                                    latest = db.get_latest_analysis()
+
+                                    if latest and latest.get('formatted_report'):
+                                        print(f"✅ Retrieved analysis from database: {len(latest['formatted_report'])} chars")
+                                        response = latest['formatted_report']
+
+                                        if latest.get('stock_symbol'):
+                                            st.session_state.current_stock = latest.get('stock_name', latest.get('stock_symbol'))
+
+                                            if not st.session_state.deps.company_data:
+                                                from models import CompanyData
+                                                st.session_state.deps.company_data = CompanyData(
+                                                    symbol=latest.get('stock_symbol'),
+                                                    name=latest.get('stock_name', latest.get('stock_symbol')),
+                                                    current_price=0,
+                                                    market_cap=0,
+                                                    pe_ratio=0,
+                                                    dividend_yield=0,
+                                                    revenue=0,
+                                                    net_income=0,
+                                                    total_assets=0,
+                                                    total_debt=0,
+                                                    free_cash_flow=0,
+                                                    roe=0,
+                                                    debt_to_equity=0,
+                                                    current_ratio=0,
+                                                    gross_margin=0,
+                                                    operating_margin=0,
+                                                    net_margin=0,
+                                                    revenue_growth=0,
+                                                    earnings_growth=0,
+                                                    book_value=0,
+                                                    price_to_book=0,
+                                                    enterprise_value=0,
+                                                    ebitda=0,
+                                                    ev_to_ebitda=0,
+                                                    price_to_sales=0,
+                                                    peg_ratio=0,
+                                                    beta=0,
+                                                    fifty_two_week_high=0,
+                                                    fifty_two_week_low=0,
+                                                    avg_volume=0,
+                                                    shares_outstanding=0,
+                                                    float_shares=0,
+                                                    insider_ownership=0,
+                                                    institutional_ownership=0,
+                                                    short_ratio=0,
+                                                    analyst_rating="",
+                                                    target_price=0,
+                                                    recommendation=""
+                                                )
+                                                st.session_state.deps.stock_symbol = latest.get('stock_symbol')
+                                                st.session_state.deps.stock_name = latest.get('stock_name', latest.get('stock_symbol'))
+                                                st.session_state.deps.analysis_complete = True
+                                    else:
+                                        print(f"❌ No formatted report found in database")
+                                        response = """❌ **Analysis Generation Failed**
 
 The system encountered validation issues while generating your analysis.
-
-**What happened:**
-• The analysis was processed but couldn't be properly formatted
-• This is usually due to API response validation errors
 
 **What you can do:**
 • Try your request again with a simpler query
 • Ask for specific information about the stock
-• Try again in a few minutes
+• Try again in a few minutes"""
 
-*The system saves partial results, so retrying should be faster.*"""
-                            
-                            db.disconnect()
-                        else:
-                            print(f"❌ Could not connect to database")
-                            response = """❌ **System Error**
-
-Could not retrieve analysis results.
-
-**What you can do:**
-• Try your request again
-• Check your internet connection
-• Contact support if the issue persists
-
-*The system will automatically retry failed requests.*"""
-                            
-                    except Exception as db_error:
-                        print(f"❌ Database retrieval error: {db_error}")
-                        response = """❌ **Analysis Retrieval Failed**
-
-The system generated an analysis but couldn't display it properly.
-
-**What you can do:**
-• Try your request again
-• The analysis may have been saved and will load faster on retry
-• Try asking for specific information about the stock
-
-*This is usually a temporary issue.*"""
-                else:
-                    response = f"❌ **System Error**\n\n{error_msg}\n\n*Please try your request again.*"
-            
-            else:
-                # Success - resolve the final response.
-                # Priority: last_analysis_response > last_validation_response > result.output
-                # This ensures we always show the actual tool output, never the LLM's own text.
-                _analysis_cache = getattr(st.session_state.deps, 'last_analysis_response', None)
-                _validation_cache = getattr(st.session_state.deps, 'last_validation_response', None)
-
-                if _analysis_cache:
-                    response = _analysis_cache
-                    print(f"📊 Using cached analysis response ({len(response)} chars)")
-                elif _validation_cache:
-                    response = _validation_cache
-                    print(f"📊 Using cached validation response ({len(response)} chars)")
-                else:
-                    # No cache — fall back to whatever the agent returned
-                    if hasattr(result, 'output'):
-                        response = result.output
-                    elif hasattr(result, 'data'):
-                        response = result.data
-                    else:
-                        response = str(result)
-                    print(f"📊 Fallback to result.output: {type(response)}")
-
-                print(f"📄 Raw response preview: {str(response)[:200]}...")
-
-                # Unwrap ToolResponse if present (from FixedResult/CachedResult recovery paths)
-                if isinstance(response, ToolResponse):
-                    response = response.content
-
-                # Strip FINAL_ANSWER: prefix — tool-level signal, not user-facing
-                if isinstance(response, str) and response.startswith("FINAL_ANSWER:\n"):
-                    response = response[len("FINAL_ANSWER:\n"):]
-                    print(f"✂️ Stripped FINAL_ANSWER prefix, response now {len(response)} chars")
-
-                # Ensure string
-                if not isinstance(response, str):
-                    response = str(response)
-
-                print(f"✅ Final response: {len(response)} characters")
-
-                # Mark report as generated if we have a substantial response
-                if st.session_state.deps.company_data and not st.session_state.deps.report_generated:
-                     if len(response) >= 200:
-                         # Mark as generated only if we have a substantial response
-                         st.session_state.deps.report_generated = True
-                     elif len(response) < 200 and not any(err in response for err in ["Invalid selection", "Please choose", "Error", "❌"]):
-                         # Short response but not an error - might be a valid short message
-                         print(f"⚠️ Short response ({len(response)} chars), but not using fallback")
-
-                # DISABLED: Apply comprehensive formatting fixes - format_data_for_report already handles this
-                # response = fix_response_formatting(response)
-                
-                if 'tool_outputs' in response:
-                    markers = ['🔍 **Multiple', '🏢 COMPANY', '📊 COMPREHENSIVE', 'Here is', '🤖 AI', '✓ Found:', '✅ **Selected', '✅']
-                    for marker in markers:
-                        if marker in response:
-                            response = response[response.index(marker):]
-                            break
-                            
-                if response.startswith('{') or response.startswith('tool_outputs'):
-                    match = re.search(r'[🔍🏢📊🤖✓🦈📋💰📈🏆🎯📰✅]', response)
-                    if match:
-                        response = response[match.start():]
-                
-                # DISABLED: Final formatting pass - not needed, causes issues
-                # response = fix_response_formatting(response)
-
-            # Update Session State from Deps
-            if st.session_state.deps.stock_name:
-                st.session_state.current_stock = st.session_state.deps.stock_name
-            if st.session_state.deps.company_data:
-                st.session_state.company_data = st.session_state.deps.company_data
-        
-        # DISABLED: Final formatting check - format_data_for_report already produces clean output
-        # debug_response_formatting(response, "BEFORE SAVING TO SESSION")
-        
-        # DISABLED: Apply one final formatting pass - causes formatting issues
-        # final_response = streamlit_markdown_formatter(response)
-        # debug_response_formatting(final_response, "FINAL FORMATTED RESPONSE")
-        
-        # Use response directly without additional formatting
-        st.session_state.messages.append({"role": "assistant", "content": response})
-        print(f"💾 Message saved to session state")
-        st.rerun()
-
-elif view_option == "📊 Technical Scanner":
-    # Technical Scanner - MCP-driven analysis with TradingView format support
-    st.markdown("### 📊 Technical Scanner")
-    
-    # Check if MCP is enabled
-    use_mcp = os.getenv("USE_MCP", "false").lower() == "true"
-    
-    if not use_mcp:
-        st.error("❌ MCP is not enabled")
-        st.info("To use technical analysis tools, set USE_MCP=true in your .env file and restart the app")
-        
-        if st.button("🔙 Back to Chat", use_container_width=True):
-            st.session_state.view_selector = "💬 Chat"
-            st.rerun()
-    else:
-        # Create tabs for different scanner modes
-        scanner_tab1, scanner_tab2 = st.tabs(["📊 Pattern Scanner", "🎯 TradingView JSON Scanner"])
-        
-        with scanner_tab1:
-            # Original Bollinger Band visualization scanner
-            st.markdown("#### Bollinger Band Analysis")
-            st.success("✅ TradingView MCP Tools Active")
-        
-        # Scanner controls
-        col1, col2, col3 = st.columns([2, 1, 1])
-        
-        with col1:
-            scan_query = st.text_input(
-                "Scanner Query",
-                value="Find Indian stocks showing a Bollinger Band squeeze",
-                help="Ask the AI to scan for technical patterns"
-            )
-        
-        with col2:
-            timeframe = st.selectbox(
-                "Timeframe",
-                options=['1d', '1h', '15m', '5m', '1wk'],
-                index=0,
-                help="Chart timeframe"
-            )
-        
-        with col3:
-            max_stocks = st.number_input(
-                "Max Stocks",
-                min_value=1,
-                max_value=10,
-                value=3,
-                help="Maximum stocks to visualize"
-            )
-        
-        # Mode selection
-        col_scan, col_demo = st.columns(2)
-        
-        with col_scan:
-            scan_button = st.button("🔍 Scan with MCP", width="stretch", type="primary")
-        
-        with col_demo:
-            demo_button = st.button("🎯 Demo Mode", width="stretch", help="Visualize sample stocks without MCP")
-        
-        # Scan button
-        if scan_button:
-            with st.spinner("🤖 AI is scanning the market with TradingView MCP tools..."):
-                try:
-                    # Import visualization pipeline
-                    from utils.mcp_visualization_pipeline import get_visualization_pipeline
-                    
-                    # Check if user is asking for a specific stock vs market scan
-                    query_lower = scan_query.lower()
-                    
-                    # Detect tool type from query (comprehensive support)
-                    is_candlestick_query = 'candle' in query_lower or 'pattern' in query_lower
-                    is_bollinger_query = 'bollinger' in query_lower or 'squeeze' in query_lower
-                    is_rating_query = 'rating' in query_lower
-                    is_rsi_query = 'rsi' in query_lower or 'relative strength' in query_lower or 'oversold' in query_lower or 'overbought' in query_lower
-                    is_macd_query = 'macd' in query_lower or 'moving average convergence' in query_lower
-                    is_ma_query = ('moving average' in query_lower or 'sma' in query_lower or 'ema' in query_lower or 'golden cross' in query_lower or 'death cross' in query_lower) and not is_macd_query
-                    is_volume_query = 'volume' in query_lower and ('high' in query_lower or 'breakout' in query_lower or 'analysis' in query_lower)
-                    is_multi_query = 'complete' in query_lower or 'full' in query_lower or 'all indicator' in query_lower or 'comprehensive' in query_lower
-                    
-                    # Detect if specific stock is mentioned
-                    specific_stock_keywords = ['for ', ' for', 'to ', ' to', 'of ', ' of', 'on the ', 'on ']
-                    is_specific_stock = any(keyword in query_lower for keyword in specific_stock_keywords)
-                    
-                    # Common stock names/symbols
-                    stock_names = ['tcs', 'reliance', 'infosys', 'infy', 'hdfc', 'icici', 'sbi', 'jio', 'jiofin', 'tata', 'wipro', 'bharti', 'airtel']
-                    mentions_stock = any(stock in query_lower for stock in stock_names)
-                    
-                    # Extract stock symbol if mentioned
-                    specific_stock_symbol = None
-                    if is_specific_stock and mentions_stock:
-                        for stock_name in stock_names:
-                            if stock_name in query_lower:
-                                # Map common names to symbols
-                                symbol_map = {
-                                    'tcs': 'TCS.NS',
-                                    'reliance': 'RELIANCE.NS',
-                                    'infosys': 'INFY.NS',
-                                    'infy': 'INFY.NS',
-                                    'hdfc': 'HDFCBANK.NS',
-                                    'icici': 'ICICIBANK.NS',
-                                    'sbi': 'SBIN.NS',
-                                    'jio': 'JIOFIN.NS',
-                                    'jiofin': 'JIOFIN.NS',
-                                    'tata': 'TATAMOTORS.NS',
-                                    'wipro': 'WIPRO.NS',
-                                    'bharti': 'BHARTIARTL.NS',
-                                    'airtel': 'BHARTIARTL.NS'
-                                }
-                                specific_stock_symbol = symbol_map.get(stock_name)
-                                break
-                    
-                    # Handle specific stock queries
-                    if is_specific_stock and mentions_stock:
-                        # For candlestick/pattern queries on specific stock, allow it
-                        if is_candlestick_query:
-                            st.info(f"📊 Analyzing candlestick patterns for {specific_stock_symbol or 'the specified stock'}")
-                            
-                            # Use pipeline to analyze the specific stock
-                            if specific_stock_symbol:
-                                # Create visualization for the specific stock
-                                pipeline = get_visualization_pipeline()
-                                
-                                viz_results = {
-                                    'stocks': [],
-                                    'summary': f"Candlestick Pattern Analysis for {specific_stock_symbol}",
-                                    'total_found': 1,
-                                    'processed': 0,
-                                    'tool_type': 'candlestick'
-                                }
-                                
-                                try:
-                                    # Use pipeline's visualize_single_stock with candlestick tool type
-                                    chart, error_msg, analysis = pipeline.visualize_single_stock(
-                                        specific_stock_symbol,
-                                        timeframe=timeframe,
-                                        tool_type='candlestick'
-                                    )
-                                    
-                                    if not error_msg and chart:
-                                        stock_result = {
-                                            'symbol': specific_stock_symbol,
-                                            'original_symbol': specific_stock_symbol,
-                                            'display_name': specific_stock_symbol,
-                                            'data': analysis.get('data'),
-                                            'chart': chart,
-                                            'pattern': analysis.get('pattern', 'Multiple Patterns Detected'),
-                                            'explanation': analysis.get('explanation', f'Candlestick pattern analysis for {specific_stock_symbol}'),
-                                            'timeframe': timeframe,
-                                            'signal_strength': 'medium',
-                                            'mcp_description': f'Pattern analysis for {specific_stock_symbol}',
-                                            'is_current': False,
-                                            'tool_type': 'candlestick'
-                                        }
-                                        viz_results['stocks'].append(stock_result)
-                                        viz_results['processed'] = 1
-                                        viz_results['summary'] = f"""📊 Candlestick Pattern Analysis:
-   • Stock: {specific_stock_symbol}
-   • Timeframe: {timeframe}
-   • Analysis: Candlestick patterns detected
-   • Note: Direct analysis (MCP not used for single stock)"""
-                                        
-                                        st.session_state.mcp_viz_results = viz_results
-                                        st.session_state.mcp_demo_mode = True
-                                        st.rerun()
-                                    else:
-                                        st.error(f"❌ Could not fetch data for {specific_stock_symbol}")
-                                        st.info("💡 Try using the stock symbol with .NS suffix (e.g., TCS.NS)")
-                                        st.stop()
-                                        
-                                except Exception as e:
-                                    st.error(f"❌ Error analyzing {specific_stock_symbol}: {str(e)}")
-                                    st.stop()
-                            else:
-                                st.error("❌ Could not identify the stock symbol")
-                                st.info("💡 Try using the full symbol (e.g., TCS.NS)")
-                                st.stop()
-                        
-                        else:
-                            # For non-candlestick queries on specific stock, redirect to Chat
-                            st.warning("⚠️ Technical Scanner is for market-wide scanning")
-                            st.info("""
-                            💡 **You're asking for analysis of a specific stock, but Technical Scanner is designed for market-wide scans.**
-                            
-                            **For analyzing a specific stock:**
-                            1. Go to **Chat** view (sidebar)
-                            2. Ask: "Analyze TCS" or "Analyze TCS.NS"
-                            3. Get complete technical + fundamental analysis
-                            
-                            **For market-wide scanning:**
-                            Use Technical Scanner with queries like:
-                            - "Find Indian stocks with Bollinger squeeze on NSE"
-                            - "Show stocks with bullish candlestick patterns on NSE"
-                            - "Scan NSE for breakout stocks"
-                            
-                            **For candlestick patterns on specific stock:**
-                            - "Show candlestick patterns on TCS stock"
-                            - "What patterns are on Reliance stock"
-                            
-                            **Or try Demo Mode** to see how market scanning works.
-                            """)
-                            
-                            # Offer demo mode
-                            if st.button("🎯 Try Demo Mode", width="stretch", key="demo_specific_stock"):
-                                st.session_state.force_demo_mode = True
-                                st.rerun()
-                            
-                            # Stop here - don't call MCP
-                            st.stop()
-                    
-                    # Enhance query to ensure stocks-only (not crypto)
-                    # Add Technical Scanner context to prevent stock validation tools
-                    enhanced_query = f"[TECHNICAL SCANNER MODE - Use TradingView MCP tools only, do NOT call validate_and_get_stock or analyze_stock_request] {scan_query}"
-                    
-                    # Add stock-specific constraints if not already present
-                    query_lower = scan_query.lower()
-                    
-                    # If query doesn't specify exchange or market, add NSE constraint
-                    if "nse" not in query_lower and "bse" not in query_lower and "exchange" not in query_lower:
-                        if "indian" in query_lower or "india" in query_lower:
-                            enhanced_query = f"{enhanced_query} on NSE exchange (stocks only, exclude crypto)"
-                        else:
-                            enhanced_query = f"{enhanced_query} on NSE exchange in Indian stock market (stocks only, exclude crypto)"
-                    else:
-                        # Exchange mentioned, just add crypto exclusion
-                        enhanced_query = f"{enhanced_query} (stocks only, exclude crypto and cryptocurrency)"
-                    
-                    print(f"📊 Original query: {scan_query}")
-                    print(f"📊 Enhanced query: {enhanced_query}")
-                    
-                    # Run agent with MCP query
-                    import asyncio
-                    
-                    async def run_mcp_scan():
-                        try:
-                            # Use MCP agent instead of main agent
-                            # Create MCP conversation state
-                            mcp_state = create_mcp_state()
-                            
-                            # Run MCP agent with TradingView tools
-                            result = await mcp_agent.run(
-                                enhanced_query,  # Use enhanced query
-                                deps=mcp_state
-                            )
-                            return result, None
-                        except asyncio.TimeoutError:
-                            return None, "timeout_error"
-                        except Exception as e:
-                            error_msg = str(e)
-                            # Check if it's a TaskGroup error (asyncio)
-                            if "TaskGroup" in error_msg or "sub-exception" in error_msg:
-                                return None, "taskgroup_error"
-                            # Check if it's an OpenAI API validation error
-                            if "validation errors for ChatCompletion" in error_msg or "tool_calls" in error_msg:
-                                return None, "openai_api_error"
-                            # Check if it's an output validation error
-                            if "output validation" in error_msg.lower() or "exceeded maximum retries" in error_msg.lower():
-                                return None, "validation_error"
-                            # Check if it's an MCP tool error
-                            if "Tool" in error_msg and ("exceeded max retries" in error_msg or "MCP tool call failed" in error_msg):
-                                return None, "mcp_tool_error"
-                            return None, error_msg
-                    
-                    # Execute scan with proper event loop handling and timeout
-                    try:
-                        # Try to get existing event loop
-                        loop = asyncio.get_event_loop()
-                        if loop.is_closed():
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                    except RuntimeError:
-                        # No event loop in current thread
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                    
-                    # Run the scan with 60 second timeout
-                    try:
-                        result, error = loop.run_until_complete(
-                            asyncio.wait_for(run_mcp_scan(), timeout=100.0)
-                        )
-                    except asyncio.TimeoutError:
-                        result, error = None, "timeout_error"
-                    
-                    if error == "timeout_error":
-                        # MCP call timed out
-                        st.error("⏱️ MCP Request Timed Out")
-                        st.info("""
-                        💡 **The TradingView MCP tool took too long to respond (>60 seconds).**
-                        
-                        This usually happens when:
-                        - The MCP server is slow or overloaded
-                        - The query is too complex or broad
-                        - Network connectivity issues
-                        
-                        **What you can do:**
-                        
-                        1. **Try a simpler query:**
-                           - Instead of: "Show stocks with bullish candlestick patterns on NSE"
-                           - Try: "Find Indian stocks with Bollinger squeeze on NSE"
-                        
-                        2. **Use Demo Mode:**
-                           - Click the button below to see sample analysis
-                           - Demo Mode works without MCP
-                        
-                        3. **Try again later:**
-                           - MCP server might be temporarily slow
-                        
-                        **✅ Queries that usually work faster:**
-                        - "Find Indian stocks with Bollinger squeeze on NSE"
-                        - "Scan NSE for breakout stocks"
-                        """)
-                        
-                        # Offer demo mode
-                        if st.button("🎯 Try Demo Mode", width="stretch", key="demo_after_timeout"):
-                            st.session_state.force_demo_mode = True
-                            st.rerun()
-                    
-                    elif error == "taskgroup_error":
-                        # TaskGroup error - MCP server issue
-                        st.error("⚠️ MCP Server Error")
-                        st.info("""
-                        💡 **The TradingView MCP server encountered an internal error.**
-                        
-                        This usually happens when:
-                        - The MCP tool doesn't support the requested analysis
-                        - The MCP server is having connectivity issues
-                        - The query format is not recognized by MCP
-                        
-                        **What you can do:**
-                        
-                        1. **Try a simpler query:**
-                           - Instead of: "add supply demand indicators to JIO stock"
-                           - Try: "Find Indian stocks with Bollinger squeeze on NSE"
-                        
-                        2. **Use Demo Mode:**
-                           - Click the button below to see working examples
-                        
-                        3. **Note:** Supply/demand indicators may not be available in current MCP version
-                        
-                        **✅ Queries that work:**
-                        - "Find Indian stocks with Bollinger squeeze on NSE"
-                        - "Show stocks with bullish candlestick patterns on NSE"
-                        - "Scan NSE for breakout stocks"
-                        """)
-                        
-                        # Offer demo mode
-                        if st.button("🎯 Try Demo Mode", width="stretch", key="demo_after_taskgroup_error"):
-                            st.session_state.force_demo_mode = True
-                            st.rerun()
-                    
-                    elif error == "openai_api_error":
-                        # OpenAI API returned invalid tool call format
-                        st.error("⚠️ AI model returned an invalid response")
-                        st.info("""
-                        💡 **This is a temporary AI model issue.** The model tried to call a tool but didn't provide valid arguments.
-                        
-                        **What you can do:**
-                        
-                        1. **Try a more specific query:**
-                           - Instead of: "Find stocks"
-                           - Try: "Find Indian stocks with Bollinger squeeze on NSE"
-                        
-                        2. **Use Demo Mode:**
-                           - Click the button below to see sample technical analysis
-                        
-                        3. **Try again:**
-                           - Sometimes the model works on retry
-                        
-                        **✅ Recommended queries:**
-                        - "Find Indian stocks with Bollinger squeeze on NSE"
-                        - "Show stocks with bullish candlestick patterns on NSE"
-                        - "Scan NSE for breakout stocks"
-                        """)
-                        
-                        # Offer demo mode
-                        if st.button("🎯 Try Demo Mode", width="stretch", key="demo_after_api_error"):
-                            st.session_state.force_demo_mode = True
-                            st.rerun()
-                    
-                    elif error == "validation_error":
-                        # Output validation failed - agent couldn't format response correctly
-                        st.warning("⚠️ Query not supported by TradingView MCP tools")
-                        st.info("""
-                        💡 **TradingView MCP tools provide technical analysis only**, not buy/sell ratings.
-                        
-                        **✅ Supported queries (Technical Patterns):**
-                        - "Find Indian stocks with Bollinger squeeze on NSE"
-                        - "Show stocks with bullish candlestick patterns"
-                        - "Scan for breakout stocks on NSE"
-                        - "Find stocks with tight Bollinger Bands"
-                        - "Detect hammer candlestick patterns"
-                        
-                        **❌ Not supported (Fundamental Analysis):**
-                        - "Show stocks with strong buy rating" ← Your query
-                        - "Find stocks with high P/E ratio"
-                        - "Show analyst recommendations"
-                        
-                        **💡 For buy ratings and fundamental analysis:**
-                        - Go to **Chat** view
-                        - Ask: "Analyze [stock name]" for complete fundamental analysis
-                        - Or use **Demo Mode** below to see technical pattern examples
-                        """)
-                        
-                        # Offer demo mode
-                        if st.button("🎯 Try Demo Mode Instead", width="stretch", key="demo_after_validation_error"):
-                            st.session_state.force_demo_mode = True
-                            st.rerun()
-                    
-                    elif error == "mcp_tool_error":
-                        # MCP tool failed - use fallback with intelligent stock selection
-                        st.warning("⚠️ TradingView MCP tool is currently unavailable")
-                        
-                        # Detect tool type from query
-                        query_lower = scan_query.lower()
-                        if 'candle' in query_lower or 'pattern' in query_lower:
-                            demo_tool_type = 'candlestick'
-                        elif 'rating' in query_lower:
-                            demo_tool_type = 'rating'
-                        else:
-                            demo_tool_type = 'bollinger'
-                        
-                        # Priority 1: Use current analyzed stock if available
-                        current_stock_symbol = None
-                        if hasattr(st.session_state.deps, 'stock_symbol') and st.session_state.deps.stock_symbol:
-                            current_stock_symbol = st.session_state.deps.stock_symbol
-                        
-                        # Priority 2: Check if user wants multiple stocks
-                        wants_multiple = any(keyword in query_lower for keyword in [
-                            'all indian', 'multiple', 'several', 'top stocks', 'best stocks',
-                            'demo', 'sample', 'example', 'stocks'  # plural
-                        ])
-                        
-                        # Determine stocks to visualize
-                        if current_stock_symbol and not wants_multiple:
-                            # Use only current stock
-                            demo_stocks = [current_stock_symbol]
-                            st.info(f"💡 Visualizing current stock: {st.session_state.current_stock} ({current_stock_symbol})")
-                        else:
-                            # Use demo stocks
-                            demo_stocks = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
-                            
-                            # If current stock exists, add it to the beginning
-                            if current_stock_symbol and current_stock_symbol not in demo_stocks:
-                                demo_stocks = [current_stock_symbol] + demo_stocks[:max_stocks-1]
-                                st.info(f"💡 Visualizing {len(demo_stocks[:max_stocks])} stocks (including current: {st.session_state.current_stock})")
-                            else:
-                                st.info(f"💡 Visualizing {len(demo_stocks[:max_stocks])} sample Indian stocks")
-                        
-                        # Create a mock MCP response based on tool type
-                        if demo_tool_type == 'candlestick':
-                            mcp_response = f"""
-                            Candlestick patterns detected:
-                            {chr(10).join([f'- {symbol}: Pattern analysis' for symbol in demo_stocks[:max_stocks]])}
-                            """
-                        else:
-                            mcp_response = f"""
-                            Found {len(demo_stocks[:max_stocks])} stocks for analysis:
-                            {chr(10).join([f'- {symbol}: Analyzing Bollinger Band patterns' for symbol in demo_stocks[:max_stocks]])}
-                            """
-                        
-                        st.session_state.mcp_scan_response = mcp_response
-                        st.session_state.mcp_scan_timeframe = timeframe
-                        st.session_state.mcp_scan_max_stocks = min(max_stocks, len(demo_stocks))
-                        st.session_state.mcp_demo_mode = True
-                        
-                        # Process with demo stocks using appropriate tool type
-                        pipeline = get_visualization_pipeline()
-                        
-                        # Manually create results for demo stocks
-                        viz_results = {
-                            'stocks': [],
-                            'summary': f"Demo Mode: Visualizing {len(demo_stocks)} Indian stocks",
-                            'total_found': len(demo_stocks),
-                            'processed': 0,
-                            'tool_type': demo_tool_type
-                        }
-                        
-                        for symbol in demo_stocks[:max_stocks]:
-                            try:
-                                if demo_tool_type == 'candlestick':
-                                    # Candlestick pattern visualization
-                                    from utils.data_fetcher import get_data_fetcher
-                                    
-                                    fetcher = get_data_fetcher()
-                                    df, error_msg = fetcher.fetch_ohlc(symbol, timeframe)
-                                    
-                                    if df is not None:
-                                        # Create candlestick pattern chart
-                                        chart = pipeline.visualizer.create_candlestick_with_patterns(
-                                            df,
-                                            symbol,
-                                            pattern_name="Bullish Pattern",
-                                            title=f"{symbol} - Candlestick Patterns",
-                                            show_volume=True
-                                        )
-                                        
-                                        # Get stock name
-                                        stock_name = symbol
-                                        if symbol == current_stock_symbol and st.session_state.current_stock:
-                                            stock_name = f"{st.session_state.current_stock} ({symbol})"
-                                        
-                                        stock_result = {
-                                            'symbol': symbol,
-                                            'original_symbol': symbol,
-                                            'display_name': stock_name,
-                                            'data': df,
-                                            'chart': chart,
-                                            'pattern': 'Bullish Pattern',
-                                            'explanation': f'Candlestick pattern analysis for {stock_name}',
-                                            'timeframe': timeframe,
-                                            'signal_strength': 'medium',
-                                            'mcp_description': f'Pattern analysis for {stock_name}',
-                                            'is_current': symbol == current_stock_symbol,
-                                            'tool_type': 'candlestick'
-                                        }
-                                        viz_results['stocks'].append(stock_result)
-                                        viz_results['processed'] += 1
+                                    db.disconnect()
                                 else:
-                                    # Bollinger Band analysis (default)
-                                    chart, error_msg, analysis = pipeline.visualize_single_stock(
-                                        symbol,
-                                        timeframe=timeframe,
-                                        tool_type='bollinger'
-                                    )
-                                    
-                                    if not error_msg and chart:
-                                        # Get data
-                                        from utils.data_fetcher import get_data_fetcher
-                                        from utils.indicators import add_bollinger_bands
-                                        
-                                        fetcher = get_data_fetcher()
-                                        df, _ = fetcher.fetch_ohlc(symbol, timeframe)
-                                        if df is not None:
-                                            df = add_bollinger_bands(df)
-                                        
-                                        # Get stock name
-                                        stock_name = symbol
-                                        if symbol == current_stock_symbol and st.session_state.current_stock:
-                                            stock_name = f"{st.session_state.current_stock} ({symbol})"
-                                        
-                                        stock_result = {
-                                            'symbol': symbol,
-                                            'original_symbol': symbol,
-                                            'display_name': stock_name,
-                                            'data': df if df is not None else analysis.get('data'),
-                                            'chart': chart,
-                                            'squeeze_detected': analysis.get('squeeze_detected', False),
-                                            'squeeze_percentile': analysis.get('squeeze_percentile', 0),
-                                            'explanation': analysis.get('explanation', ''),
-                                            'timeframe': timeframe,
-                                            'signal_strength': 'strong' if analysis.get('squeeze_detected', False) else 'medium',
-                                            'mcp_description': f'Analysis for {stock_name}',
-                                            'is_current': symbol == current_stock_symbol,
-                                            'tool_type': 'bollinger'
-                                        }
-                                        viz_results['stocks'].append(stock_result)
-                                        viz_results['processed'] += 1
-                            except Exception as e:
-                                print(f"Error processing {symbol}: {e}")
-                                continue
-                        
-                        # Update summary based on tool type
-                        if demo_tool_type == 'candlestick':
-                            if current_stock_symbol and not wants_multiple:
-                                viz_results['summary'] = f"""📊 Current Stock Pattern Analysis:
-   • Stock: {st.session_state.current_stock} ({current_stock_symbol})
-   • Analysis: Candlestick patterns
-   • Timeframe: {timeframe}
-   • Note: MCP unavailable - using direct analysis"""
-                            else:
-                                viz_results['summary'] = f"""📊 Candlestick Pattern Analysis:
-   • Stocks analyzed: {viz_results['processed']}
-   • Timeframe: {timeframe}
-   • Note: MCP unavailable - using direct analysis"""
-                                if current_stock_symbol:
-                                    viz_results['summary'] += f"\n   • Current stock included: {st.session_state.current_stock}"
-                        else:
-                            squeeze_count = sum(1 for s in viz_results['stocks'] if s.get('squeeze_detected', False))
-                            
-                            if current_stock_symbol and not wants_multiple:
-                                viz_results['summary'] = f"""📊 Current Stock Analysis:
-   • Stock: {st.session_state.current_stock} ({current_stock_symbol})
-   • Bollinger squeeze: {'🔥 YES' if squeeze_count > 0 else '❌ NO'}
-   • Timeframe: {timeframe}
-   • Note: MCP unavailable - using direct analysis"""
-                            else:
-                                viz_results['summary'] = f"""📊 Technical Analysis:
-   • Stocks analyzed: {viz_results['processed']}
-   • Bollinger squeeze detected: {squeeze_count}/{viz_results['processed']}
-   • Timeframe: {timeframe}
-   • Note: MCP unavailable - using direct analysis"""
-                                if current_stock_symbol:
-                                    viz_results['summary'] += f"\n   • Current stock included: {st.session_state.current_stock}"
-                        
-                        st.session_state.mcp_viz_results = viz_results
-                        st.rerun()
-                        
-                    elif error:
-                        st.error(f"❌ Error during scan: {error}")
-                        st.info("💡 Try using demo mode or check MCP configuration")
+                                    print(f"❌ Could not connect to database")
+                                    response = """❌ **System Error**
+
+Could not retrieve analysis results. Please try your request again."""
+
+                            except Exception as db_error:
+                                print(f"❌ Database retrieval error: {db_error}")
+                                response = """❌ **Analysis Retrieval Failed**
+
+The system couldn't display the analysis properly. Please try your request again."""
                     else:
-                        # Success - process MCP response
-                        # Handle ToolResponse object
+                        response = f"❌ **System Error**\n\n{error_msg}\n\n*Please try your request again.*"
+            
+                else:
+                    # Success - resolve the final response.
+                    # Priority: last_analysis_response > last_validation_response > result.output
+                    # This ensures we always show the actual tool output, never the LLM's own text.
+                    _analysis_cache = getattr(st.session_state.deps, 'last_analysis_response', None)
+                    _validation_cache = getattr(st.session_state.deps, 'last_validation_response', None)
+
+                    if _analysis_cache:
+                        response = _analysis_cache
+                        print(f"📊 Using cached analysis response ({len(response)} chars)")
+                    elif _validation_cache:
+                        response = _validation_cache
+                        print(f"📊 Using cached validation response ({len(response)} chars)")
+                    else:
+                        # No cache — fall back to whatever the agent returned
                         if hasattr(result, 'output'):
-                            output = result.output
-                            # If output is ToolResponse, extract content
-                            if hasattr(output, 'content'):
-                                mcp_response = output.content
-                            elif isinstance(output, str):
-                                mcp_response = output
-                            else:
-                                mcp_response = str(output)
+                            response = result.output
+                        elif hasattr(result, 'data'):
+                            response = result.data
                         else:
-                            mcp_response = str(result)
-                        
-                        print(f"📊 MCP Response type: {type(mcp_response)}")
-                        print(f"📊 MCP Response preview: {mcp_response[:200] if isinstance(mcp_response, str) else 'Not a string'}")
-                        
-                        # Store MCP response
-                        st.session_state.mcp_scan_response = mcp_response
-                        st.session_state.mcp_scan_timeframe = timeframe
-                        st.session_state.mcp_scan_max_stocks = max_stocks
-                        st.session_state.mcp_demo_mode = False
-                        
-                        # Process and visualize
-                        pipeline = get_visualization_pipeline()
-                        
-                        # Auto-detect tool type from query (comprehensive support)
-                        query_lower = scan_query.lower()
-                        if 'candle' in query_lower or 'pattern' in query_lower:
-                            tool_type = 'candlestick'
-                        elif 'rsi' in query_lower or 'relative strength' in query_lower or 'oversold' in query_lower or 'overbought' in query_lower:
-                            tool_type = 'rsi'
-                        elif 'macd' in query_lower or 'moving average convergence' in query_lower:
-                            tool_type = 'macd'
-                        elif ('moving average' in query_lower or 'sma' in query_lower or 'ema' in query_lower or 'golden cross' in query_lower or 'death cross' in query_lower) and 'macd' not in query_lower:
-                            tool_type = 'moving_average'
-                        elif 'volume' in query_lower and ('high' in query_lower or 'breakout' in query_lower or 'analysis' in query_lower):
-                            tool_type = 'volume'
-                        elif 'complete' in query_lower or 'full' in query_lower or 'all indicator' in query_lower or 'comprehensive' in query_lower:
-                            tool_type = 'multi'
-                        elif 'rating' in query_lower:
-                            tool_type = 'rating'
-                        else:
-                            tool_type = 'unknown'  # Will auto-detect from response
-                        
-                        viz_results = pipeline.process_mcp_response(
-                            mcp_response,
-                            timeframe=timeframe,
-                            max_stocks=max_stocks,
-                            tool_type=tool_type
-                        )
-                        
-                        # Check if MCP returned empty response
-                        if viz_results.get('empty_response', False):
-                            # MCP returned no stocks - show helpful message
-                            st.warning("⚠️ No stocks found matching your criteria")
+                            response = str(result)
+                        print(f"📊 Fallback to result.output: {type(response)}")
+
+                    print(f"📄 Raw response preview: {str(response)[:200]}...")
+
+                    # Unwrap ToolResponse if present (from FixedResult/CachedResult recovery paths)
+                    if isinstance(response, ToolResponse):
+                        response = response.content
+
+                    # Strip FINAL_ANSWER: prefix — tool-level signal, not user-facing
+                    if isinstance(response, str) and response.startswith("FINAL_ANSWER:\n"):
+                        response = response[len("FINAL_ANSWER:\n"):]
+                        print(f"✂️ Stripped FINAL_ANSWER prefix, response now {len(response)} chars")
+
+                    # Ensure string
+                    if not isinstance(response, str):
+                        response = str(response)
+
+                    print(f"✅ Final response: {len(response)} characters")
+
+                    # Mark report as generated if we have a substantial response
+                    if st.session_state.deps.company_data and not st.session_state.deps.report_generated:
+                         if len(response) >= 200:
+                             # Mark as generated only if we have a substantial response
+                             st.session_state.deps.report_generated = True
+                         elif len(response) < 200 and not any(err in response for err in ["Invalid selection", "Please choose", "Error", "❌"]):
+                             # Short response but not an error - might be a valid short message
+                             print(f"⚠️ Short response ({len(response)} chars), but not using fallback")
+
+                    # DISABLED: Apply comprehensive formatting fixes - format_data_for_report already handles this
+                    # response = fix_response_formatting(response)
+                
+                    if 'tool_outputs' in response:
+                        markers = ['🔍 **Multiple', '🏢 COMPANY', '📊 COMPREHENSIVE', 'Here is', '🤖 AI', '✓ Found:', '✅ **Selected', '✅']
+                        for marker in markers:
+                            if marker in response:
+                                response = response[response.index(marker):]
+                                break
                             
-                            if viz_results.get('is_empty_array', False):
-                                # MCP explicitly returned empty array []
-                                st.info("""
-                                💡 **The TradingView MCP tool found no stocks matching your query.**
-                                
-                                This can happen when:
-                                - The criteria are too specific (no stocks match)
-                                - You're asking for analysis of a specific stock (MCP is for market-wide scanning)
-                                - The query format isn't recognized by MCP
-                                
-                                **What you can do:**
-                                
-                                1. **For specific stock analysis:**
-                                   - Go to **Chat** view (sidebar)
-                                   - Ask: "Analyze [stock name]" for complete analysis
-                                
-                                2. **For market-wide scanning, try broader queries:**
-                                   - "Find Indian stocks with Bollinger squeeze on NSE"
-                                   - "Show stocks with bullish patterns on NSE"
-                                   - "Scan NSE for breakout stocks"
-                                
-                                3. **Try Demo Mode:**
-                                   - See how market scanning works with sample stocks
-                                """)
-                            else:
-                                # Parse failure or unclear response
-                                st.info("""
-                                💡 **Could not parse the MCP response.**
-                                
-                                **Try these working queries:**
-                                - "Find Indian stocks with Bollinger squeeze on NSE"
-                                - "Show stocks with bullish candlestick patterns on NSE"
-                                - "Scan NSE for breakout stocks"
-                                
-                                **Or use Demo Mode** to see sample technical analysis.
-                                """)
-                            
-                            # Offer demo mode
-                            if st.button("🎯 Try Demo Mode", width="stretch", key="demo_after_empty_response"):
-                                st.session_state.force_demo_mode = True
-                                st.rerun()
-                            
-                            # Stop here
-                            st.stop()
-                        
-                        # Check if all stocks were crypto (skipped)
-                        if viz_results.get('processed', 0) == 0 and viz_results.get('skipped_crypto'):
-                            # All stocks were crypto - auto switch to demo mode
-                            st.warning("⚠️ All stocks returned were cryptocurrency (not supported)")
-                            st.info(f"""
-                            💡 **MCP returned only crypto symbols:**
-                            {', '.join(viz_results['skipped_crypto'][:5])}
-                            
-                            **Switching to Demo Mode with Indian stocks...**
-                            
-                            **💡 Tip:** For Indian stocks, use queries like:
-                            - "Find Indian stocks with Bollinger squeeze on NSE"
-                            - "Show NSE stocks with bullish patterns"
-                            - "Scan NSE exchange for breakout stocks"
-                            """)
-                            
-                            # Auto-switch to demo mode
-                            st.session_state.force_demo_mode = True
-                            st.rerun()
-                        
-                        # Store results and rerun to display
-                        st.session_state.mcp_viz_results = viz_results
-                        st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"❌ Error during scan: {str(e)}")
-                    st.code(str(e))
-                    
-                    # Offer demo mode
-                    if st.button("🎯 Try Demo Mode", width="stretch"):
-                        st.session_state.force_demo_mode = True
-                        st.rerun()
+                    if response.startswith('{') or response.startswith('tool_outputs'):
+                        match = re.search(r'[🔍🏢📊🤖✓🦈📋💰📈🏆🎯📰✅]', response)
+                        if match:
+                            response = response[match.start():]
+                
+                    # DISABLED: Final formatting pass - not needed, causes issues
+                    # response = fix_response_formatting(response)
+
+                # Update Session State from Deps
+                if st.session_state.deps.stock_name:
+                    st.session_state.current_stock = st.session_state.deps.stock_name
+                if st.session_state.deps.company_data:
+                    st.session_state.company_data = st.session_state.deps.company_data
         
-        # Demo mode button handler
-        if demo_button or st.session_state.get('force_demo_mode', False):
-            if 'force_demo_mode' in st.session_state:
-                del st.session_state.force_demo_mode
+            # DISABLED: Final formatting check - format_data_for_report already produces clean output
+            # debug_response_formatting(response, "BEFORE SAVING TO SESSION")
+        
+            # DISABLED: Apply one final formatting pass - causes formatting issues
+            # final_response = streamlit_markdown_formatter(response)
+            # debug_response_formatting(final_response, "FINAL FORMATTED RESPONSE")
+        
+            # Use response directly without additional formatting
+            st.session_state.messages.append({"role": "assistant", "content": response})
+            st.session_state.is_processing = False
+            _elapsed = _timer.time() - _request_start
+            if _elapsed >= 60:
+                _mins = int(_elapsed // 60)
+                _secs = _elapsed % 60
+                print(f"⏱️ Total response time: {_mins}m {_secs:.1f}s")
+            else:
+                print(f"⏱️ Total response time: {_elapsed:.1f}s")
+            print(f"💾 Message saved to session state")
+            st.rerun()
+
+
+    with fund_tab2:
+        # Analytics - Sentiment Analysis
+        if st.session_state.company_data:
+            data = st.session_state.company_data
+            stock_name = data.name
+            stock_symbol = data.symbol
+        
+            # ===== FIRST: Current Market Sentiment Section =====
+            st.subheader("📈 Current Market Sentiment")
+            st.caption("Real-time sentiment from News, Yahoo Finance, Twitter/X, and Reddit")
+        
+            # Check if sentiment analysis is already cached
+            if 'sentiment_data' not in st.session_state or st.session_state.get('sentiment_stock') != stock_symbol:
+                with st.spinner("🔍 Analyzing market sentiment from multiple sources (News, Yahoo Finance, Reddit, Twitter)..."):
+                    from utils.sentiment_analyzer_adanos import analyze_stock_sentiment
+                
+                    try:
+                        # Extract base ticker for Adanos API (remove .NS, .BO, etc.)
+                        ticker = stock_symbol.split('.')[0]
+                        sentiment_data = analyze_stock_sentiment(stock_name, stock_symbol, ticker)
+                        st.session_state.sentiment_data = sentiment_data
+                        st.session_state.sentiment_stock = stock_symbol
+                    except Exception as e:
+                        st.error(f"❌ Error analyzing sentiment: {e}")
+                        sentiment_data = None
+            else:
+                sentiment_data = st.session_state.sentiment_data
+        
+            if sentiment_data:
+                # Overall Sentiment Score
+                st.markdown("### 🎯 Overall Market Sentiment")
             
-            with st.spinner("🎯 Loading visualization..."):
-                try:
-                    from utils.mcp_visualization_pipeline import get_visualization_pipeline
+                # Determine number of columns based on available data
+                has_twitter = 'twitter_sentiment' in sentiment_data
+                has_reddit = 'reddit_sentiment' in sentiment_data
+            
+                if has_twitter and has_reddit:
+                    col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
+                elif has_twitter or has_reddit:
+                    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+                else:
+                    col1, col2, col3 = st.columns([2, 1, 1])
+            
+                with col1:
+                    # Sentiment gauge
+                    score = sentiment_data['overall_score']
+                    label = sentiment_data['overall_label']
+                    color = sentiment_data['color']
+                
+                    # Build sources text based on available data
+                    sources = ["News", "Yahoo Finance"]
+                    if 'twitter_sentiment' in sentiment_data:
+                        sources.append("Twitter/X")
+                    if 'reddit_sentiment' in sentiment_data:
+                        sources.append("Reddit")
+                    sources_text = ", ".join(sources)
+                
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, {color}22 0%, {color}44 100%); 
+                                padding: 2rem; border-radius: 1rem; border-left: 5px solid {color};">
+                        <div style="font-size: 3rem; font-weight: bold; color: {color};">{score}/100</div>
+                        <div style="font-size: 1.5rem; font-weight: 600; margin-top: 0.5rem;">{label}</div>
+                        <div style="margin-top: 1rem; color: #666;">
+                            Based on {sources_text}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+                with col2:
+                    news_score = sentiment_data['news_sentiment']['sentiment_score']
+                    news_label = sentiment_data['news_sentiment']['sentiment_label']
+                    st.metric("📰 News Sentiment", f"{news_score}/100", news_label)
+            
+                with col3:
+                    yahoo_score = sentiment_data['yahoo_sentiment']['sentiment_score']
+                    yahoo_rating = sentiment_data['yahoo_sentiment']['analyst_rating']
+                    st.metric("📊 Yahoo Finance", f"{yahoo_score}/100", yahoo_rating)
+            
+                # Twitter column (if available)
+                if has_twitter and has_reddit:
+                    with col4:
+                        twitter_score = sentiment_data['twitter_sentiment']['sentiment_score']
+                        twitter_label = sentiment_data['twitter_sentiment']['sentiment_label']
+                        st.metric("🐦 Twitter/X", f"{twitter_score}/100", twitter_label)
+                elif has_twitter:
+                    with col4:
+                        twitter_score = sentiment_data['twitter_sentiment']['sentiment_score']
+                        twitter_label = sentiment_data['twitter_sentiment']['sentiment_label']
+                        st.metric("🐦 Twitter/X", f"{twitter_score}/100", twitter_label)
+            
+                # Reddit column (if available)
+                if has_twitter and has_reddit:
+                    with col5:
+                        reddit_score = sentiment_data['reddit_sentiment']['sentiment_score']
+                        reddit_label = sentiment_data['reddit_sentiment']['sentiment_label']
+                        st.metric("🔴 Reddit", f"{reddit_score}/100", reddit_label)
+                elif has_reddit:
+                    with col4:
+                        reddit_score = sentiment_data['reddit_sentiment']['sentiment_score']
+                        reddit_label = sentiment_data['reddit_sentiment']['sentiment_label']
+                        st.metric("🔴 Reddit", f"{reddit_score}/100", reddit_label)
+            
+                # Twitter/X and Reddit Sentiment - Side by side in two columns
+                st.markdown("---")
+
+                # Create two main columns for Twitter and Reddit
+                social_col1, social_col2 = st.columns(2)
+            
+                # LEFT COLUMN: Twitter/X Sentiment
+                with social_col1:
+                    if 'twitter_sentiment' in sentiment_data:
+                        st.markdown("### 🐦 Twitter/X Sentiment")
                     
-                    # Detect tool type from query (comprehensive support)
-                    query_lower = scan_query.lower()
-                    if 'candle' in query_lower or 'pattern' in query_lower:
-                        demo_tool_type = 'candlestick'
-                    elif 'rsi' in query_lower or 'relative strength' in query_lower or 'oversold' in query_lower or 'overbought' in query_lower:
-                        demo_tool_type = 'rsi'
-                    elif 'macd' in query_lower or 'moving average convergence' in query_lower:
-                        demo_tool_type = 'macd'
-                    elif ('moving average' in query_lower or 'sma' in query_lower or 'ema' in query_lower or 'golden cross' in query_lower or 'death cross' in query_lower) and 'macd' not in query_lower:
-                        demo_tool_type = 'moving_average'
-                    elif 'volume' in query_lower and ('high' in query_lower or 'breakout' in query_lower or 'analysis' in query_lower):
-                        demo_tool_type = 'volume'
-                    elif 'complete' in query_lower or 'full' in query_lower or 'all indicator' in query_lower or 'comprehensive' in query_lower:
-                        demo_tool_type = 'multi'
-                    elif 'rating' in query_lower:
-                        demo_tool_type = 'rating'
+                        twitter_data = sentiment_data['twitter_sentiment']
+                    
+                        # Twitter sentiment score
+                        twitter_score = twitter_data.get('sentiment_score', 0)
+                        twitter_label = twitter_data.get('sentiment_label', 'N/A')
+                    
+                        # Color based on sentiment
+                        if twitter_score >= 60:
+                            twitter_color = "#10b981"
+                        elif twitter_score >= 40:
+                            twitter_color = "#fbbf24"
+                        else:
+                            twitter_color = "#ef4444"
+                    
+                        st.markdown(f"""
+                        <div style="background: linear-gradient(135deg, {twitter_color}22 0%, {twitter_color}44 100%); 
+                                    padding: 1.5rem; border-radius: 0.75rem; border-left: 4px solid {twitter_color};">
+                            <div style="font-size: 2rem; font-weight: bold; color: {twitter_color};">{twitter_score}/100</div>
+                            <div style="font-size: 1rem; font-weight: 600; margin-top: 0.5rem;">{twitter_label}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                        # Show source information as caption below score
+                        source = twitter_data.get('source', 'unknown')
+                        if source == 'rapidapi_twitter':
+                            tweet_count = twitter_data.get('tweet_count', 0)
+                            st.caption(f"📊 Based on {tweet_count} recent tweets")
+                        elif source == 'news_based_twitter':
+                            st.caption(f"📰 Based on news articles")
+                        else:
+                            st.caption("📊 Twitter sentiment data")
+                    
+                        # Fixed spacing before sentiment breakdown
+                        st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
+                    
+                        # Sentiment breakdown in 3 columns
+                        tw_col1, tw_col2, tw_col3 = st.columns(3)
+                    
+                        with tw_col1:
+                            positive_pct = twitter_data.get('positive_percentage', 0)
+                            st.metric("👍 Positive", f"{positive_pct}%")
+                    
+                        with tw_col2:
+                            negative_pct = twitter_data.get('negative_percentage', 0)
+                            st.metric("👎 Negative", f"{negative_pct}%")
+                    
+                        with tw_col3:
+                            neutral_pct = twitter_data.get('neutral_percentage', 0)
+                            st.metric("😐 Neutral", f"{neutral_pct}%")
+                    
+                        # Show top engaging tweets if available
+                        if twitter_data.get('top_tweets'):
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            with st.expander("🔥 Top Engaging Tweets"):
+                                for i, tweet in enumerate(twitter_data['top_tweets'][:5], 1):
+                                    sentiment_emoji = "✅" if tweet.get('sentiment_label') == 'Positive' else "⚠️" if tweet.get('sentiment_label') == 'Negative' else "➖"
+                                    tweet_text = tweet.get('text', 'N/A')
+                                    st.markdown(f"{sentiment_emoji} **Tweet {i}:** {tweet_text[:200]}...")
+                                    st.caption(f"❤️ {tweet.get('favorites', 0)} | 🔄 {tweet.get('retweets', 0)} | 💬 {tweet.get('replies', 0)}")
+                                    if i < 5:
+                                        st.markdown("---")
                     else:
-                        demo_tool_type = 'bollinger'
+                        st.markdown("### 🐦 Twitter/X Sentiment")
+                        st.info("No Twitter data available")
+            
+                # RIGHT COLUMN: Reddit Sentiment
+                with social_col2:
+                    if 'reddit_sentiment' in sentiment_data:
+                        st.markdown("### 🔴 Reddit Sentiment")
                     
-                    # Priority 1: Use current analyzed stock if available
-                    current_stock_symbol = None
-                    if hasattr(st.session_state.deps, 'stock_symbol') and st.session_state.deps.stock_symbol:
-                        current_stock_symbol = st.session_state.deps.stock_symbol
-                        st.info(f"📊 Visualizing current stock: {st.session_state.current_stock} ({current_stock_symbol})")
+                        reddit_data = sentiment_data['reddit_sentiment']
                     
-                    # Priority 2: Check if user wants "all Indian stocks" or demo stocks
-                    wants_multiple = any(keyword in query_lower for keyword in [
-                        'all indian', 'multiple', 'several', 'top stocks', 'best stocks',
-                        'demo', 'sample', 'example'
-                    ])
+                        # Reddit sentiment score
+                        reddit_score = reddit_data.get('sentiment_score', 0)
+                        reddit_label = reddit_data.get('sentiment_label', 'N/A')
                     
-                    # Determine stocks to visualize
-                    if current_stock_symbol and not wants_multiple:
-                        # Use only current stock
-                        stocks_to_visualize = [current_stock_symbol]
-                        mode_message = f"Analyzing current stock: {st.session_state.current_stock}"
+                        # Color based on sentiment
+                        if reddit_score >= 60:
+                            reddit_color = "#10b981"
+                        elif reddit_score >= 40:
+                            reddit_color = "#fbbf24"
+                        else:
+                            reddit_color = "#ef4444"
+                    
+                        st.markdown(f"""
+                        <div style="background: linear-gradient(135deg, {reddit_color}22 0%, {reddit_color}44 100%); 
+                                    padding: 1.5rem; border-radius: 0.75rem; border-left: 4px solid {reddit_color};">
+                            <div style="font-size: 2rem; font-weight: bold; color: {reddit_color};">{reddit_score}/100</div>
+                            <div style="font-size: 1rem; font-weight: 600; margin-top: 0.5rem;">{reddit_label}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                        # Show source information as caption below score
+                        total_posts = reddit_data.get('total_posts', 0)
+                        total_items = reddit_data.get('total_items_analyzed', 0)
+                        st.caption(f"📊 Based on {total_posts} posts & {total_items} items")
+                    
+                        # Fixed spacing before sentiment breakdown (same as Twitter)
+                        st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
+                    
+                        # Sentiment breakdown in 3 columns
+                        rd_col1, rd_col2, rd_col3 = st.columns(3)
+                    
+                        with rd_col1:
+                            positive_pct = reddit_data.get('positive_percentage', 0)
+                            st.metric("👍 Positive", f"{positive_pct}%")
+                    
+                        with rd_col2:
+                            negative_pct = reddit_data.get('negative_percentage', 0)
+                            st.metric("👎 Negative", f"{negative_pct}%")
+                    
+                        with rd_col3:
+                            neutral_pct = reddit_data.get('neutral_percentage', 0)
+                            st.metric("😐 Neutral", f"{neutral_pct}%")
+                    
+                        # Show subreddit distribution in expander (like top posts)
+                        subreddit_dist = reddit_data.get('subreddit_distribution')
+                        if subreddit_dist and isinstance(subreddit_dist, dict):
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            with st.expander("📊 Active Subreddits"):
+                                subreddit_list = list(subreddit_dist.items())
+                                # Display in rows of 2
+                                for i in range(0, len(subreddit_list), 2):
+                                    sub_cols = st.columns(2)
+                                    for j, (subreddit, count) in enumerate(subreddit_list[i:i+2]):
+                                        with sub_cols[j]:
+                                            st.metric(f"r/{subreddit}", f"{count} posts")
+                    
+                        # Show top Reddit posts if available
+                        if reddit_data.get('top_posts'):
+                            with st.expander("🔥 Top Reddit Posts"):
+                                for i, post in enumerate(reddit_data['top_posts'][:5], 1):
+                                    st.markdown(f"**{i}. {post['title']}**")
+                                    st.caption(f"r/{post['subreddit']} | ⬆️ {post['score']} | 💬 {post['num_comments']} comments")
+                                    # Only show link if URL is available
+                                    if post.get('url'):
+                                        st.markdown(f"[View on Reddit]({post['url']})")
+                                    if i < 5:
+                                        st.markdown("---")
+                    
+                        # Show Reddit insights in expander
+                        if reddit_data.get('key_insights'):
+                            with st.expander("💡 Key Insights"):
+                                for insight in reddit_data['key_insights']:
+                                    st.markdown(f"• {insight}")
                     else:
-                        # Use demo stocks (multiple stocks requested or no current stock)
-                        demo_stocks = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
-                        
-                        # If current stock exists, add it to the beginning of the list
-                        if current_stock_symbol and current_stock_symbol not in demo_stocks:
-                            stocks_to_visualize = [current_stock_symbol] + demo_stocks[:max_stocks-1]
-                        else:
-                            stocks_to_visualize = demo_stocks[:max_stocks]
-                        
-                        mode_message = f"Analyzing {len(stocks_to_visualize)} stocks"
-                        if current_stock_symbol:
-                            mode_message += f" (including current: {st.session_state.current_stock})"
-                    
-                    st.info(f"💡 {mode_message}")
-                    
-                    # Create a mock MCP response based on tool type
-                    if demo_tool_type == 'candlestick':
-                        mcp_response = f"""
-                        Candlestick patterns detected:
-                        {chr(10).join([f'- {symbol}: Pattern analysis' for symbol in stocks_to_visualize])}
-                        """
-                    elif demo_tool_type == 'rsi':
-                        mcp_response = f"""
-                        RSI Analysis:
-                        {chr(10).join([f'- {symbol}: RSI indicator analysis' for symbol in stocks_to_visualize])}
-                        """
-                    elif demo_tool_type == 'macd':
-                        mcp_response = f"""
-                        MACD Analysis:
-                        {chr(10).join([f'- {symbol}: MACD indicator analysis' for symbol in stocks_to_visualize])}
-                        """
-                    elif demo_tool_type == 'moving_average':
-                        mcp_response = f"""
-                        Moving Average Analysis:
-                        {chr(10).join([f'- {symbol}: MA analysis' for symbol in stocks_to_visualize])}
-                        """
-                    elif demo_tool_type == 'volume':
-                        mcp_response = f"""
-                        Volume Analysis:
-                        {chr(10).join([f'- {symbol}: Volume analysis' for symbol in stocks_to_visualize])}
-                        """
-                    elif demo_tool_type == 'multi':
-                        mcp_response = f"""
-                        Complete Technical Analysis:
-                        {chr(10).join([f'- {symbol}: Multi-indicator analysis' for symbol in stocks_to_visualize])}
-                        """
+                        st.markdown("### 🔴 Reddit Sentiment")
+                        st.info("No Reddit data available")
+            
+                st.markdown("---")
+            
+                # Sentiment Breakdown
+                col1, col2 = st.columns(2)
+            
+                with col1:
+                    st.markdown("### 📈 Positive Factors")
+                    positive_points = sentiment_data['news_sentiment'].get('positive_points', [])
+                    if positive_points and positive_points != ['Insufficient data']:
+                        for point in positive_points:
+                            st.markdown(f"✅ {point}")
                     else:
-                        mcp_response = f"""
-                        Technical Analysis:
-                        {chr(10).join([f'- {symbol}: Bollinger Band analysis' for symbol in stocks_to_visualize])}
-                        """
-                    
-                    st.session_state.mcp_scan_response = mcp_response
-                    st.session_state.mcp_scan_timeframe = timeframe
-                    st.session_state.mcp_scan_max_stocks = len(stocks_to_visualize)
-                    st.session_state.mcp_demo_mode = True
-                    
-                    # Process with selected stocks
-                    pipeline = get_visualization_pipeline()
-                    
-                    # Manually create results
-                    viz_results = {
-                        'stocks': [],
-                        'summary': mode_message,
-                        'total_found': len(stocks_to_visualize),
-                        'processed': 0,
-                        'tool_type': demo_tool_type
-                    }
-                    
-                    for symbol in stocks_to_visualize:
-                        try:
-                            if demo_tool_type == 'candlestick':
-                                # Candlestick pattern visualization
-                                from utils.data_fetcher import get_data_fetcher
-                                
-                                fetcher = get_data_fetcher()
-                                df, error_msg = fetcher.fetch_ohlc(symbol, timeframe)
-                                
-                                if df is not None:
-                                    # Create candlestick pattern chart
-                                    chart = pipeline.visualizer.create_candlestick_with_patterns(
-                                        df,
-                                        symbol,
-                                        pattern_name="Bullish Pattern",
-                                        title=f"{symbol} - Candlestick Patterns",
-                                        show_volume=True
-                                    )
-                                    
-                                    # Get stock name
-                                    stock_name = symbol
-                                    if symbol == current_stock_symbol and st.session_state.current_stock:
-                                        stock_name = f"{st.session_state.current_stock} ({symbol})"
-                                    
-                                    stock_result = {
-                                        'symbol': symbol,
-                                        'original_symbol': symbol,
-                                        'display_name': stock_name,
-                                        'data': df,
-                                        'chart': chart,
-                                        'pattern': 'Bullish Pattern',
-                                        'explanation': f'Candlestick pattern analysis for {stock_name}',
-                                        'timeframe': timeframe,
-                                        'signal_strength': 'medium',
-                                        'mcp_description': f'Pattern analysis for {stock_name}',
-                                        'is_current': symbol == current_stock_symbol,
-                                        'tool_type': 'candlestick'
-                                    }
-                                    viz_results['stocks'].append(stock_result)
-                                    viz_results['processed'] += 1
-                            else:
-                                # Use pipeline for other tool types (RSI, MACD, MA, Volume, Multi, Bollinger)
-                                chart, error, analysis = pipeline.visualize_single_stock(
-                                    symbol,
-                                    timeframe=timeframe,
-                                    tool_type=demo_tool_type
-                                )
-                                
-                                if not error and chart:
-                                    # Get data from analysis
-                                    from utils.data_fetcher import get_data_fetcher
-                                    
-                                    fetcher = get_data_fetcher()
-                                    df, _ = fetcher.fetch_ohlc(symbol, timeframe)
-                                    
-                                    # Get stock name
-                                    stock_name = symbol
-                                    if symbol == current_stock_symbol and st.session_state.current_stock:
-                                        stock_name = f"{st.session_state.current_stock} ({symbol})"
-                                    
-                                    # Build result based on tool type
-                                    stock_result = {
-                                        'symbol': symbol,
-                                        'original_symbol': symbol,
-                                        'display_name': stock_name,
-                                        'data': df,
-                                        'chart': chart,
-                                        'timeframe': timeframe,
-                                        'mcp_description': f'{demo_tool_type.title()} analysis for {stock_name}',
-                                        'is_current': symbol == current_stock_symbol,
-                                        'tool_type': demo_tool_type
-                                    }
-                                    
-                                    # Add tool-specific fields
-                                    if demo_tool_type == 'bollinger':
-                                        stock_result['squeeze_detected'] = analysis.get('squeeze_detected', False)
-                                        stock_result['squeeze_percentile'] = analysis.get('squeeze_percentile', 0)
-                                        stock_result['explanation'] = analysis.get('explanation', '')
-                                        stock_result['signal_strength'] = 'strong' if analysis.get('squeeze_detected', False) else 'medium'
-                                    elif demo_tool_type == 'rsi':
-                                        stock_result['rsi_value'] = analysis.get('rsi_value')
-                                        stock_result['explanation'] = analysis.get('explanation', '')
-                                        stock_result['signal_strength'] = 'strong' if (analysis.get('rsi_value') and (analysis.get('rsi_value') < 30 or analysis.get('rsi_value') > 70)) else 'medium'
-                                    elif demo_tool_type == 'macd':
-                                        stock_result['macd_signal'] = analysis.get('macd_signal', 'Neutral')
-                                        stock_result['explanation'] = analysis.get('explanation', '')
-                                        stock_result['signal_strength'] = 'strong' if analysis.get('macd_signal') in ['Bullish', 'Bearish'] else 'medium'
-                                    else:
-                                        stock_result['explanation'] = analysis.get('explanation', '')
-                                        stock_result['signal_strength'] = 'medium'
-                                    
-                                    viz_results['stocks'].append(stock_result)
-                                    viz_results['processed'] += 1
-                        except Exception as e:
-                            st.warning(f"⚠️ Could not load {symbol}: {str(e)}")
-                            continue
-                    
-                    # Update summary based on tool type
-                    if demo_tool_type == 'candlestick':
-                        if current_stock_symbol and not wants_multiple:
-                            viz_results['summary'] = f"""📊 Current Stock Pattern Analysis:
-   • Stock: {st.session_state.current_stock} ({current_stock_symbol})
-   • Analysis: Candlestick patterns
-   • Timeframe: {timeframe}"""
-                        else:
-                            viz_results['summary'] = f"""📊 Candlestick Pattern Analysis:
-   • Stocks analyzed: {viz_results['processed']}
-   • Timeframe: {timeframe}"""
-                            if current_stock_symbol:
-                                viz_results['summary'] += f"\n   • Current stock included: {st.session_state.current_stock}"
-                    
-                    elif demo_tool_type == 'rsi':
-                        oversold_count = sum(1 for s in viz_results['stocks'] if s.get('rsi_value') and s.get('rsi_value') < 30)
-                        overbought_count = sum(1 for s in viz_results['stocks'] if s.get('rsi_value') and s.get('rsi_value') > 70)
-                        
-                        if current_stock_symbol and not wants_multiple:
-                            viz_results['summary'] = f"""📊 Current Stock RSI Analysis:
-   • Stock: {st.session_state.current_stock} ({current_stock_symbol})
-   • Analysis: RSI indicator
-   • Timeframe: {timeframe}"""
-                        else:
-                            viz_results['summary'] = f"""📊 RSI Analysis:
-   • Stocks analyzed: {viz_results['processed']}
-   • Oversold (RSI < 30): {oversold_count}
-   • Overbought (RSI > 70): {overbought_count}
-   • Timeframe: {timeframe}"""
-                            if current_stock_symbol:
-                                viz_results['summary'] += f"\n   • Current stock included: {st.session_state.current_stock}"
-                    
-                    elif demo_tool_type == 'macd':
-                        bullish_count = sum(1 for s in viz_results['stocks'] if s.get('macd_signal') == 'Bullish')
-                        bearish_count = sum(1 for s in viz_results['stocks'] if s.get('macd_signal') == 'Bearish')
-                        
-                        if current_stock_symbol and not wants_multiple:
-                            viz_results['summary'] = f"""📊 Current Stock MACD Analysis:
-   • Stock: {st.session_state.current_stock} ({current_stock_symbol})
-   • Analysis: MACD indicator
-   • Timeframe: {timeframe}"""
-                        else:
-                            viz_results['summary'] = f"""📊 MACD Analysis:
-   • Stocks analyzed: {viz_results['processed']}
-   • Bullish signals: {bullish_count}
-   • Bearish signals: {bearish_count}
-   • Timeframe: {timeframe}"""
-                            if current_stock_symbol:
-                                viz_results['summary'] += f"\n   • Current stock included: {st.session_state.current_stock}"
-                    
-                    elif demo_tool_type in ['moving_average', 'ma']:
-                        if current_stock_symbol and not wants_multiple:
-                            viz_results['summary'] = f"""📊 Current Stock Moving Average Analysis:
-   • Stock: {st.session_state.current_stock} ({current_stock_symbol})
-   • Analysis: SMA 20, 50, 200
-   • Timeframe: {timeframe}"""
-                        else:
-                            viz_results['summary'] = f"""📊 Moving Average Analysis:
-   • Stocks analyzed: {viz_results['processed']}
-   • Indicators: SMA 20, 50, 200
-   • Timeframe: {timeframe}"""
-                            if current_stock_symbol:
-                                viz_results['summary'] += f"\n   • Current stock included: {st.session_state.current_stock}"
-                    
-                    elif demo_tool_type == 'volume':
-                        if current_stock_symbol and not wants_multiple:
-                            viz_results['summary'] = f"""📊 Current Stock Volume Analysis:
-   • Stock: {st.session_state.current_stock} ({current_stock_symbol})
-   • Analysis: Volume patterns
-   • Timeframe: {timeframe}"""
-                        else:
-                            viz_results['summary'] = f"""📊 Volume Analysis:
-   • Stocks analyzed: {viz_results['processed']}
-   • Analysis: Volume patterns and trends
-   • Timeframe: {timeframe}"""
-                            if current_stock_symbol:
-                                viz_results['summary'] += f"\n   • Current stock included: {st.session_state.current_stock}"
-                    
-                    elif demo_tool_type == 'multi':
-                        if current_stock_symbol and not wants_multiple:
-                            viz_results['summary'] = f"""📊 Current Stock Complete Analysis:
-   • Stock: {st.session_state.current_stock} ({current_stock_symbol})
-   • Analysis: All indicators (Bollinger, RSI, MACD, Volume)
-   • Timeframe: {timeframe}"""
-                        else:
-                            viz_results['summary'] = f"""📊 Complete Technical Analysis:
-   • Stocks analyzed: {viz_results['processed']}
-   • Indicators: Bollinger, RSI, MACD, Volume
-   • Timeframe: {timeframe}"""
-                            if current_stock_symbol:
-                                viz_results['summary'] += f"\n   • Current stock included: {st.session_state.current_stock}"
-                    
+                        st.info("No significant positive factors identified")
+            
+                with col2:
+                    st.markdown("### 📉 Negative Factors")
+                    negative_points = sentiment_data['news_sentiment'].get('negative_points', [])
+                    if negative_points and negative_points != ['Insufficient data']:
+                        for point in negative_points:
+                            st.markdown(f"⚠️ {point}")
                     else:
-                        # Bollinger (default)
-                        squeeze_count = sum(1 for s in viz_results['stocks'] if s.get('squeeze_detected', False))
-                        
-                        if current_stock_symbol and not wants_multiple:
-                            viz_results['summary'] = f"""📊 Current Stock Analysis:
-   • Stock: {st.session_state.current_stock} ({current_stock_symbol})
-   • Bollinger squeeze: {'🔥 YES' if squeeze_count > 0 else '❌ NO'}
-   • Timeframe: {timeframe}"""
-                        else:
-                            viz_results['summary'] = f"""📊 Technical Analysis:
-   • Stocks analyzed: {viz_results['processed']}
-   • Bollinger squeeze detected: {squeeze_count}/{viz_results['processed']}
-   • Timeframe: {timeframe}"""
-                            if current_stock_symbol:
-                                viz_results['summary'] += f"\n   • Current stock included: {st.session_state.current_stock}"
-                    
-                    st.session_state.mcp_viz_results = viz_results
+                        st.info("No significant negative factors identified")
+            
+                st.markdown("---")
+            
+                # Market Mood Summary
+                st.markdown("### 💭 Market Mood & Analysis")
+                st.markdown(sentiment_data['final_analysis'])
+            
+                st.markdown("---")
+            
+                # Refresh button
+                if st.button("🔄 Refresh Sentiment Analysis"):
+                    if 'sentiment_data' in st.session_state:
+                        del st.session_state.sentiment_data
+                    if 'sentiment_stock' in st.session_state:
+                        del st.session_state.sentiment_stock
                     st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"❌ Error in visualization: {str(e)}")
-                    import traceback
-                    st.code(traceback.format_exc())
         
-        # Display results if available
-        if hasattr(st.session_state, 'mcp_viz_results') and st.session_state.mcp_viz_results:
-            results = st.session_state.mcp_viz_results
-            tool_type = results.get('tool_type', 'bollinger')
-            
+            else:
+                st.error("Unable to perform sentiment analysis. Please try again.")
+        
+            # ===== SECOND: Future Outlook & News Analysis Section =====
             st.markdown("---")
+            st.subheader("🔮 Future Outlook & News Analysis")
+            st.caption("AI-powered analysis of future expectations from top financial sources")
+
+            # Check if news analysis is already cached
+            if 'news_analysis' not in st.session_state or st.session_state.get('news_analysis_stock') != stock_symbol:
+                with st.spinner("🔍 Searching for latest news and analyst forecasts..."):
+                    from tools import StockTools
+                    import concurrent.futures
+
+                    try:
+                        # Run with a timeout so the UI doesn't hang forever
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(
+                                StockTools.get_stock_news_analysis,
+                                stock_name,
+                                5  # max_articles reduced from 10 to 5 for speed
+                            )
+                            news_result = future.result(timeout=90)  # 90s max
+
+                        st.session_state.news_analysis = news_result
+                        st.session_state.news_analysis_stock = stock_symbol
+                    except concurrent.futures.TimeoutError:
+                        st.warning("⏱️ News analysis timed out. Click Refresh to try again.")
+                        news_result = None
+                    except Exception as e:
+                        st.error(f"❌ Error fetching news analysis: {e}")
+                        news_result = None
+            else:
+                news_result = st.session_state.news_analysis
+        
+            if news_result and not news_result.get('error'):
+                # Display the full LLM analysis
+                st.markdown("### 📝 Detailed Analysis")
+                analysis_text = news_result.get('analysis', 'No analysis available')
+                st.markdown(analysis_text)
             
-            # Demo mode indicator
-            if st.session_state.get('mcp_demo_mode', False):
-                st.info("🎯 **Demo Mode Active** - Visualizing sample stocks without TradingView MCP")
+                st.markdown("---")
             
-            # Summary
-            st.markdown("### 📊 Scan Results")
-            st.info(results['summary'])
+                # Display Tavily Summary
+                if news_result.get('tavily_summary'):
+                    st.markdown("### 🌐 Web Search Summary")
+                    st.info(news_result['tavily_summary'])
+                    st.markdown("---")
             
-            # Display each stock
-            if results['stocks']:
-                for idx, stock_result in enumerate(results['stocks'], 1):
-                    # Highlight current stock
-                    is_current = stock_result.get('is_current', False)
-                    display_name = stock_result.get('display_name', stock_result['symbol'])
-                    
-                    if is_current:
-                        st.markdown(f"### {idx}. ⭐ {display_name} (Current Stock)")
-                    else:
-                        st.markdown(f"### {idx}. {display_name}")
-                    
-                    # Stock info - different metrics based on tool type
-                    if tool_type == 'candlestick':
-                        # Candlestick pattern metrics
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            st.metric("Timeframe", stock_result['timeframe'])
-                        
-                        with col2:
-                            pattern = stock_result.get('pattern', 'Pattern Detected')
-                            st.metric("Pattern", pattern)
-                        
-                        with col3:
-                            signal_color = {
-                                'strong': '🟢',
-                                'medium': '🟡',
-                                'weak': '🔴'
-                            }.get(stock_result['signal_strength'], '⚪')
-                            st.metric("Signal", f"{signal_color} {stock_result['signal_strength'].title()}")
-                    
-                    elif tool_type == 'rsi':
-                        # RSI metrics
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            st.metric("Timeframe", stock_result['timeframe'])
-                        
-                        with col2:
-                            rsi_value = stock_result.get('rsi_value')
-                            if rsi_value:
-                                rsi_status = "🔴 Overbought" if rsi_value > 70 else "🟢 Oversold" if rsi_value < 30 else "🟡 Neutral"
-                                st.metric("RSI", f"{rsi_value:.2f}")
-                            else:
-                                st.metric("RSI", "N/A")
-                        
-                        with col3:
-                            signal_color = {
-                                'strong': '🟢',
-                                'medium': '🟡',
-                                'weak': '🔴'
-                            }.get(stock_result['signal_strength'], '⚪')
-                            st.metric("Signal", f"{signal_color} {stock_result['signal_strength'].title()}")
-                    
-                    elif tool_type == 'macd':
-                        # MACD metrics
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            st.metric("Timeframe", stock_result['timeframe'])
-                        
-                        with col2:
-                            macd_signal = stock_result.get('macd_signal', 'Neutral')
-                            signal_emoji = "🟢" if macd_signal == 'Bullish' else "🔴" if macd_signal == 'Bearish' else "🟡"
-                            st.metric("MACD Signal", f"{signal_emoji} {macd_signal}")
-                        
-                        with col3:
-                            signal_color = {
-                                'strong': '🟢',
-                                'medium': '🟡',
-                                'weak': '🔴'
-                            }.get(stock_result['signal_strength'], '⚪')
-                            st.metric("Strength", f"{signal_color} {stock_result['signal_strength'].title()}")
-                    
-                    elif tool_type in ['moving_average', 'ma']:
-                        # Moving Average metrics
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            st.metric("Timeframe", stock_result['timeframe'])
-                        
-                        with col2:
-                            st.metric("Indicators", "SMA 20, 50, 200")
-                        
-                        with col3:
-                            signal_color = {
-                                'strong': '🟢',
-                                'medium': '🟡',
-                                'weak': '🔴'
-                            }.get(stock_result['signal_strength'], '⚪')
-                            st.metric("Signal", f"{signal_color} {stock_result['signal_strength'].title()}")
-                    
-                    elif tool_type == 'volume':
-                        # Volume metrics
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            st.metric("Timeframe", stock_result['timeframe'])
-                        
-                        with col2:
-                            st.metric("Analysis", "Volume Patterns")
-                        
-                        with col3:
-                            signal_color = {
-                                'strong': '🟢',
-                                'medium': '🟡',
-                                'weak': '🔴'
-                            }.get(stock_result['signal_strength'], '⚪')
-                            st.metric("Signal", f"{signal_color} {stock_result['signal_strength'].title()}")
-                    
-                    elif tool_type == 'multi':
-                        # Multi-indicator metrics
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            st.metric("Timeframe", stock_result['timeframe'])
-                        
-                        with col2:
-                            st.metric("Analysis", "All Indicators")
-                        
-                        with col3:
-                            signal_color = {
-                                'strong': '🟢',
-                                'medium': '🟡',
-                                'weak': '🔴'
-                            }.get(stock_result['signal_strength'], '⚪')
-                            st.metric("Signal", f"{signal_color} {stock_result['signal_strength'].title()}")
-                    
-                    else:
-                        # Bollinger Band metrics (default)
-                        col1, col2, col3, col4 = st.columns(4)
-                        
-                        with col1:
-                            st.metric("Timeframe", stock_result['timeframe'])
-                        
-                        with col2:
-                            squeeze_status = "🔥 YES" if stock_result.get('squeeze_detected', False) else "❌ NO"
-                            st.metric("Squeeze", squeeze_status)
-                        
-                        with col3:
-                            st.metric("Percentile", f"{stock_result.get('squeeze_percentile', 0):.1f}%")
-                        
-                        with col4:
-                            signal_color = {
-                                'strong': '🟢',
-                                'medium': '🟡',
-                                'weak': '🔴'
-                            }.get(stock_result['signal_strength'], '⚪')
-                            st.metric("Signal", f"{signal_color} {stock_result['signal_strength'].title()}")
-                    
-                    # Explanation
-                    with st.expander("📝 Analysis", expanded=True):
-                        st.write(stock_result['explanation'])
-                        if stock_result['mcp_description']:
-                            st.caption(f"MCP: {stock_result['mcp_description']}")
-                    
-                    # Chart
-                    if stock_result['chart']:
-                        st.plotly_chart(
-                            stock_result['chart'], 
-                            width="stretch",
-                            key=f"mcp_chart_{stock_result['symbol']}_{idx}"
-                        )
-                    
-                    # Data preview - different columns based on tool type
-                    with st.expander("📊 Data Preview"):
-                        if stock_result['data'] is not None:
-                            df_preview = stock_result['data']
-                            
-                            # Base columns (always present)
-                            base_cols = ['datetime', 'open', 'high', 'low', 'close', 'volume']
-                            
-                            # Add tool-specific columns if they exist
-                            if tool_type == 'candlestick' or tool_type == 'pattern':
-                                # Show basic OHLCV for candlestick patterns
-                                preview_cols = base_cols
-                            elif tool_type == 'rsi':
-                                # Show RSI data
-                                preview_cols = base_cols + (['rsi'] if 'rsi' in df_preview.columns else [])
-                            elif tool_type == 'macd':
-                                # Show MACD data
-                                macd_cols = [col for col in ['macd', 'macd_signal', 'macd_histogram'] if col in df_preview.columns]
-                                preview_cols = base_cols + macd_cols
-                            elif tool_type in ['moving_average', 'ma']:
-                                # Show MA data
-                                ma_cols = [col for col in ['sma_20', 'sma_50', 'sma_200'] if col in df_preview.columns]
-                                preview_cols = base_cols + ma_cols
-                            elif tool_type == 'volume':
-                                # Show volume data (already in base)
-                                preview_cols = base_cols
-                            elif tool_type == 'multi' or tool_type == 'complete':
-                                # Show all available indicators
-                                indicator_cols = [col for col in ['rsi', 'macd', 'bb_upper', 'bb_middle', 'bb_lower'] if col in df_preview.columns]
-                                preview_cols = base_cols + indicator_cols[:3]  # Limit to avoid too wide table
-                            else:
-                                # Bollinger Band data (default)
-                                bb_cols = [col for col in ['bb_upper', 'bb_middle', 'bb_lower', 'bb_width'] if col in df_preview.columns]
-                                preview_cols = base_cols + bb_cols
-                            
-                            # Display only columns that exist
-                            available_cols = [col for col in preview_cols if col in df_preview.columns]
-                            
-                            if available_cols:
-                                st.dataframe(
-                                    df_preview[available_cols].tail(10),
-                                    width="stretch"
-                                )
-                            else:
-                                st.warning("No data available for preview")
-                    
+                # Display Source Articles
+                st.markdown("### 📚 Source Articles")
+                articles = news_result.get('articles', [])
+            
+                if articles:
+                    # Show article count by source
+                    source_counts = {}
+                    for article in articles:
+                        source = article.get('source', 'Unknown')
+                        source_counts[source] = source_counts.get(source, 0) + 1
+                
+                    st.markdown("**Sources:**")
+                    cols = st.columns(min(len(source_counts), 5))
+                    for idx, (source, count) in enumerate(source_counts.items()):
+                        with cols[idx % len(cols)]:
+                            st.metric(source, count)
+                
                     st.markdown("---")
                 
-                # Action buttons
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    if st.button("🔄 New Scan", width="stretch"):
-                        # Clear results
-                        if hasattr(st.session_state, 'mcp_viz_results'):
-                            del st.session_state.mcp_viz_results
-                        if hasattr(st.session_state, 'mcp_scan_response'):
-                            del st.session_state.mcp_scan_response
-                        st.rerun()
-                
-                with col2:
-                    if st.button("🔙 Back to Chat", width="stretch"):
-                        st.session_state.view_selector = "💬 Chat"
-                        st.rerun()
-            else:
-                st.warning("No stocks found matching the criteria")
-                
-                if st.button("🔄 Try Again", width="stretch"):
-                    if hasattr(st.session_state, 'mcp_viz_results'):
-                        del st.session_state.mcp_viz_results
-                    st.rerun()
-        else:
-            # Instructions
-            st.markdown("---")
-            st.markdown("### 🎯 How to Use")
-            st.markdown("""
-            1. **Enter a query** - Ask the AI to scan for technical patterns
-            2. **Select timeframe** - Choose chart timeframe (1d, 1h, 15m, etc.)
-            3. **Set max stocks** - Limit number of results to visualize
-            4. **Click Scan Market** - AI will use TradingView MCP tools to find opportunities
-            5. **View results** - Interactive charts with Bollinger Bands overlay
+                    # Display articles
+                    for i, article in enumerate(articles, 1):
+                        with st.expander(f"📄 {i}. {article.get('title', 'Untitled')[:80]}..."):
+                            st.markdown(f"**Source:** {article.get('source', 'Unknown')}")
+                            st.markdown(f"**Snippet:** {article.get('snippet', 'No preview available')}")
+                            if article.get('url'):
+                                st.markdown(f"[🔗 Read full article]({article['url']})")
             
-            **Example Queries:**
-            
-            **Bollinger Band Analysis:**
-            - "Find Indian stocks showing a Bollinger Band squeeze"
-            - "Show stocks with breakout potential on NSE"
-            
-            **Candlestick Patterns:**
-            - "Scan for bullish candlestick patterns in Nifty 50"
-            - "Find stocks with hammer pattern on NSE"
-            - "Show candlestick patterns on TCS stock"
-            
-            **RSI Analysis:**
-            - "Find oversold stocks with RSI below 30"
-            - "Show overbought stocks on NSE"
-            - "Scan for RSI divergence on Indian stocks"
-            
-            **MACD Analysis:**
-            - "Find stocks with bullish MACD crossover"
-            - "Show MACD signals on NSE stocks"
-            - "Scan for MACD divergence"
-            
-            **Moving Averages:**
-            - "Find stocks above 200-day moving average"
-            - "Show golden cross stocks on NSE"
-            - "Scan for death cross patterns"
-            
-            **Volume Analysis:**
-            - "Find stocks with high volume breakout"
-            - "Show volume surge stocks on NSE"
-            - "Scan for volume anomalies"
-            
-            **Complete Analysis:**
-            - "Complete technical analysis for TCS"
-            - "Full indicator scan on NSE stocks"
-            - "Comprehensive analysis of Indian stocks"
-            """)
-            
-            st.markdown("---")
-            st.markdown("### 📚 About Bollinger Bands")
-            st.markdown("""
-            **Bollinger Bands** are a technical analysis tool that consists of:
-            - **Middle Band**: 20-period Simple Moving Average (SMA)
-            - **Upper Band**: Middle Band + (2 × Standard Deviation)
-            - **Lower Band**: Middle Band - (2 × Standard Deviation)
-            
-            **Bollinger Squeeze** occurs when:
-            - Band width is at its lowest level in recent history
-            - Indicates low volatility and potential for significant breakout
-            - Often precedes major price movements
-            
-            **How to Trade:**
-            1. Wait for squeeze to form (bands narrow)
-            2. Watch for breakout direction (above upper or below lower band)
-            3. Enter trade in breakout direction
-            4. Set stop loss on opposite band
-            """)
-        
-        with scanner_tab2:
-            # NEW: TradingView JSON Scanner - Returns exact TradingView API format
-            st.markdown("#### TradingView Drawing JSON Scanner")
-            st.success("✅ MCP Scanner Agent (TradingView Format)")
-            
-            # Import TradingView scanner integration
-            try:
-                from utils.mcp_scanner_integration_tradingview import (
-                    run_scanner_tradingview_sync,
-                    get_tradingview_drawing_endpoint
-                )
-                TRADINGVIEW_SCANNER_AVAILABLE = True
-            except ImportError:
-                TRADINGVIEW_SCANNER_AVAILABLE = False
-            
-            if not TRADINGVIEW_SCANNER_AVAILABLE:
-                st.error("❌ TradingView Scanner not available")
-                st.info("Install dependencies: `pip install -r requirements_mcp_scanner.txt`")
-            else:
-                # Scanner Configuration
-                st.markdown("##### 🔧 Scanner Configuration")
-                
-                col1, col2, col3 = st.columns([3, 1, 1])
-                
-                with col1:
-                    tv_scan_query = st.text_input(
-                        "Scanner Query",
-                        value="Find stocks with Bollinger Band squeeze",
-                        help="Describe the technical pattern you're looking for",
-                        key="tv_scan_query"
-                    )
-                
-                with col2:
-                    tv_timeframe = st.selectbox(
-                        "Timeframe",
-                        options=['1m', '5m', '15m', '1h', '4h', '1D', '1W'],
-                        index=5,
-                        key="tv_timeframe"
-                    )
-                
-                with col3:
-                    tv_max_stocks = st.number_input(
-                        "Max Stocks",
-                        min_value=1,
-                        max_value=10,
-                        value=3,
-                        key="tv_max_stocks"
-                    )
-                
-                # Stock Selection
-                st.markdown("##### 📈 Select Stocks to Scan")
-                
-                # Predefined lists
-                indian_stocks = ["TCS.NS", "RELIANCE.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
-                us_stocks = ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA", "AMZN", "META"]
-                
-                tab_indian, tab_us, tab_custom = st.tabs(["🇮🇳 Indian Stocks", "🇺🇸 US Stocks", "✏️ Custom"])
-                
-                with tab_indian:
-                    selected_indian = st.multiselect(
-                        "Select Indian Stocks",
-                        options=indian_stocks,
-                        default=indian_stocks[:3],
-                        key="tv_indian_stocks"
-                    )
-                
-                with tab_us:
-                    selected_us = st.multiselect(
-                        "Select US Stocks",
-                        options=us_stocks,
-                        default=[],
-                        key="tv_us_stocks"
-                    )
-                
-                with tab_custom:
-                    custom_symbols = st.text_area(
-                        "Enter custom symbols (one per line)",
-                        value="",
-                        height=100,
-                        key="tv_custom_symbols"
-                    )
-                    selected_custom = [s.strip() for s in custom_symbols.split('\n') if s.strip()]
-                
-                # Combine all selected symbols
-                all_tv_symbols = selected_indian + selected_us + selected_custom
-                
-                if not all_tv_symbols:
-                    st.warning("⚠️ Please select at least one stock to scan")
-                else:
-                    st.info(f"📊 Ready to scan {len(all_tv_symbols)} symbols: {', '.join(all_tv_symbols[:5])}{'...' if len(all_tv_symbols) > 5 else ''}")
-                    
-                    # Scan Button
-                    col_scan, col_api = st.columns([1, 1])
-                    
-                    with col_scan:
-                        tv_scan_button = st.button(
-                            "🔍 Scan with MCP Agent (TradingView Format)",
-                            type="primary",
-                            use_container_width=True,
-                            key="tv_scan_button"
-                        )
-                    
-                    with col_api:
-                        if st.button("🌐 View API Docs", use_container_width=True, key="tv_api_docs"):
-                            st.session_state.show_tv_api_docs = not st.session_state.get('show_tv_api_docs', False)
-                    
-                    # API Documentation
-                    if st.session_state.get('show_tv_api_docs', False):
-                        with st.expander("📚 API Documentation", expanded=True):
-                            st.markdown("""
-                            ### Available Endpoints
-                            
-                            ```bash
-                            # Get TradingView drawings for a symbol
-                            GET http://localhost:5000/api/drawings/tradingview?symbol=AAPL
-                            
-                            # Get all latest drawings
-                            GET http://localhost:5000/api/drawings/tradingview/latest
-                            
-                            # Trigger a new scan
-                            POST http://localhost:5000/api/scan/tradingview
-                            Body: {"query": "...", "symbols": [...], "timeframe": "1D"}
-                            
-                            # Health check
-                            GET http://localhost:5000/api/health
-                            
-                            # Get drawing types
-                            GET http://localhost:5000/api/drawing-types/tradingview
-                            
-                            # Get example JSON
-                            GET http://localhost:5000/api/example/tradingview
-                            ```
-                            
-                            ### Start API Server
-                            ```bash
-                            python api_drawings_endpoint_tradingview.py
-                            ```
-                            
-                            ### TradingView Drawing Format
-                            The scanner returns exact TradingView API format:
-                            ```json
-                            {
-                              "id": "6VgiHl",
-                              "type": "LineToolRiskRewardLong",
-                              "state": {...},
-                              "points": [...],
-                              "zorder": -5000,
-                              "linkKey": "6KXuHgdFCwnO",
-                              "version": 2,
-                              "ownerSource": "_seriesId",
-                              "userEditEnabled": false,
-                              "isSelectionEnabled": true
-                            }
-                            ```
-                            """)
-                    
-                    # Run Scanner
-                    if tv_scan_button:
-                        with st.spinner("🤖 MCP Agent analyzing technical patterns (TradingView format)..."):
-                            try:
-                                # Run scanner
-                                result = run_scanner_tradingview_sync(
-                                    query=tv_scan_query,
-                                    symbols=all_tv_symbols,
-                                    timeframe=tv_timeframe,
-                                    max_results=tv_max_stocks
-                                )
-                                
-                                if result.get("success"):
-                                    # Success metrics
-                                    col_metric1, col_metric2, col_metric3 = st.columns(3)
-                                    
-                                    with col_metric1:
-                                        st.metric(
-                                            "Symbols Scanned",
-                                            result.get("total_scanned", 0)
-                                        )
-                                    
-                                    with col_metric2:
-                                        st.metric(
-                                            "Setups Found",
-                                            result.get("total_results", 0)
-                                        )
-                                    
-                                    with col_metric3:
-                                        success_rate = (result.get("total_results", 0) / result.get("total_scanned", 1)) * 100
-                                        st.metric(
-                                            "Success Rate",
-                                            f"{success_rate:.0f}%"
-                                        )
-                                    
-                                    st.success(f"✅ Scan complete! Found {result['total_results']} technical setups")
-                                    
-                                    # Display Results
-                                    st.markdown("#### 📊 Scan Results (TradingView Format)")
-                                    
-                                    for idx, scan_result in enumerate(result["results"], 1):
-                                        if scan_result.get("success"):
-                                            symbol = scan_result["symbol"]
-                                            drawings = scan_result.get("drawings", [])
-                                            metadata = scan_result.get("metadata", {})
-                                            num_drawings = len(drawings)
-                                            
-                                            with st.expander(
-                                                f"📈 {idx}. {symbol} - {num_drawings} TradingView drawings",
-                                                expanded=(idx == 1)
-                                            ):
-                                                # Tabs for different views
-                                                tab_viz, tab_json, tab_api, tab_download = st.tabs([
-                                                    "📊 Visualization",
-                                                    "📄 JSON",
-                                                    "🌐 API",
-                                                    "📥 Download"
-                                                ])
-                                                
-                                                with tab_viz:
-                                                    st.markdown("##### Drawing Instructions")
-                                                    
-                                                    for drawing in drawings:
-                                                        draw_type = drawing.type if hasattr(drawing, 'type') else drawing.get("type", "unknown")
-                                                        draw_id = drawing.id if hasattr(drawing, 'id') else drawing.get("id", "")
-                                                        num_points = len(drawing.points if hasattr(drawing, 'points') else drawing.get("points", []))
-                                                        
-                                                        st.markdown(f"- **{draw_type}** (ID: `{draw_id}`, {num_points} points)")
-                                                    
-                                                    st.markdown("##### Metadata")
-                                                    st.json(metadata)
-                                                
-                                                with tab_json:
-                                                    # Convert drawings to dict if needed
-                                                    drawings_dict = []
-                                                    for d in drawings:
-                                                        if hasattr(d, 'model_dump'):
-                                                            drawings_dict.append(d.model_dump())
-                                                        elif isinstance(d, dict):
-                                                            drawings_dict.append(d)
-                                                        else:
-                                                            drawings_dict.append(str(d))
-                                                    
-                                                    st.json(drawings_dict)
-                                                
-                                                with tab_api:
-                                                    st.markdown("##### API Endpoint")
-                                                    st.code(
-                                                        f"GET http://localhost:5000/api/drawings/tradingview?symbol={symbol}",
-                                                        language="bash"
-                                                    )
-                                                    
-                                                    st.markdown("##### cURL Command")
-                                                    st.code(
-                                                        f"curl http://localhost:5000/api/drawings/tradingview?symbol={symbol}",
-                                                        language="bash"
-                                                    )
-                                                    
-                                                    st.markdown("##### Next.js Integration")
-                                                    st.code(f"""
-const response = await fetch('http://localhost:5000/api/drawings/tradingview?symbol={symbol}');
-const drawings = await response.json();
-
-// Apply drawings to TradingView chart
-drawings.forEach(drawing => {{
-  chart.createShape(drawing.points, {{
-    shape: drawing.type,
-    overrides: drawing.state
-  }});
-}});
-                                                    """, language="typescript")
-                                                
-                                                with tab_download:
-                                                    # Download JSON
-                                                    drawings_dict = []
-                                                    for d in drawings:
-                                                        if hasattr(d, 'model_dump'):
-                                                            drawings_dict.append(d.model_dump())
-                                                        elif isinstance(d, dict):
-                                                            drawings_dict.append(d)
-                                                    
-                                                    json_str = json.dumps(drawings_dict, indent=2)
-                                                    st.download_button(
-                                                        label="📥 Download TradingView JSON",
-                                                        data=json_str,
-                                                        file_name=f"{symbol}_tradingview_drawings_{tv_timeframe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                                                        mime="application/json",
-                                                        key=f"download_tv_{symbol}_{idx}"
-                                                    )
-                                                    
-                                                    st.markdown("##### File Info")
-                                                    st.markdown(f"- **Symbol**: {symbol}")
-                                                    st.markdown(f"- **Timeframe**: {tv_timeframe}")
-                                                    st.markdown(f"- **Drawings**: {num_drawings}")
-                                                    st.markdown(f"- **Size**: {len(json_str)} bytes")
-                                                    st.markdown(f"- **Format**: TradingView API")
-                                        
-                                        else:
-                                            # Failed scan
-                                            symbol = scan_result.get("symbol", "Unknown")
-                                            error = scan_result.get("error", "Unknown error")
-                                            
-                                            with st.expander(f"❌ {idx}. {symbol} - Failed"):
-                                                st.error(f"Error: {error}")
-                                
-                                else:
-                                    st.error(f"❌ Scanner failed: {result.get('error', 'Unknown error')}")
-                            
-                            except Exception as e:
-                                st.error(f"❌ Error running TradingView scanner: {str(e)}")
-                                st.exception(e)
-                
-                # Footer
+                # Refresh button for news analysis
                 st.markdown("---")
-                st.markdown("""
-                <div style="text-align: center; color: #666; font-size: 0.9rem;">
-                    <p>🤖 Powered by MCP Scanner Agent | 📊 TradingView Drawing Instructions</p>
-                    <p>Returns exact TradingView API format for Next.js integration</p>
-                    <p>Start API server: <code>python api_drawings_endpoint_tradingview.py</code></p>
+                if st.button("🔄 Refresh News Analysis", key="refresh_news"):
+                    if 'news_analysis' in st.session_state:
+                        del st.session_state.news_analysis
+                    if 'news_analysis_stock' in st.session_state:
+                        del st.session_state.news_analysis_stock
+                    st.rerun()
+        
+            elif news_result and news_result.get('error'):
+                st.warning(f"⚠️ {news_result['error']}")
+        
+            # ===== Update Database with Sentiment Data =====
+            # After both sentiment analyses are complete, update the database
+            if sentiment_data and news_result and not news_result.get('error'):
+                try:
+                    from database_utility.database import StockDatabase
+                
+                    # ===== BUILD COMPLETE MARKET SENTIMENT TEXT =====
+                    market_senti_text = f"""📈 Current Market Sentiment Analysis for {stock_name}
+
+    🎯 Overall Market Sentiment
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Overall Score: {sentiment_data['overall_score']}/100
+    Sentiment: {sentiment_data['overall_label']}
+    Based on: News, Yahoo Finance, Twitter/X
+
+    📊 Sentiment Breakdown
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    📰 News Sentiment: {sentiment_data['news_sentiment']['sentiment_score']}/100 ({sentiment_data['news_sentiment']['sentiment_label']})
+    📊 Yahoo Finance: {sentiment_data['yahoo_sentiment']['sentiment_score']}/100 ({sentiment_data['yahoo_sentiment']['analyst_rating']})
+    """
+                
+                    # Add Twitter sentiment if available
+                    if 'twitter_sentiment' in sentiment_data:
+                        twitter_data = sentiment_data['twitter_sentiment']
+                        market_senti_text += f"🐦 Twitter/X: {twitter_data['sentiment_score']}/100 ({twitter_data['sentiment_label']})\n"
+                        market_senti_text += f"   - Positive: {twitter_data.get('positive_percentage', 0)}%\n"
+                        market_senti_text += f"   - Negative: {twitter_data.get('negative_percentage', 0)}%\n"
+                        market_senti_text += f"   - Neutral: {twitter_data.get('neutral_percentage', 0)}%\n"
+                        if twitter_data.get('tweet_count'):
+                            market_senti_text += f"   - Based on {twitter_data['tweet_count']} tweets\n"
+                
+                    market_senti_text += "\n📈 Positive Factors\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                
+                    positive_points = sentiment_data['news_sentiment'].get('positive_points', [])
+                    if positive_points and positive_points != ['Insufficient data']:
+                        for point in positive_points:
+                            market_senti_text += f"✅ {point}\n"
+                    else:
+                        market_senti_text += "No significant positive factors identified\n"
+                
+                    market_senti_text += "\n📉 Negative Factors\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                
+                    negative_points = sentiment_data['news_sentiment'].get('negative_points', [])
+                    if negative_points and negative_points != ['Insufficient data']:
+                        for point in negative_points:
+                            market_senti_text += f"⚠️ {point}\n"
+                    else:
+                        market_senti_text += "No significant negative factors identified\n"
+                
+                    market_senti_text += "\n💭 Market Mood & Analysis\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    market_senti_text += sentiment_data['final_analysis']
+                
+                    # Determine market sentiment status
+                    market_senti_status = sentiment_data['overall_label'].lower()
+                
+                    # ===== BUILD COMPLETE FUTURE SENTIMENT TEXT =====
+                    future_senti_text = f"""🔮 Future Outlook & News Analysis for {stock_name}
+
+    {news_result.get('analysis', 'No analysis available')}
+    """
+                
+                    # Add Tavily summary if available
+                    if news_result.get('tavily_summary'):
+                        future_senti_text += f"\n\n🌐 Web Search Summary\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        future_senti_text += news_result['tavily_summary']
+                
+                    # Add source articles
+                    articles = news_result.get('articles', [])
+                    if articles:
+                        future_senti_text += f"\n\n📚 Source Articles ({len(articles)} articles)\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    
+                        # Group by source
+                        source_counts = {}
+                        for article in articles:
+                            source = article.get('source', 'Unknown')
+                            source_counts[source] = source_counts.get(source, 0) + 1
+                    
+                        future_senti_text += "Sources:\n"
+                        for source, count in source_counts.items():
+                            future_senti_text += f"  • {source}: {count} articles\n"
+                    
+                        future_senti_text += "\nTop Articles:\n"
+                        for i, article in enumerate(articles[:5], 1):
+                            future_senti_text += f"\n{i}. {article.get('title', 'Untitled')}\n"
+                            future_senti_text += f"   Source: {article.get('source', 'Unknown')}\n"
+                            future_senti_text += f"   {article.get('snippet', 'No preview available')}\n"
+                
+                    # Determine future sentiment status from analysis text
+                    future_senti_status = "neutral"
+                    if future_senti_text:
+                        text_lower = future_senti_text.lower()
+                        positive_keywords = ['positive', 'bullish', 'growth', 'strong', 'optimistic', 'upside', 'buy', 'outperform']
+                        negative_keywords = ['negative', 'bearish', 'decline', 'weak', 'pessimistic', 'downside', 'sell', 'underperform']
+                    
+                        positive_count = sum(1 for keyword in positive_keywords if keyword in text_lower)
+                        negative_count = sum(1 for keyword in negative_keywords if keyword in text_lower)
+                    
+                        if positive_count > negative_count:
+                            future_senti_status = "positive"
+                        elif negative_count > positive_count:
+                            future_senti_status = "negative"
+                
+                    # Update database
+                    db = StockDatabase()
+                    if db.connect():
+                        # Get the latest analysis for this stock
+                        latest = db.get_latest_analysis(stock_symbol)
+                    
+                        if latest:
+                            # Update the existing record with sentiment data
+                            update_query = """
+                            UPDATE stock_analysis
+                            SET market_senti = %s,
+                                current_market_senti_status = %s,
+                                future_senti = %s,
+                                future_senti_status = %s
+                            WHERE id = %s
+                            """
+                            db.cursor.execute(update_query, (
+                                market_senti_text,
+                                market_senti_status,
+                                future_senti_text,
+                                future_senti_status,
+                                latest['id']
+                            ))
+                            db.conn.commit()
+                            print(f"✅ Complete sentiment data updated in database for {stock_name}")
+                            print(f"   - Market sentiment: {len(market_senti_text)} characters")
+                            print(f"   - Future sentiment: {len(future_senti_text)} characters")
+                    
+                        db.disconnect()
+                except Exception as db_error:
+                    print(f"⚠️ Database sentiment update error: {db_error}")
+                    import traceback
+                    traceback.print_exc()
+                    # Continue even if database update fails
+    
+            # ═══════════════════════════════════════════════════════
+            # FII/DII INSTITUTIONAL SENTIMENT SECTION
+            # ═══════════════════════════════════════════════════════
+            st.divider()
+            st.subheader("🏦 FII & DII Institutional Sentiment")
+            st.caption("Track Foreign & Domestic Institutional buying/selling activity")
+
+            fii_symbol = stock_symbol
+            st.info(f"Analyzing institutional sentiment for: **{fii_symbol}**")
+
+            # Cache key for this stock's FII/DII data
+            fii_cache_key = f"fii_dii_{fii_symbol}"
+
+            # Auto-run on first load, or re-run on button click
+            run_fii = st.button("Fetch FII/DII Data", key="run_fii_dii", type="primary")
+            auto_run = fii_cache_key not in st.session_state
+
+            if run_fii or auto_run:
+                cached_fii_val = None
+                cached_dii_val = None
+                if data.market_data:
+                    cached_fii_val = data.market_data.fii_holding
+                    cached_dii_val = data.market_data.dii_holding
+                    # Normalize decimal to percentage
+                    if cached_fii_val is not None and cached_fii_val < 1:
+                        cached_fii_val = cached_fii_val * 100
+                    if cached_dii_val is not None and cached_dii_val < 1:
+                        cached_dii_val = cached_dii_val * 100
+
+                with st.spinner("Fetching FII/DII shareholding pattern..."):
+                    try:
+                        from utils.fii_dii_analyzer import get_fii_dii_sentiment as compute_fii_dii
+                        fii_result = compute_fii_dii(
+                            symbol=fii_symbol,
+                            company_name=stock_name,
+                            cached_fii=float(cached_fii_val) if cached_fii_val is not None else None,
+                            cached_dii=float(cached_dii_val) if cached_dii_val is not None else None,
+                        )
+                        st.session_state[fii_cache_key] = fii_result
+                    except Exception as e:
+                        st.error(f"FII/DII analysis failed: {e}")
+
+            # Display cached result
+            fii_result = st.session_state.get(fii_cache_key)
+
+            if fii_result:
+                # Recommendation banner
+                rec_colors = {
+                    "green":   ("#e8f5e9", "#2e7d32"),
+                    "#4caf50": ("#f1f8e9", "#33691e"),
+                    "gray":    ("#f5f5f5", "#424242"),
+                    "orange":  ("#fff3e0", "#e65100"),
+                    "red":     ("#ffebee", "#c62828"),
+                }
+                bg, fg = rec_colors.get(fii_result.recommendation_color, ("#f5f5f5", "#424242"))
+                st.markdown(
+                    f"<div style='background:{bg}; border-left:5px solid {fg}; "
+                    f"padding:14px 18px; border-radius:6px; margin:12px 0;'>"
+                    f"<div style='font-size:1.2em; font-weight:700; color:{fg};'>"
+                    f"{fii_result.recommendation}</div>"
+                    f"<div style='color:{fg}; margin-top:4px;'>"
+                    f"Institutional Score: {fii_result.institutional_sentiment_score:.1f}/100 "
+                    f"- {fii_result.sentiment_label}</div></div>",
+                    unsafe_allow_html=True
+                )
+
+                # Metric cards
+                m1, m2, m3, m4 = st.columns(4)
+                with m1:
+                    fii_delta = f"{fii_result.fii_change_1q:+.2f}pp" if fii_result.fii_change_1q is not None else None
+                    st.metric("FII Holding", f"{fii_result.current_fii_pct:.2f}%", delta=fii_delta, delta_color="normal")
+                with m2:
+                    dii_delta = f"{fii_result.dii_change_1q:+.2f}pp" if fii_result.dii_change_1q is not None else None
+                    st.metric("DII Holding", f"{fii_result.current_dii_pct:.2f}%", delta=dii_delta, delta_color="normal")
+                with m3:
+                    st.metric("Total Institutional", f"{fii_result.current_total_institutional:.2f}%")
+                with m4:
+                    st.metric("Inst. Score", f"{fii_result.institutional_sentiment_score:.1f}/100")
+
+                # Trend labels
+                t1, t2 = st.columns(2)
+                def _trend_badge(trend):
+                    colors = {
+                        "Strongly Increasing": ("++", "green"), "Increasing": ("+", "#4caf50"),
+                        "Stable": ("=", "gray"), "Decreasing": ("-", "orange"),
+                        "Strongly Decreasing": ("--", "red"),
+                    }
+                    arrow, color = colors.get(trend, ("=", "gray"))
+                    return f"<span style='color:{color}; font-weight:600;'>{arrow} {trend}</span>"
+
+                with t1:
+                    st.markdown(f"**FII Trend:** {_trend_badge(fii_result.fii_trend)}", unsafe_allow_html=True)
+                    if fii_result.fii_change_4q is not None:
+                        st.caption(f"4-quarter FII change: {fii_result.fii_change_4q:+.2f}pp")
+                with t2:
+                    st.markdown(f"**DII Trend:** {_trend_badge(fii_result.dii_trend)}", unsafe_allow_html=True)
+                    if fii_result.dii_change_4q is not None:
+                        st.caption(f"4-quarter DII change: {fii_result.dii_change_4q:+.2f}pp")
+
+                # Quarterly trend chart
+                if len(fii_result.quarterly_history) >= 2:
+                    st.subheader("Quarterly Shareholding Trend")
+                    quarters = [h.quarter for h in fii_result.quarterly_history]
+                    fii_vals = [h.fii_pct for h in fii_result.quarterly_history]
+                    dii_vals = [h.dii_pct for h in fii_result.quarterly_history]
+                    total_vals = [round(f + d, 2) for f, d in zip(fii_vals, dii_vals)]
+
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=quarters, y=fii_vals, mode="lines+markers", name="FII %",
+                        line=dict(color="#1976d2", width=2.5), marker=dict(size=7),
+                        hovertemplate="Quarter: %{x}<br>FII: %{y:.2f}%<extra></extra>"))
+                    fig.add_trace(go.Scatter(x=quarters, y=dii_vals, mode="lines+markers", name="DII %",
+                        line=dict(color="#388e3c", width=2.5), marker=dict(size=7),
+                        hovertemplate="Quarter: %{x}<br>DII: %{y:.2f}%<extra></extra>"))
+                    fig.add_trace(go.Scatter(x=quarters, y=total_vals, mode="lines", name="Total Inst. %",
+                        line=dict(color="#f57c00", width=2, dash="dot"),
+                        hovertemplate="Quarter: %{x}<br>Total: %{y:.2f}%<extra></extra>"))
+                    fig.update_layout(
+                        xaxis_title="Quarter", yaxis_title="Holding (%)",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        height=320, margin=dict(t=20, b=20, l=10, r=10),
+                        hovermode="x unified", plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                    )
+                    fig.update_yaxes(gridcolor="rgba(128,128,128,0.15)")
+                    st.plotly_chart(fig, use_container_width=True)
+
+                # Analysis reasoning
+                st.subheader("Analysis")
+                for reason in fii_result.reasoning:
+                    st.info(f"  {reason}")
+
+                # Explainer
+                with st.expander("What is FII & DII? How to read this?"):
+                    st.markdown("""
+**FII - Foreign Institutional Investors**: Foreign funds, hedge funds, FPIs investing from abroad.
+Rising FII % means foreign money flowing INTO this stock.
+
+**DII - Domestic Institutional Investors**: Indian mutual funds, insurance companies (LIC), pension funds.
+Rising DII % means domestic institutions are accumulating.
+
+| Situation | What It Means |
+|-----------|--------------|
+| FII + DII both up | Strong bullish signal |
+| FII up + DII down | Moderate bullish (foreign buying) |
+| FII down + DII up | Could be contrarian opportunity |
+| FII + DII both down | Bearish signal, avoid |
+
+*FII/DII data updates quarterly. Source: screener.in shareholding pattern.*
+                    """)
+
+                st.caption(
+                    f"Data source: {fii_result.data_source.replace('_', '.')} | "
+                    f"Freshness: {fii_result.data_freshness} | "
+                    f"Analyzed: {fii_result.timestamp.strftime('%d %b %Y %H:%M UTC')}"
+                )
+
+        else:
+            st.info("Analyze a stock to see analytics")
+
+    with fund_tab3:
+        # Trade Ideas from TradingView — exact TradingView UI replica
+
+        # Inject CSS that matches TradingView's actual card design
+        st.markdown("""
+        <style>
+            /* ── TradingView Ideas Grid ── */
+            .tv-grid {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 20px;
+                margin: 16px 0;
+                align-items: start;
+            }
+            @media (max-width: 900px) {
+                .tv-grid { grid-template-columns: repeat(2, 1fr); }
+            }
+            @media (max-width: 600px) {
+                .tv-grid { grid-template-columns: 1fr; }
+            }
+
+            /* ── Card ── */
+            .tv-card {
+                background: #ffffff;
+                border-radius: 8px;
+                overflow: hidden;
+                border: 1px solid #e0e3eb;
+                transition: box-shadow 0.2s ease;
+                cursor: pointer;
+                display: flex;
+                flex-direction: column;
+            }
+            .tv-card:hover {
+                box-shadow: 0 2px 12px rgba(0, 0, 0, 0.12);
+            }
+
+            /* ── Chart Image — show full image, no crop ── */
+            .tv-card-img-wrap {
+                width: 100%;
+                background: #ffffff;
+                border-bottom: 1px solid #f0f3fa;
+            }
+            .tv-card-img {
+                width: 100%;
+                height: auto;
+                display: block;
+            }
+
+            /* ── Card Body ── */
+            .tv-card-body {
+                padding: 12px 16px;
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+
+            /* ── Title ── */
+            .tv-card-title {
+                font-size: 15px;
+                font-weight: 700;
+                color: #131722;
+                line-height: 1.35;
+                margin: 0 0 6px 0;
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+                min-height: 40px;
+            }
+
+            /* ── Description ── */
+            .tv-card-desc {
+                font-size: 13px;
+                color: #787b86;
+                line-height: 1.45;
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+                margin: 0;
+                flex: 1;
+            }
+
+            /* ── Footer (author + engagement) ── */
+            .tv-card-footer {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 10px 16px;
+                border-top: 1px solid #f0f3fa;
+                font-size: 12px;
+                color: #787b86;
+                margin-top: auto;
+            }
+            .tv-card-author {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                color: #787b86;
+            }
+            .tv-card-author-name {
+                font-weight: 500;
+                color: #131722;
+            }
+            .tv-card-date {
+                color: #9598a1;
+            }
+            .tv-card-engagement {
+                display: flex;
+                align-items: center;
+                gap: 14px;
+            }
+            .tv-card-stat {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+                color: #787b86;
+            }
+            .tv-card-stat svg {
+                width: 16px;
+                height: 16px;
+                fill: #787b86;
+            }
+        </style>
+        """, unsafe_allow_html=True)
+
+        if st.session_state.company_data:
+            data = st.session_state.company_data
+            stock_symbol = data.symbol
+            clean_symbol = stock_symbol.split('.')[0].upper()
+            exchange = "NSE" if ".NS" in stock_symbol else "BSE"
+            tradingview_url = f"https://www.tradingview.com/symbols/{exchange}-{clean_symbol}/ideas/"
+
+            st.subheader(f"📊 Trade Ideas for {data.name}")
+            st.caption(f"Top trading ideas for {clean_symbol}")
+
+            # Check if trade ideas are cached in session
+            cache_key = f"trade_ideas_{clean_symbol}"
+            if cache_key not in st.session_state or st.session_state.get('trade_ideas_stock') != stock_symbol:
+                with st.spinner("🔍 Fetching trade ideas from TradingView..."):
+                    try:
+                        from utils.tradingview_ideas_scraper import scrape_trade_ideas
+                        ideas_result = scrape_trade_ideas(clean_symbol, exchange, 9)
+
+                        st.session_state[cache_key] = ideas_result
+                        st.session_state.trade_ideas_stock = stock_symbol
+                    except Exception as e:
+                        st.error(f"❌ Error fetching trade ideas: {e}")
+                        ideas_result = None
+            else:
+                ideas_result = st.session_state[cache_key]
+
+            if ideas_result and ideas_result.get('ideas'):
+                ideas = ideas_result['ideas']
+                # st.success(f"Found {len(ideas)} trade ideas from TradingView")
+
+                # SVG icons matching TradingView's UI
+                comment_svg = '<svg viewBox="0 0 18 18"><path d="M9 1C4.58 1 1 4.03 1 7.79c0 2.12 1.06 4.02 2.72 5.3L3 16l3.72-1.6C7.78 14.78 8.87 15 9 15c4.42 0 8-3.03 8-6.79S13.42 1 9 1z" fill="none" stroke="#787b86" stroke-width="1.2"/></svg>'
+                boost_svg = '<svg viewBox="0 0 18 18"><path d="M9 2l2.09 4.26L16 6.97l-3.5 3.42.83 4.84L9 13.07l-4.33 2.16.83-4.84L2 6.97l4.91-.71L9 2z" fill="none" stroke="#787b86" stroke-width="1.2"/></svg>'
+
+                # Build all cards as one HTML grid block
+                cards_html = '<div class="tv-grid">'
+
+                for idea in ideas:
+                    title = idea.get('title', 'Untitled')[:90]
+                    author = idea.get('author', 'Anonymous')
+                    likes = idea.get('likes', '0')
+                    time_posted = idea.get('time_posted', '')
+                    description = idea.get('description', '')[:200]
+                    image_url = idea.get('image_url', '')
+                    idea_url = idea.get('idea_url', '#')
+
+                    # Format time to match TradingView (e.g., "Mar 10" or "Nov 29, 2025")
+                    display_date = ''
+                    if time_posted:
+                        if 'T' in time_posted:
+                            try:
+                                from datetime import datetime as _dt
+                                dt = _dt.fromisoformat(time_posted.replace('Z', '+00:00'))
+                                display_date = dt.strftime('%b %d')
+                            except Exception:
+                                display_date = time_posted
+                        else:
+                            display_date = time_posted
+
+                    # Chart image or placeholder
+                    has_image = image_url and 's3.tradingview.com' in image_url
+                    if has_image:
+                        img_block = f'<img class="tv-card-img" src="{image_url}" alt="{title}" loading="lazy" onerror="this.parentElement.innerHTML=\'<div style=padding:40px;text-align:center;color:#9598a1>Chart unavailable</div>\'">'
+                    else:
+                        img_block = '<div style="width:100%;aspect-ratio:16/10;background:#f0f3fa;display:flex;align-items:center;justify-content:center;color:#9598a1;font-size:14px;">Chart unavailable</div>'
+
+                    # Escape HTML in user content
+                    import html as _html_mod
+                    safe_title = _html_mod.escape(title)
+                    safe_desc = _html_mod.escape(description)
+                    safe_author = _html_mod.escape(author)
+
+                    cards_html += f'''
+                    <a href="{idea_url}" target="_blank" style="text-decoration:none;color:inherit;">
+                        <div class="tv-card">
+                            <div class="tv-card-img-wrap">
+                                {img_block}
+                            </div>
+                            <div class="tv-card-body">
+                                <div class="tv-card-title">{safe_title}</div>
+                                <div class="tv-card-desc">{safe_desc}</div>
+                            </div>
+                            <div class="tv-card-footer">
+                                <div class="tv-card-author">
+                                    <span>by</span>
+                                    <span class="tv-card-author-name">{safe_author}</span>
+                                    <span class="tv-card-date">{display_date}</span>
+                                </div>
+                                <div class="tv-card-engagement">
+                                    <span class="tv-card-stat">{comment_svg}</span>
+                                    <span class="tv-card-stat">{boost_svg} {likes}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </a>'''
+
+                cards_html += '</div>'
+                st.markdown(cards_html, unsafe_allow_html=True)
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # Footer: View all + Refresh
+                foot_col1, foot_col2 = st.columns(2)
+                with foot_col1:
+                    st.link_button(
+                        f"📊 View all ideas for {clean_symbol} on TradingView",
+                        tradingview_url,
+                        use_container_width=True
+                    )
+                with foot_col2:
+                    if st.button("🔄 Refresh Trade Ideas", key="refresh_trade_ideas", use_container_width=True):
+                        if cache_key in st.session_state:
+                            del st.session_state[cache_key]
+                        if 'trade_ideas_stock' in st.session_state:
+                            del st.session_state.trade_ideas_stock
+                        try:
+                            from utils.tradingview_ideas_scraper import clear_cache
+                            clear_cache(clean_symbol, exchange)
+                        except Exception:
+                            pass
+                        st.rerun()
+
+            elif ideas_result and ideas_result.get('error'):
+                st.warning(f"⚠️ Unable to fetch trade ideas: {ideas_result['error']}")
+                st.link_button(
+                    f"📊 View ideas on TradingView directly",
+                    tradingview_url,
+                    use_container_width=True
+                )
+            else:
+                st.info("No trade ideas found for this stock on TradingView.")
+                st.link_button(
+                    f"📊 Check TradingView for {clean_symbol}",
+                    tradingview_url,
+                    use_container_width=True
+                )
+        else:
+            st.info("📊 Analyze a stock to see trade ideas from TradingView")
+
+    with fund_tab4:
+        # FinRobot Agent — separate chat for the three-agent deep analysis pipeline
+        st.markdown("### FinRobot Deep Analysis Agent")
+        st.caption("Three-agent pipeline: Fundamental Agent + Sentiment Agent + Reasoning Agent")
+
+        # Initialize FinRobot chat state
+        if 'finrobot_messages' not in st.session_state:
+            st.session_state.finrobot_messages = []
+
+        # Check if a stock is loaded
+        _fr_company_data = st.session_state.get('deps')
+        _fr_company_data = getattr(_fr_company_data, 'company_data', None) if _fr_company_data else None
+        _fr_stock_name = getattr(_fr_company_data, 'name', None) if _fr_company_data else None
+        _fr_stock_symbol = getattr(_fr_company_data, 'symbol', None) if _fr_company_data else None
+
+        if _fr_stock_name:
+            st.markdown(f"**Currently loaded:** {_fr_stock_name} (`{_fr_stock_symbol}`)")
+        else:
+            st.info("Analyze a stock first in the **Chat** tab, then come back here to run FinRobot deep analysis.")
+
+        # Display existing FinRobot report summary if available
+        _fr_report = st.session_state.get(f"finrobot_report_{_fr_stock_symbol}")
+        if not _fr_report and _fr_company_data:
+            _fr_report = getattr(_fr_company_data, 'finrobot_report', None)
+            if _fr_report:
+                st.session_state[f"finrobot_report_{_fr_stock_symbol}"] = _fr_report
+
+        if _fr_report and _fr_report.reasoning:
+            _r = _fr_report.reasoning
+            _rec_color = {"Strong Buy": "#10b981", "Buy": "#34d399", "Hold": "#fbbf24",
+                          "Sell": "#f87171", "Strong Sell": "#ef4444"}.get(_r.recommendation, "#94a3b8")
+            st.markdown(f"""
+            <div style="display:flex; align-items:center; gap:1rem; margin-bottom:1rem;">
+                <div style="display:inline-block; background:{_rec_color}22; border:2px solid {_rec_color};
+                            border-radius:0.5rem; padding:0.4rem 1rem; font-size:1.1rem;
+                            font-weight:700; color:{_rec_color};">
+                    {_r.recommendation}
                 </div>
-                """, unsafe_allow_html=True)
+                <span style="color:#666;">Confidence: <b>{_r.confidence}</b> &nbsp;|&nbsp;
+                Score: <b>{_r.final_score:.1f}/100</b> &nbsp;|&nbsp;
+                Horizon: <b>{_r.time_horizon}</b></span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Show scores
+            if _fr_report.fundamental:
+                _f = _fr_report.fundamental
+                _sc1, _sc2, _sc3, _sc4 = st.columns(4)
+                _sc1.metric("Overall", f"{_f.overall_fundamental_score:.1f}")
+                _sc2.metric("Valuation", f"{_f.valuation_score:.1f}")
+                _sc3.metric("Health", f"{_f.financial_health_score:.1f}")
+                _sc4.metric("Growth", f"{_f.growth_score:.1f}")
+
+            st.markdown("---")
+
+        # Chat messages display
+        for msg in st.session_state.finrobot_messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        # Chat input
+        fr_user_input = st.chat_input("Ask FinRobot to analyze (e.g. 'Run deep analysis', 'What's the recommendation?')", key="finrobot_chat_input")
+
+        if fr_user_input:
+            # Add user message
+            st.session_state.finrobot_messages.append({"role": "user", "content": fr_user_input})
+            with st.chat_message("user"):
+                st.markdown(fr_user_input)
+
+            # Process with FinRobot
+            with st.chat_message("assistant"):
+                with st.spinner("FinRobot pipeline running..."):
+                    try:
+                        import asyncio
+                        from finrobot.chat_agent import run_finrobot_chat
+
+                        # Pass existing sentiment data from session as fallback
+                        _fr_session_sentiment = st.session_state.get('sentiment_data', {})
+                        # Pass full history excluding the just-appended user message
+                        _fr_history = st.session_state.finrobot_messages[:-1]
+
+                        result = asyncio.run(run_finrobot_chat(
+                            fr_user_input,
+                            _fr_company_data,
+                            session_sentiment=_fr_session_sentiment,
+                            message_history=_fr_history,
+                        ))
+                        fr_response = result["response"]
+                        fr_report = result.get("report")
+
+                        # Cache report
+                        if fr_report and _fr_stock_symbol:
+                            st.session_state[f"finrobot_report_{_fr_stock_symbol}"] = fr_report
+                            if _fr_company_data:
+                                _fr_company_data.finrobot_report = fr_report
+
+                    except Exception as e:
+                        fr_response = f"FinRobot pipeline error: {e}"
+
+                    st.markdown(fr_response)
+
+            st.session_state.finrobot_messages.append({"role": "assistant", "content": fr_response})
+            st.rerun()
+
+    with fund_tab5:
+        # ── OPTION CHAIN TAB ──
+        st.header("📊 NSE Option Chain — OI Analysis")
+        st.caption("Live Open Interest data from NSE India · Supports stocks & indices (F&O eligible only)")
+
+        # ── INPUT SECTION ──
+        oc_col1, oc_col2 = st.columns([3, 1.5])
+
+        with oc_col1:
+            # Auto-fill: quick-select button > currently loaded stock > empty
+            _oc_default_sym = st.session_state.pop("oc_quick_symbol", "")
+            if not _oc_default_sym:
+                _oc_deps = st.session_state.get("deps")
+                _oc_company = getattr(_oc_deps, 'company_data', None) if _oc_deps else None
+                if _oc_company and getattr(_oc_company, 'symbol', None):
+                    _oc_default_sym = _clean_symbol_for_nse(_oc_company.symbol)
+
+            oc_symbol = st.text_input(
+                "Symbol",
+                value=_oc_default_sym,
+                placeholder="NIFTY, BANKNIFTY, RELIANCE, TCS...",
+                key="oc_symbol_input",
+                help="Enter NSE symbol. Indices: NIFTY, BANKNIFTY, FINNIFTY. Stocks: RELIANCE, TCS, etc."
+            )
+
+        with oc_col2:
+            oc_expiry_idx = st.selectbox(
+                "Expiry",
+                options=[0, 1, 2, 3],
+                format_func=lambda x: ["Nearest (Weekly)", "Next Week", "Monthly", "+1 Month"][x],
+                key="oc_expiry_idx",
+            )
+
+        oc_n_strikes = 40  # Always fetch max strikes
+
+        run_oc = st.button("🔍 Fetch & Analyze Option Chain", type="primary", key="run_option_chain")
+
+        # ── FETCH + CACHE ──
+        cache_key = f"option_chain_{oc_symbol}_{oc_expiry_idx}"
+
+        if run_oc and oc_symbol:
+            with st.spinner(f"Fetching live option chain from NSE for {oc_symbol}..."):
+                try:
+                    oc_data = fetch_option_chain(
+                        symbol=oc_symbol,
+                        expiry_index=oc_expiry_idx,
+                        n_strikes=oc_n_strikes,
+                    )
+                    st.session_state[cache_key] = oc_data
+                    st.success(f"✅ Loaded {len(oc_data.strikes)} strikes for {oc_data.symbol} | Expiry: {oc_data.expiry_date}")
+                except ValueError as e:
+                    st.error(f"❌ {str(e)}")
+                    st.info("💡 Make sure the symbol is F&O eligible on NSE. Try NIFTY or BANKNIFTY.")
+                    st.stop()
+                except ConnectionError as e:
+                    st.error(f"🌐 NSE connection failed: {str(e)}")
+                    st.info("NSE API can be slow during market hours. Try again in a few seconds.")
+                    st.stop()
+                except Exception as e:
+                    st.error(f"Unexpected error: {str(e)}")
+                    st.stop()
+
+        oc_data = st.session_state.get(cache_key)
+
+        if oc_data:
+            a = oc_data.analysis
+
+            # ── HEADER INFO ──
+            st.markdown(
+                f"**{oc_data.symbol}** | Spot: **₹{oc_data.underlying_price:,.2f}** | "
+                f"Expiry: **{oc_data.expiry_date}** | "
+                f"Data: {oc_data.timestamp.strftime('%H:%M:%S UTC')}"
+            )
+
+            # ── RECOMMENDATION BANNER ──
+            _oc_rec_styles = {
+                "green":   ("#e8f5e9", "#1b5e20"),
+                "#4caf50": ("#f1f8e9", "#33691e"),
+                "gray":    ("#f5f5f5", "#424242"),
+                "orange":  ("#fff3e0", "#bf360c"),
+                "red":     ("#ffebee", "#b71c1c"),
+            }
+            _oc_bg, _oc_fg = _oc_rec_styles.get(a.recommendation_color, ("#f5f5f5", "#424242"))
+            st.markdown(
+                f"<div style='background:{_oc_bg}; border-left:6px solid {_oc_fg}; "
+                f"padding:14px 18px; border-radius:6px; margin:12px 0;'>"
+                f"<div style='font-size:1.15em; font-weight:700; color:{_oc_fg};'>"
+                f"🎯 {a.recommendation}</div>"
+                f"<div style='color:{_oc_fg}; margin-top:4px;'>"
+                f"{a.bias_strength} {a.market_bias} · Confidence: {a.confidence}</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+
+            # ── KEY METRICS ROW ──
+            m1, m2, m3, m4, m5 = st.columns(5)
+            with m1:
+                st.metric("🧱 Resistance", f"{a.key_resistance:,.0f}",
+                          delta=f"+{((a.key_resistance - a.underlying_price)/a.underlying_price*100):.1f}%")
+            with m2:
+                st.metric("🛡️ Support", f"{a.key_support:,.0f}",
+                          delta=f"{((a.key_support - a.underlying_price)/a.underlying_price*100):.1f}%",
+                          delta_color="inverse")
+            with m3:
+                st.metric("⚙️ Max Pain", f"{a.max_pain_strike:,.0f}")
+            with m4:
+                _oc_pcr_delta_color = "normal" if a.put_call_ratio >= 1.0 else "inverse"
+                st.metric("📊 PCR", f"{a.put_call_ratio:.3f}",
+                          delta=a.pcr_label, delta_color=_oc_pcr_delta_color)
+            with m5:
+                st.metric("📏 Range", f"{a.range_low:,.0f}–{a.range_high:,.0f}")
+
+            # ── INNER TABS: Table | Chart | Analysis ──
+            inner_tab1, inner_tab2, inner_tab3 = st.tabs(
+                ["📋 OI Table", "📈 OI Chart", "🔍 Full Analysis"]
+            )
+
+            with inner_tab1:
+                st.subheader("Option Chain — OI Data")
+
+                _oc_table_rows = []
+                for s in oc_data.strikes:
+                    _oc_row_flag = ""
+                    if s.is_atm:
+                        _oc_row_flag = "🔵 ATM"
+                    elif s.is_max_call_oi:
+                        _oc_row_flag = "🧱 Max Call OI"
+                    elif s.is_max_put_oi:
+                        _oc_row_flag = "🛡️ Max Put OI"
+
+                    def _oc_fmt_oi(v: int) -> str:
+                        if v >= 10_000_000: return f"{v/10_000_000:.1f}Cr"
+                        if v >= 100_000:    return f"{v/100_000:.1f}L"
+                        return f"{v:,}"
+
+                    def _oc_fmt_chng(v: int) -> str:
+                        sign = "+" if v > 0 else ""
+                        if abs(v) >= 10_000_000: return f"{sign}{v/10_000_000:.1f}Cr"
+                        if abs(v) >= 100_000:    return f"{sign}{v/100_000:.1f}L"
+                        return f"{sign}{v:,}"
+
+                    _oc_table_rows.append({
+                        "Call OI": _oc_fmt_oi(s.call_oi),
+                        "Call Chng OI": _oc_fmt_chng(s.call_chng_oi),
+                        "⚡": _oc_row_flag,
+                        "Strike": f"₹{s.strike:,.0f}",
+                        "Put Chng OI": _oc_fmt_chng(s.put_chng_oi),
+                        "Put OI": _oc_fmt_oi(s.put_oi),
+                    })
+
+                _oc_table_df = pd.DataFrame(_oc_table_rows)
+
+                def _oc_highlight_rows(row):
+                    flag = row["⚡"]
+                    if "ATM" in flag:
+                        return ["background-color: #1565c0; color: #fff; font-weight: bold"] * len(row)
+                    elif "Max Call" in flag:
+                        return ["background-color: #b71c1c; color: #fff; font-weight: bold"] * len(row)
+                    elif "Max Put" in flag:
+                        return ["background-color: #1b5e20; color: #fff; font-weight: bold"] * len(row)
+                    return [""] * len(row)
+
+                _oc_styled = _oc_table_df.style.apply(_oc_highlight_rows, axis=1)
+                st.dataframe(_oc_styled, use_container_width=True, height=500)
+
+                st.caption(
+                    "🔵 Blue row = ATM (nearest to current price) | "
+                    "🧱 Red row = Max Call OI (resistance) | "
+                    "🛡️ Green row = Max Put OI (support)"
+                )
+
+            with inner_tab2:
+                st.subheader("Open Interest Distribution")
+
+                _oc_strikes_list = [s.strike for s in oc_data.strikes]
+                _oc_call_ois = [s.call_oi for s in oc_data.strikes]
+                _oc_put_ois = [s.put_oi for s in oc_data.strikes]
+                _oc_call_chng = [s.call_chng_oi for s in oc_data.strikes]
+                _oc_put_chng = [s.put_chng_oi for s in oc_data.strikes]
+
+                _oc_fig = go.Figure()
+
+                # OI bars (left y-axis)
+                _oc_fig.add_trace(go.Bar(
+                    x=_oc_strikes_list, y=_oc_call_ois,
+                    name="Call OI",
+                    marker_color="#ef5350",
+                    opacity=0.8,
+                    hovertemplate="Strike: %{x:,.0f}<br>Call OI: %{y:,}<extra></extra>"
+                ))
+                _oc_fig.add_trace(go.Bar(
+                    x=_oc_strikes_list, y=_oc_put_ois,
+                    name="Put OI",
+                    marker_color="#26a69a",
+                    opacity=0.8,
+                    hovertemplate="Strike: %{x:,.0f}<br>Put OI: %{y:,}<extra></extra>"
+                ))
+
+                # Change in OI lines (right y-axis)
+                _oc_fig.add_trace(go.Scatter(
+                    x=_oc_strikes_list, y=_oc_call_chng,
+                    name="Call Chng OI",
+                    mode="lines+markers",
+                    line=dict(color="#e53935", dash="dot", width=1.5),
+                    marker=dict(size=4),
+                    yaxis="y2",
+                    hovertemplate="Strike: %{x:,.0f}<br>Call Chng: %{y:+,}<extra></extra>"
+                ))
+                _oc_fig.add_trace(go.Scatter(
+                    x=_oc_strikes_list, y=_oc_put_chng,
+                    name="Put Chng OI",
+                    mode="lines+markers",
+                    line=dict(color="#00897b", dash="dot", width=1.5),
+                    marker=dict(size=4),
+                    yaxis="y2",
+                    hovertemplate="Strike: %{x:,.0f}<br>Put Chng: %{y:+,}<extra></extra>"
+                ))
+
+                # Vertical lines for key levels
+                for _oc_level, _oc_label, _oc_color_line in [
+                    (a.underlying_price, f"Spot ₹{a.underlying_price:,.0f}", "#1565c0"),
+                    (a.max_call_oi_strike, f"Resistance {a.max_call_oi_strike:,.0f}", "#b71c1c"),
+                    (a.max_put_oi_strike, f"Support {a.max_put_oi_strike:,.0f}", "#1b5e20"),
+                    (a.max_pain_strike, f"Max Pain {a.max_pain_strike:,.0f}", "#f57f17"),
+                ]:
+                    _oc_fig.add_vline(
+                        x=_oc_level,
+                        line_dash="dash",
+                        line_color=_oc_color_line,
+                        line_width=1.5,
+                        annotation_text=_oc_label,
+                        annotation_position="top",
+                        annotation_font_size=10,
+                    )
+
+                _oc_fig.update_layout(
+                    barmode="group",
+                    xaxis_title="Strike Price",
+                    yaxis_title="Open Interest",
+                    yaxis2=dict(
+                        title="Change in OI",
+                        overlaying="y",
+                        side="right",
+                        showgrid=False,
+                    ),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    height=420,
+                    margin=dict(t=40, b=30, l=10, r=10),
+                    hovermode="x unified",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                )
+                _oc_fig.update_yaxes(gridcolor="rgba(128,128,128,0.1)")
+
+                st.plotly_chart(_oc_fig, use_container_width=True)
+
+                if len(oc_data.available_expiries) > 1:
+                    st.caption(
+                        f"Available expiries: {' · '.join(oc_data.available_expiries[:5])}"
+                    )
+
+            with inner_tab3:
+                st.subheader("OI Signal Analysis & Verdict")
+
+                # -- Signal Score Meter --
+                _oc_total_score = getattr(a, 'total_signal_score', 0)
+                _oc_has_contradiction = getattr(a, 'has_contradiction', False)
+
+                _oc_score_col1, _oc_score_col2, _oc_score_col3 = st.columns([1, 3, 1])
+                with _oc_score_col2:
+                    _oc_score_color = "green" if _oc_total_score >= 2 else ("red" if _oc_total_score <= -2 else "gray")
+                    st.markdown(
+                        f"<div style='text-align:center; font-size:2em; font-weight:700; color:{_oc_score_color};'>"
+                        f"{'+'if _oc_total_score > 0 else ''}{_oc_total_score} / 9"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+                    _oc_normalized = int(((_oc_total_score + 9) / 18) * 100)
+                    _oc_normalized = max(0, min(100, _oc_normalized))
+                    st.progress(_oc_normalized, text=f"Signal Score: {'+' if _oc_total_score >= 0 else ''}{_oc_total_score}")
+
+                if _oc_has_contradiction:
+                    st.warning(
+                        "**Contradicting Signals Detected** — Call OI and Put OI are pointing in "
+                        "opposite directions. This means the market is undecided. "
+                        "**Do not force a trade.** Wait for signals to converge."
+                    )
+
+                st.divider()
+
+                _oc_sc1, _oc_sc2 = st.columns(2)
+                with _oc_sc1:
+                    st.markdown("#### 📈 Call OI Signal")
+                    _oc_dir = a.call_oi_shift.direction
+                    _oc_dir_color = {"UP": "green", "DOWN": "red", "SIDEWAYS": "gray"}.get(_oc_dir, "gray")
+                    st.markdown(
+                        f"<span style='color:{_oc_dir_color}; font-size:1.1em; font-weight:600;'>"
+                        f"{'⬆' if _oc_dir=='UP' else ('⬇' if _oc_dir=='DOWN' else '➡')} "
+                        f"{_oc_dir} · {a.call_oi_shift.strength} "
+                        f"({'+' if getattr(a.call_oi_shift, 'score_contribution', 0) >= 0 else ''}{getattr(a.call_oi_shift, 'score_contribution', 0)})</span>",
+                        unsafe_allow_html=True
+                    )
+                    st.write(a.call_oi_shift.description)
+
+                with _oc_sc2:
+                    st.markdown("#### 📉 Put OI Signal")
+                    _oc_dir2 = a.put_oi_shift.direction
+                    _oc_dir_color2 = {"UP": "green", "DOWN": "red", "SIDEWAYS": "gray"}.get(_oc_dir2, "gray")
+                    st.markdown(
+                        f"<span style='color:{_oc_dir_color2}; font-size:1.1em; font-weight:600;'>"
+                        f"{'⬆' if _oc_dir2=='UP' else ('⬇' if _oc_dir2=='DOWN' else '➡')} "
+                        f"{_oc_dir2} · {a.put_oi_shift.strength} "
+                        f"({'+' if getattr(a.put_oi_shift, 'score_contribution', 0) >= 0 else ''}{getattr(a.put_oi_shift, 'score_contribution', 0)})</span>",
+                        unsafe_allow_html=True
+                    )
+                    st.write(a.put_oi_shift.description)
+
+                st.divider()
+
+                st.markdown("#### 📋 Complete Signal Breakdown")
+                for _oc_point in a.verdict_points:
+                    _pt = _oc_point.strip()
+                    if not _pt:
+                        continue
+                    if "TOTAL SIGNAL SCORE" in _pt or "RECOMMENDATION" in _pt:
+                        st.markdown(f"**{_pt}**")
+                    elif "CONTRADICTION" in _pt:
+                        st.error(_pt)
+                    elif "(+" in _pt or "bullish" in _pt.lower() or "support" in _pt.lower():
+                        st.success(_pt)
+                    elif "(-" in _pt or "bearish" in _pt.lower() or "resistance" in _pt.lower():
+                        st.warning(_pt)
+                    else:
+                        st.info(_pt)
+
+                st.divider()
+
+                with st.expander("📖 How to read Option Chain OI"):
+                    st.markdown("""
+**Open Interest (OI)** = Total number of outstanding option contracts not yet settled.
+
+**Call OI** = Open positions in Call options at that strike.
+High Call OI at a strike = that level is a **resistance** (writers expect price to stay below)
+
+**Put OI** = Open positions in Put options at that strike.
+High Put OI at a strike = that level is a **support** (writers expect price to stay above)
+
+**Change in OI (Chng OI)**
+- Positive = New positions being created (increased activity)
+- Negative = Old positions being closed (unwinding)
+
+**OI Shift Tracking**
+- PUT OI concentration shifting HIGHER → Supports moving up → Market moving **UP** ⬆
+- CALL OI concentration shifting LOWER → Resistance moving down → Market moving **DOWN** ⬇
+
+**Put-Call Ratio (PCR)**
+| PCR Value | Interpretation |
+|-----------|---------------|
+| > 1.5 | Extremely Bullish — heavy put writing |
+| 1.2–1.5 | Bullish |
+| 0.8–1.2 | Neutral / Range-bound |
+| 0.5–0.8 | Bearish |
+| < 0.5 | Extremely Bearish |
+
+**Max Pain** = Strike where maximum option buyers lose money at expiry.
+Market tends to gravitate toward Max Pain as expiry approaches.
+
+*Note: Option chain data is only available for F&O-eligible stocks and indices on NSE.*
+                    """)
+        else:
+            if not oc_symbol:
+                st.info("📊 Enter a symbol above or use Quick Select buttons to fetch option chain data.")
 
 elif view_option == "📖 Presentation Viewer":
     # Presentation Viewer - Dedicated page for viewing generated presentations
@@ -3446,7 +3340,7 @@ elif view_option == "📖 Presentation Viewer":
         st.info("💡 Generate a presentation first by analyzing a stock and clicking 'Generate Presentation' in the sidebar")
         
         if st.button("🔙 Back to Chat", use_container_width=True):
-            st.session_state.view_selector = "💬 Chat"
+            st.session_state.view_selector = "🏦 Fundamental Analysis"
             st.rerun()
     else:
         # Language selector at the top (if bilingual PPTs are available)
@@ -3911,7 +3805,7 @@ elif view_option == "📖 Presentation Viewer":
                 with col3:
                     # Back button
                     if st.button("🔙 Back", use_container_width=True):
-                        st.session_state.view_selector = "💬 Chat"
+                        st.session_state.view_selector = "🏦 Fundamental Analysis"
                         st.rerun()
                 
                 # Display Narration Scripts below download buttons
@@ -4053,7 +3947,7 @@ elif view_option == "📖 Presentation Viewer":
                 
                 with col3:
                     if st.button("🔙 Back", use_container_width=True, key="back_error"):
-                        st.session_state.view_selector = "💬 Chat"
+                        st.session_state.view_selector = "🏦 Fundamental Analysis"
                         st.rerun()
         
         else:
@@ -4073,13 +3967,57 @@ elif view_option == "📖 Presentation Viewer":
                 st.markdown("- **Linux:** Install LibreOffice: `sudo apt-get install libreoffice`")
             
             if st.button("🔙 Back to Chat"):
-                st.session_state.view_selector = "💬 Chat"
+                st.session_state.view_selector = "🏦 Fundamental Analysis"
                 st.rerun()
 
-elif view_option == "📊 Data Dashboard":
+elif view_option == "📈 Data Dashboard":
     if st.session_state.company_data:
         data = st.session_state.company_data
         st.subheader(f"📊 {data.name} ({data.symbol})")
+
+        # Auto-enrich from yfinance if key dashboard fields are missing (e.g. DB cache hit)
+        _needs_enrich = (
+            not getattr(data.financials, 'ebitda', None) or
+            not getattr(data.financials, 'eps', None) or
+            not data.market_data.price_history
+        )
+        if _needs_enrich and data.symbol and not st.session_state.get(f'_dash_enriched_{data.symbol}'):
+            try:
+                import yfinance as yf
+                _dash_tk = yf.Ticker(data.symbol)
+                _dash_info = _dash_tk.info or {}
+                _dash_hist = _dash_tk.history(period="1y")
+
+                # Fill missing financials
+                if not getattr(data.financials, 'ebitda', None):
+                    data.financials.ebitda = _dash_info.get('ebitda')
+                if not getattr(data.financials, 'eps', None):
+                    data.financials.eps = _dash_info.get('trailingEps')
+                if not getattr(data.financials, 'free_cash_flow', None):
+                    data.financials.free_cash_flow = _dash_info.get('freeCashflow')
+
+                # Fill price history
+                if not data.market_data.price_history and not _dash_hist.empty:
+                    data.market_data.price_history = {
+                        str(dt.date()): float(row["Close"])
+                        for dt, row in _dash_hist.iterrows()
+                    }
+
+                # Fill overall high/low from history
+                if not _dash_hist.empty:
+                    if not getattr(data.market_data, 'overall_high', None):
+                        data.market_data.overall_high = float(_dash_hist['High'].max())
+                    if not getattr(data.market_data, 'overall_low', None):
+                        data.market_data.overall_low = float(_dash_hist['Low'].min())
+                    if data.market_data.overall_high and data.market_data.current_price:
+                        data.market_data.percentage_change_from_high = round(
+                            ((data.market_data.current_price - data.market_data.overall_high) / data.market_data.overall_high) * 100, 2
+                        )
+
+                st.session_state[f'_dash_enriched_{data.symbol}'] = True
+            except Exception as _e:
+                print(f"⚠️ Dashboard enrichment failed: {_e}")
+
         col1, col2 = st.columns(2)
 
         # -------- Price Trend --------
@@ -4454,526 +4392,7 @@ elif view_option == "📊 Data Dashboard":
         st.info("📊 Analyze a stock to see the data dashboard")
 
 
-elif view_option == "📈 Sentiment Analysis":
-    # Analytics - Sentiment Analysis
-    if st.session_state.company_data:
-        data = st.session_state.company_data
-        stock_name = data.name
-        stock_symbol = data.symbol
-        
-        # ===== FIRST: Current Market Sentiment Section =====
-        st.subheader("📈 Current Market Sentiment")
-        st.caption("Real-time sentiment from News, Yahoo Finance, Twitter/X, and Reddit")
-        
-        # Check if sentiment analysis is already cached
-        if 'sentiment_data' not in st.session_state or st.session_state.get('sentiment_stock') != stock_symbol:
-            with st.spinner("🔍 Analyzing market sentiment from multiple sources (News, Yahoo Finance, Reddit, Twitter)..."):
-                from utils.sentiment_analyzer_adanos import analyze_stock_sentiment
-                
-                try:
-                    # Extract base ticker for Adanos API (remove .NS, .BO, etc.)
-                    ticker = stock_symbol.split('.')[0]
-                    sentiment_data = analyze_stock_sentiment(stock_name, stock_symbol, ticker)
-                    st.session_state.sentiment_data = sentiment_data
-                    st.session_state.sentiment_stock = stock_symbol
-                except Exception as e:
-                    st.error(f"❌ Error analyzing sentiment: {e}")
-                    sentiment_data = None
-        else:
-            sentiment_data = st.session_state.sentiment_data
-        
-        if sentiment_data:
-            # Overall Sentiment Score
-            st.markdown("### 🎯 Overall Market Sentiment")
-            
-            # Determine number of columns based on available data
-            has_twitter = 'twitter_sentiment' in sentiment_data
-            has_reddit = 'reddit_sentiment' in sentiment_data
-            
-            if has_twitter and has_reddit:
-                col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
-            elif has_twitter or has_reddit:
-                col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
-            else:
-                col1, col2, col3 = st.columns([2, 1, 1])
-            
-            with col1:
-                # Sentiment gauge
-                score = sentiment_data['overall_score']
-                label = sentiment_data['overall_label']
-                color = sentiment_data['color']
-                
-                # Build sources text based on available data
-                sources = ["News", "Yahoo Finance"]
-                if 'twitter_sentiment' in sentiment_data:
-                    sources.append("Twitter/X")
-                if 'reddit_sentiment' in sentiment_data:
-                    sources.append("Reddit")
-                sources_text = ", ".join(sources)
-                
-                st.markdown(f"""
-                <div style="background: linear-gradient(135deg, {color}22 0%, {color}44 100%); 
-                            padding: 2rem; border-radius: 1rem; border-left: 5px solid {color};">
-                    <div style="font-size: 3rem; font-weight: bold; color: {color};">{score}/100</div>
-                    <div style="font-size: 1.5rem; font-weight: 600; margin-top: 0.5rem;">{label}</div>
-                    <div style="margin-top: 1rem; color: #666;">
-                        Based on {sources_text}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            with col2:
-                news_score = sentiment_data['news_sentiment']['sentiment_score']
-                news_label = sentiment_data['news_sentiment']['sentiment_label']
-                st.metric("📰 News Sentiment", f"{news_score}/100", news_label)
-            
-            with col3:
-                yahoo_score = sentiment_data['yahoo_sentiment']['sentiment_score']
-                yahoo_rating = sentiment_data['yahoo_sentiment']['analyst_rating']
-                st.metric("📊 Yahoo Finance", f"{yahoo_score}/100", yahoo_rating)
-            
-            # Twitter column (if available)
-            if has_twitter and has_reddit:
-                with col4:
-                    twitter_score = sentiment_data['twitter_sentiment']['sentiment_score']
-                    twitter_label = sentiment_data['twitter_sentiment']['sentiment_label']
-                    st.metric("🐦 Twitter/X", f"{twitter_score}/100", twitter_label)
-            elif has_twitter:
-                with col4:
-                    twitter_score = sentiment_data['twitter_sentiment']['sentiment_score']
-                    twitter_label = sentiment_data['twitter_sentiment']['sentiment_label']
-                    st.metric("🐦 Twitter/X", f"{twitter_score}/100", twitter_label)
-            
-            # Reddit column (if available)
-            if has_twitter and has_reddit:
-                with col5:
-                    reddit_score = sentiment_data['reddit_sentiment']['sentiment_score']
-                    reddit_label = sentiment_data['reddit_sentiment']['sentiment_label']
-                    st.metric("🔴 Reddit", f"{reddit_score}/100", reddit_label)
-            elif has_reddit:
-                with col4:
-                    reddit_score = sentiment_data['reddit_sentiment']['sentiment_score']
-                    reddit_label = sentiment_data['reddit_sentiment']['sentiment_label']
-                    st.metric("🔴 Reddit", f"{reddit_score}/100", reddit_label)
-            
-            # Twitter/X and Reddit Sentiment - Side by side in two columns
-            st.markdown("---")
-            
-            # Create two main columns for Twitter and Reddit
-            social_col1, social_col2 = st.columns(2)
-            
-            # LEFT COLUMN: Twitter/X Sentiment
-            with social_col1:
-                if 'twitter_sentiment' in sentiment_data:
-                    st.markdown("### 🐦 Twitter/X Sentiment")
-                    
-                    twitter_data = sentiment_data['twitter_sentiment']
-                    
-                    # Twitter sentiment score
-                    twitter_score = twitter_data.get('sentiment_score', 0)
-                    twitter_label = twitter_data.get('sentiment_label', 'N/A')
-                    
-                    # Color based on sentiment
-                    if twitter_score >= 60:
-                        twitter_color = "#10b981"
-                    elif twitter_score >= 40:
-                        twitter_color = "#fbbf24"
-                    else:
-                        twitter_color = "#ef4444"
-                    
-                    st.markdown(f"""
-                    <div style="background: linear-gradient(135deg, {twitter_color}22 0%, {twitter_color}44 100%); 
-                                padding: 1.5rem; border-radius: 0.75rem; border-left: 4px solid {twitter_color};">
-                        <div style="font-size: 2rem; font-weight: bold; color: {twitter_color};">{twitter_score}/100</div>
-                        <div style="font-size: 1rem; font-weight: 600; margin-top: 0.5rem;">{twitter_label}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Show source information as caption below score
-                    source = twitter_data.get('source', 'unknown')
-                    if source == 'rapidapi_twitter':
-                        tweet_count = twitter_data.get('tweet_count', 0)
-                        st.caption(f"📊 Based on {tweet_count} recent tweets")
-                    elif source == 'news_based_twitter':
-                        st.caption(f"📰 Based on news articles")
-                    else:
-                        st.caption("📊 Twitter sentiment data")
-                    
-                    # Fixed spacing before sentiment breakdown
-                    st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
-                    
-                    # Sentiment breakdown in 3 columns
-                    tw_col1, tw_col2, tw_col3 = st.columns(3)
-                    
-                    with tw_col1:
-                        positive_pct = twitter_data.get('positive_percentage', 0)
-                        st.metric("👍 Positive", f"{positive_pct}%")
-                    
-                    with tw_col2:
-                        negative_pct = twitter_data.get('negative_percentage', 0)
-                        st.metric("👎 Negative", f"{negative_pct}%")
-                    
-                    with tw_col3:
-                        neutral_pct = twitter_data.get('neutral_percentage', 0)
-                        st.metric("😐 Neutral", f"{neutral_pct}%")
-                    
-                    # Show top engaging tweets if available
-                    if twitter_data.get('top_tweets'):
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        with st.expander("🔥 Top Engaging Tweets"):
-                            for i, tweet in enumerate(twitter_data['top_tweets'][:5], 1):
-                                sentiment_emoji = "✅" if tweet.get('sentiment_label') == 'Positive' else "⚠️" if tweet.get('sentiment_label') == 'Negative' else "➖"
-                                tweet_text = tweet.get('text', 'N/A')
-                                st.markdown(f"{sentiment_emoji} **Tweet {i}:** {tweet_text[:200]}...")
-                                st.caption(f"❤️ {tweet.get('favorites', 0)} | 🔄 {tweet.get('retweets', 0)} | 💬 {tweet.get('replies', 0)}")
-                                if i < 5:
-                                    st.markdown("---")
-                else:
-                    st.markdown("### 🐦 Twitter/X Sentiment")
-                    st.info("No Twitter data available")
-            
-            # RIGHT COLUMN: Reddit Sentiment
-            with social_col2:
-                if 'reddit_sentiment' in sentiment_data:
-                    st.markdown("### 🔴 Reddit Sentiment")
-                    
-                    reddit_data = sentiment_data['reddit_sentiment']
-                    
-                    # Reddit sentiment score
-                    reddit_score = reddit_data.get('sentiment_score', 0)
-                    reddit_label = reddit_data.get('sentiment_label', 'N/A')
-                    
-                    # Color based on sentiment
-                    if reddit_score >= 60:
-                        reddit_color = "#10b981"
-                    elif reddit_score >= 40:
-                        reddit_color = "#fbbf24"
-                    else:
-                        reddit_color = "#ef4444"
-                    
-                    st.markdown(f"""
-                    <div style="background: linear-gradient(135deg, {reddit_color}22 0%, {reddit_color}44 100%); 
-                                padding: 1.5rem; border-radius: 0.75rem; border-left: 4px solid {reddit_color};">
-                        <div style="font-size: 2rem; font-weight: bold; color: {reddit_color};">{reddit_score}/100</div>
-                        <div style="font-size: 1rem; font-weight: 600; margin-top: 0.5rem;">{reddit_label}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Show source information as caption below score
-                    total_posts = reddit_data.get('total_posts', 0)
-                    total_items = reddit_data.get('total_items_analyzed', 0)
-                    st.caption(f"📊 Based on {total_posts} posts & {total_items} items")
-                    
-                    # Fixed spacing before sentiment breakdown (same as Twitter)
-                    st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
-                    
-                    # Sentiment breakdown in 3 columns
-                    rd_col1, rd_col2, rd_col3 = st.columns(3)
-                    
-                    with rd_col1:
-                        positive_pct = reddit_data.get('positive_percentage', 0)
-                        st.metric("👍 Positive", f"{positive_pct}%")
-                    
-                    with rd_col2:
-                        negative_pct = reddit_data.get('negative_percentage', 0)
-                        st.metric("👎 Negative", f"{negative_pct}%")
-                    
-                    with rd_col3:
-                        neutral_pct = reddit_data.get('neutral_percentage', 0)
-                        st.metric("😐 Neutral", f"{neutral_pct}%")
-                    
-                    # Show subreddit distribution in expander (like top posts)
-                    if reddit_data.get('subreddit_distribution'):
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        with st.expander("📊 Active Subreddits"):
-                            subreddit_list = list(reddit_data['subreddit_distribution'].items())
-                            # Display in rows of 2
-                            for i in range(0, len(subreddit_list), 2):
-                                sub_cols = st.columns(2)
-                                for j, (subreddit, count) in enumerate(subreddit_list[i:i+2]):
-                                    with sub_cols[j]:
-                                        st.metric(f"r/{subreddit}", f"{count} posts")
-                    
-                    # Show top Reddit posts if available
-                    if reddit_data.get('top_posts'):
-                        with st.expander("🔥 Top Reddit Posts"):
-                            for i, post in enumerate(reddit_data['top_posts'][:5], 1):
-                                st.markdown(f"**{i}. {post['title']}**")
-                                st.caption(f"r/{post['subreddit']} | ⬆️ {post['score']} | 💬 {post['num_comments']} comments")
-                                # Only show link if URL is available
-                                if post.get('url'):
-                                    st.markdown(f"[View on Reddit]({post['url']})")
-                                if i < 5:
-                                    st.markdown("---")
-                    
-                    # Show Reddit insights in expander
-                    if reddit_data.get('key_insights'):
-                        with st.expander("💡 Key Insights"):
-                            for insight in reddit_data['key_insights']:
-                                st.markdown(f"• {insight}")
-                else:
-                    st.markdown("### 🔴 Reddit Sentiment")
-                    st.info("No Reddit data available")
-            
-            st.markdown("---")
-            
-            # Sentiment Breakdown
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("### 📈 Positive Factors")
-                positive_points = sentiment_data['news_sentiment'].get('positive_points', [])
-                if positive_points and positive_points != ['Insufficient data']:
-                    for point in positive_points:
-                        st.markdown(f"✅ {point}")
-                else:
-                    st.info("No significant positive factors identified")
-            
-            with col2:
-                st.markdown("### 📉 Negative Factors")
-                negative_points = sentiment_data['news_sentiment'].get('negative_points', [])
-                if negative_points and negative_points != ['Insufficient data']:
-                    for point in negative_points:
-                        st.markdown(f"⚠️ {point}")
-                else:
-                    st.info("No significant negative factors identified")
-            
-            st.markdown("---")
-            
-            # Market Mood Summary
-            st.markdown("### 💭 Market Mood & Analysis")
-            st.markdown(sentiment_data['final_analysis'])
-            
-            st.markdown("---")
-            
-            # Refresh button
-            if st.button("🔄 Refresh Sentiment Analysis"):
-                if 'sentiment_data' in st.session_state:
-                    del st.session_state.sentiment_data
-                if 'sentiment_stock' in st.session_state:
-                    del st.session_state.sentiment_stock
-                st.rerun()
-        
-        else:
-            st.error("Unable to perform sentiment analysis. Please try again.")
-        
-        # ===== SECOND: Future Outlook & News Analysis Section =====
-        st.markdown("---")
-        st.markdown("---")
-        st.subheader("🔮 Future Outlook & News Analysis")
-        st.caption("AI-powered analysis of future expectations from top financial sources")
-        
-        # Check if news analysis is already cached
-        if 'news_analysis' not in st.session_state or st.session_state.get('news_analysis_stock') != stock_symbol:
-            with st.spinner("🔍 Searching for latest news and analyst forecasts from top financial sources..."):
-                from tools import StockTools
-                
-                try:
-                    news_result = StockTools.get_stock_news_analysis(stock_name, max_articles=10)
-                    st.session_state.news_analysis = news_result
-                    st.session_state.news_analysis_stock = stock_symbol
-                except Exception as e:
-                    st.error(f"❌ Error fetching news analysis: {e}")
-                    news_result = None
-        else:
-            news_result = st.session_state.news_analysis
-        
-        if news_result and not news_result.get('error'):
-            # Display the full LLM analysis
-            st.markdown("### 📝 Detailed Analysis")
-            analysis_text = news_result.get('analysis', 'No analysis available')
-            st.markdown(analysis_text)
-            
-            st.markdown("---")
-            
-            # Display Tavily Summary
-            if news_result.get('tavily_summary'):
-                st.markdown("### 🌐 Web Search Summary")
-                st.info(news_result['tavily_summary'])
-                st.markdown("---")
-            
-            # Display Source Articles
-            st.markdown("### 📚 Source Articles")
-            articles = news_result.get('articles', [])
-            
-            if articles:
-                # Show article count by source
-                source_counts = {}
-                for article in articles:
-                    source = article.get('source', 'Unknown')
-                    source_counts[source] = source_counts.get(source, 0) + 1
-                
-                st.markdown("**Sources:**")
-                cols = st.columns(min(len(source_counts), 5))
-                for idx, (source, count) in enumerate(source_counts.items()):
-                    with cols[idx % len(cols)]:
-                        st.metric(source, count)
-                
-                st.markdown("---")
-                
-                # Display articles
-                for i, article in enumerate(articles, 1):
-                    with st.expander(f"📄 {i}. {article.get('title', 'Untitled')[:80]}..."):
-                        st.markdown(f"**Source:** {article.get('source', 'Unknown')}")
-                        st.markdown(f"**Snippet:** {article.get('snippet', 'No preview available')}")
-                        if article.get('url'):
-                            st.markdown(f"[🔗 Read full article]({article['url']})")
-            
-            # Refresh button for news analysis
-            st.markdown("---")
-            if st.button("🔄 Refresh News Analysis", key="refresh_news"):
-                if 'news_analysis' in st.session_state:
-                    del st.session_state.news_analysis
-                if 'news_analysis_stock' in st.session_state:
-                    del st.session_state.news_analysis_stock
-                st.rerun()
-        
-        elif news_result and news_result.get('error'):
-            st.warning(f"⚠️ {news_result['error']}")
-        
-        # ===== Update Database with Sentiment Data =====
-        # After both sentiment analyses are complete, update the database
-        if sentiment_data and news_result and not news_result.get('error'):
-            try:
-                from database_utility.database import StockDatabase
-                
-                # ===== BUILD COMPLETE MARKET SENTIMENT TEXT =====
-                market_senti_text = f"""📈 Current Market Sentiment Analysis for {stock_name}
-
-🎯 Overall Market Sentiment
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Overall Score: {sentiment_data['overall_score']}/100
-Sentiment: {sentiment_data['overall_label']}
-Based on: News, Yahoo Finance, Twitter/X
-
-📊 Sentiment Breakdown
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📰 News Sentiment: {sentiment_data['news_sentiment']['sentiment_score']}/100 ({sentiment_data['news_sentiment']['sentiment_label']})
-📊 Yahoo Finance: {sentiment_data['yahoo_sentiment']['sentiment_score']}/100 ({sentiment_data['yahoo_sentiment']['analyst_rating']})
-"""
-                
-                # Add Twitter sentiment if available
-                if 'twitter_sentiment' in sentiment_data:
-                    twitter_data = sentiment_data['twitter_sentiment']
-                    market_senti_text += f"🐦 Twitter/X: {twitter_data['sentiment_score']}/100 ({twitter_data['sentiment_label']})\n"
-                    market_senti_text += f"   - Positive: {twitter_data.get('positive_percentage', 0)}%\n"
-                    market_senti_text += f"   - Negative: {twitter_data.get('negative_percentage', 0)}%\n"
-                    market_senti_text += f"   - Neutral: {twitter_data.get('neutral_percentage', 0)}%\n"
-                    if twitter_data.get('tweet_count'):
-                        market_senti_text += f"   - Based on {twitter_data['tweet_count']} tweets\n"
-                
-                market_senti_text += "\n📈 Positive Factors\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                
-                positive_points = sentiment_data['news_sentiment'].get('positive_points', [])
-                if positive_points and positive_points != ['Insufficient data']:
-                    for point in positive_points:
-                        market_senti_text += f"✅ {point}\n"
-                else:
-                    market_senti_text += "No significant positive factors identified\n"
-                
-                market_senti_text += "\n📉 Negative Factors\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                
-                negative_points = sentiment_data['news_sentiment'].get('negative_points', [])
-                if negative_points and negative_points != ['Insufficient data']:
-                    for point in negative_points:
-                        market_senti_text += f"⚠️ {point}\n"
-                else:
-                    market_senti_text += "No significant negative factors identified\n"
-                
-                market_senti_text += "\n💭 Market Mood & Analysis\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                market_senti_text += sentiment_data['final_analysis']
-                
-                # Determine market sentiment status
-                market_senti_status = sentiment_data['overall_label'].lower()
-                
-                # ===== BUILD COMPLETE FUTURE SENTIMENT TEXT =====
-                future_senti_text = f"""🔮 Future Outlook & News Analysis for {stock_name}
-
-{news_result.get('analysis', 'No analysis available')}
-"""
-                
-                # Add Tavily summary if available
-                if news_result.get('tavily_summary'):
-                    future_senti_text += f"\n\n🌐 Web Search Summary\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    future_senti_text += news_result['tavily_summary']
-                
-                # Add source articles
-                articles = news_result.get('articles', [])
-                if articles:
-                    future_senti_text += f"\n\n📚 Source Articles ({len(articles)} articles)\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    
-                    # Group by source
-                    source_counts = {}
-                    for article in articles:
-                        source = article.get('source', 'Unknown')
-                        source_counts[source] = source_counts.get(source, 0) + 1
-                    
-                    future_senti_text += "Sources:\n"
-                    for source, count in source_counts.items():
-                        future_senti_text += f"  • {source}: {count} articles\n"
-                    
-                    future_senti_text += "\nTop Articles:\n"
-                    for i, article in enumerate(articles[:5], 1):
-                        future_senti_text += f"\n{i}. {article.get('title', 'Untitled')}\n"
-                        future_senti_text += f"   Source: {article.get('source', 'Unknown')}\n"
-                        future_senti_text += f"   {article.get('snippet', 'No preview available')}\n"
-                
-                # Determine future sentiment status from analysis text
-                future_senti_status = "neutral"
-                if future_senti_text:
-                    text_lower = future_senti_text.lower()
-                    positive_keywords = ['positive', 'bullish', 'growth', 'strong', 'optimistic', 'upside', 'buy', 'outperform']
-                    negative_keywords = ['negative', 'bearish', 'decline', 'weak', 'pessimistic', 'downside', 'sell', 'underperform']
-                    
-                    positive_count = sum(1 for keyword in positive_keywords if keyword in text_lower)
-                    negative_count = sum(1 for keyword in negative_keywords if keyword in text_lower)
-                    
-                    if positive_count > negative_count:
-                        future_senti_status = "positive"
-                    elif negative_count > positive_count:
-                        future_senti_status = "negative"
-                
-                # Update database
-                db = StockDatabase()
-                if db.connect():
-                    # Get the latest analysis for this stock
-                    latest = db.get_latest_analysis(stock_symbol)
-                    
-                    if latest:
-                        # Update the existing record with sentiment data
-                        update_query = """
-                        UPDATE stock_analysis
-                        SET market_senti = %s,
-                            current_market_senti_status = %s,
-                            future_senti = %s,
-                            future_senti_status = %s
-                        WHERE id = %s
-                        """
-                        db.cursor.execute(update_query, (
-                            market_senti_text,
-                            market_senti_status,
-                            future_senti_text,
-                            future_senti_status,
-                            latest['id']
-                        ))
-                        db.conn.commit()
-                        print(f"✅ Complete sentiment data updated in database for {stock_name}")
-                        print(f"   - Market sentiment: {len(market_senti_text)} characters")
-                        print(f"   - Future sentiment: {len(future_senti_text)} characters")
-                    
-                    db.disconnect()
-            except Exception as db_error:
-                print(f"⚠️ Database sentiment update error: {db_error}")
-                import traceback
-                traceback.print_exc()
-                # Continue even if database update fails
-    
-    else:
-        st.info("📈 Analyze a stock to see analytics")
-
-elif view_option == "🔍 Bulk Stock Analyzer":
+elif view_option == "⚡ Bulk Stock Analyzer":
     # Bulk Stock Analyzer - Full-featured version matching bulk_stock_dashboard.py
     st.markdown("### 🔍 Bulk Stock Analyzer")
     st.markdown("Find stocks that have fallen ≥25% from their 52-week high")
@@ -5420,313 +4839,299 @@ elif view_option == "🔍 Bulk Stock Analyzer":
         - ✅ Individual stock charts
         """)
 
-elif view_option == "🎨 Drawing Generator":
-    # Drawing Generator - Auto-generate TradingView drawing instructions
+elif view_option == "🖊️ Drawing Generator":
+    # Drawing Generator — calls api_chat_drawing.py  POST /api/v1/drawing/chat/
+    import requests as _req
+    from datetime import timedelta as _td
+
     st.markdown("### 🎨 Auto Drawing Generator")
     st.markdown("Generate TradingView drawing instructions from price data analysis")
-    
     st.markdown("---")
-    
-    # Configuration Section
-    col1, col2, col3 = st.columns(3)
-    
+
+    # ── Row 1: Symbol / Timeframe / Period / Market ──────────────────────────
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         symbol_input = st.text_input(
-            "Stock Symbol",
-            value="AAPL",
-            help="Enter stock symbol (e.g., AAPL, RELIANCE.NS, TCS.NS)"
+            "Stock Symbol", value="AAPL",
+            help="e.g. AAPL, RELIANCE, TCS  (exchange suffix added automatically)"
         )
-    
     with col2:
         timeframe = st.selectbox(
             "Timeframe",
-            options=["1m", "5m", "15m", "1h", "1d", "1wk", "1mo"],
-            index=4,  # Default to 1d
+            options=["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1wk", "1mo"],
+            index=6,
             help="Chart timeframe"
         )
-    
     with col3:
         period = st.selectbox(
             "Period",
-            options=["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"],
-            index=5,  # Default to 1y
-            help="Data period to analyze"
+            options=["1mo", "3mo", "6mo", "1y", "2y", "5y"],
+            index=3,
+            help="How far back to pull price data"
         )
-    
-    # Task Selection
-    st.markdown("#### 📋 Select Analysis Tasks")
-    
-    # Info about LLM-powered detection
-    st.info("""
-    🤖 **AI-Powered Detection**: This tool uses advanced LLM (Large Language Model) analysis to detect patterns, 
-    zones, and indicators with high accuracy. The AI understands market context and provides confidence scores 
-    for each detection.
-    """)
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        task_zones = st.checkbox("Supply/Demand Zones", value=True)
-        task_patterns = st.checkbox("Candlestick Patterns", value=True)
-    
-    with col2:
-        task_bollinger = st.checkbox("Bollinger Bands", value=False)
-        task_rsi = st.checkbox("RSI Signals", value=True)
-    
-    with col3:
-        task_macd = st.checkbox("MACD Crossovers", value=True)
-        task_levels = st.checkbox("Key Levels", value=True)
-    
-    # Generate Button
+    with col4:
+        market = st.selectbox(
+            "Market",
+            options=["stock", "nasdaq", "nyse", "forex", "crypto"],
+            index=0,
+            help="stock = NSE India  |  nasdaq/nyse = US stocks  |  forex/crypto = global"
+        )
+
+    # ── Row 2: API server URL ─────────────────────────────────────────────────
+    api_url = st.text_input(
+        "Drawing API URL",
+        value="http://localhost:8000",
+        help="Base URL of the api_chat_drawing.py server  (POST /api/v1/drawing/chat/)"
+    )
+
     st.markdown("---")
-    
+    # ── What to generate ─────────────────────────────────────────────────────
+    st.markdown("#### 📋 Select Analysis Tasks")
+    st.info(
+        "🤖 **AI-Powered Detection**: your selections are converted into a natural-language "
+        "message and sent to the Chat Drawing API. The LLM understands context and generates "
+        "only the requested drawing types."
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        task_zones    = st.checkbox("Supply/Demand Zones",  value=True)
+        task_patterns = st.checkbox("Candlestick Patterns", value=True)
+        task_smc      = st.checkbox("SMC (BOS/CHoCH/OB)",  value=False)
+    with col2:
+        task_fvg      = st.checkbox("Fair Value Gaps (FVG)", value=False)
+        task_rsi      = st.checkbox("RSI Signals",           value=True)
+        task_bollinger= st.checkbox("Bollinger Bands",       value=False)
+    with col3:
+        task_macd     = st.checkbox("MACD Crossovers",       value=True)
+        task_levels   = st.checkbox("Key Support/Resistance",value=True)
+
+    # Optional custom message (overrides auto-generated one)
+    custom_msg = st.text_area(
+        "Custom message (optional — overrides checkboxes)",
+        placeholder='e.g. "mark supply zones and show RSI overbought levels"',
+        height=68,
+        help="Leave blank to auto-build from the checkboxes above."
+    )
+
+    st.markdown("---")
+
+    # ── Generate button ───────────────────────────────────────────────────────
     if st.button("🚀 Generate Drawings (AI-Powered)", type="primary", use_container_width=True):
-        # Collect selected tasks
-        tasks = []
-        if task_zones:
-            tasks.append("zones")
-        if task_patterns:
-            tasks.append("patterns")
-        if task_bollinger:
-            tasks.append("bollinger")
-        if task_rsi:
-            tasks.append("rsi")
-        if task_macd:
-            tasks.append("macd")
-        if task_levels:
-            tasks.append("levels")
-        
-        if not tasks:
-            st.error("❌ Please select at least one analysis task")
+
+        # Build message from checkboxes (unless user typed a custom one)
+        if custom_msg.strip():
+            final_message = custom_msg.strip()
         else:
-            with st.spinner(f"🤖 Analyzing {symbol_input} with AI (LLM-powered detection)..."):
-                try:
-                    # Use LLM-powered detection instead of logic-based
-                    from drawing_instruction.llm_drawing_generator import generate_drawings_with_llm
-                    
-                    # API configuration for external data source
-                    api_config = {
-                        'base_url': 'http://192.168.0.126:8000',
-                        'from_date': '2025-01-01',
-                        'to_date': '2026-03-03',
-                        'market': 'stocks'
-                    }
-                    
-                    result = generate_drawings_with_llm(
-                        symbol=symbol_input,
-                        timeframe=timeframe,
-                        use_api=True,
-                        api_config=api_config
-                    )
-                    
-                    if result.get('error'):
-                        st.error(f"❌ Error: {result['error']}")
+            _task_labels = {
+                "supply and demand zones":       task_zones,
+                "candlestick patterns":          task_patterns,
+                "SMC (BOS, CHoCH, order blocks)":task_smc,
+                "fair value gaps":               task_fvg,
+                "RSI signals":                   task_rsi,
+                "Bollinger Bands":               task_bollinger,
+                "MACD crossovers":               task_macd,
+                "key support and resistance levels": task_levels,
+            }
+            selected_labels = [lbl for lbl, chk in _task_labels.items() if chk]
+            if not selected_labels:
+                st.error("❌ Please select at least one analysis task or enter a custom message.")
+                st.stop()
+            if len(selected_labels) == 1:
+                final_message = f"Show me {selected_labels[0]}"
+            else:
+                final_message = "Show me " + ", ".join(selected_labels[:-1]) + " and " + selected_labels[-1]
+
+        # Compute start / end dates from period
+        _period_days = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "5y": 1825}
+        _end_dt   = datetime.now()
+        _start_dt = _end_dt - _td(days=_period_days.get(period, 365))
+        start_date_str = _start_dt.strftime("%d-%m-%Y")
+        end_date_str   = _end_dt.strftime("%d-%m-%Y")
+
+        payload = {
+            "message":    final_message,
+            "symbol":     symbol_input.strip().upper(),
+            "start_date": start_date_str,
+            "end_date":   end_date_str,
+            "market":     market,
+            "timeframe":  timeframe,
+        }
+
+        st.markdown(f"**Request →** `{final_message}` | `{symbol_input}` | `{start_date_str}` → `{end_date_str}`")
+
+        with st.spinner(f"🤖 Calling Drawing API for {symbol_input}…"):
+            try:
+                endpoint = f"{api_url.rstrip('/')}/api/v1/drawing/chat/"
+                resp = _req.post(endpoint, json=payload, timeout=180)
+
+                if resp.status_code == 200:
+                    result = resp.json()
+                    if not result.get("success"):
+                        st.error(f"❌ API error: {result.get('message', 'Unknown error')}")
                     else:
-                        st.success(f"✅ Successfully generated {result['total_drawings']} drawing instructions!")
-                        
-                        # Store result in session state
+                        st.success(
+                            f"✅ Generated **{result['total_drawings']}** drawings  "
+                            f"| Resolved symbol: `{result.get('resolved_symbol', symbol_input)}`"
+                        )
                         st.session_state.drawing_result = result
-                        
-                        # Display Statistics
+
+                        # Intent info
+                        intent = result.get("parsed_intent", {})
+                        if intent:
+                            st.caption(
+                                f"🧠 AI understood: *{intent.get('user_wants', '')}*  "
+                                f"| Confidence: {intent.get('confidence', 0):.0%}  "
+                                f"| Types: {', '.join(result.get('drawing_types_generated', []))}"
+                            )
+
+                        # Statistics
                         st.markdown("#### 📊 Generation Statistics")
-                        
-                        # Count different types
-                        counts = {
-                            'zones': 0,
-                            'patterns': 0,
-                            'indicators': 0,
-                            'levels': 0
-                        }
-                        
-                        for drawing in result['drawings']:
-                            dtype = drawing.get('type', '')
-                            
-                            if dtype == 'LineToolRectangle':
-                                counts['zones'] += 1
-                            elif dtype == 'LineToolNote':
-                                # Check if it's a pattern by looking at the text
-                                text = drawing.get('state', {}).get('text', '')
-                                pattern_keywords = [
-                                    'engulfing', 'doji', 'hammer', 'star', 'shooting',
-                                    'hanging', 'soldiers', 'crows', 'piercing', 'cloud',
-                                    'harami', 'tweezer', 'dragonfly', 'gravestone'
-                                ]
-                                
-                                if any(pattern in text.lower() for pattern in pattern_keywords):
-                                    counts['patterns'] += 1
+                        counts = {"zones": 0, "patterns": 0, "indicators": 0, "levels": 0}
+                        _pattern_kw = [
+                            "engulfing", "doji", "hammer", "star", "shooting",
+                            "hanging", "soldiers", "crows", "piercing", "cloud",
+                            "harami", "tweezer", "dragonfly", "gravestone"
+                        ]
+                        for drawing in result["drawings"]:
+                            dtype = drawing.get("type", "")
+                            if dtype == "LineToolRectangle":
+                                counts["zones"] += 1
+                            elif dtype == "LineToolHorzLine":
+                                counts["levels"] += 1
+                            elif dtype == "LineToolNote":
+                                text = drawing.get("state", {}).get("text", "").lower()
+                                if any(kw in text for kw in _pattern_kw):
+                                    counts["patterns"] += 1
                                 else:
-                                    counts['indicators'] += 1
-                            elif dtype == 'LineToolHorzLine':
-                                counts['levels'] += 1
-                            elif dtype == 'LineToolTrendLine':
-                                counts['indicators'] += 1
+                                    counts["indicators"] += 1
                             else:
-                                counts['indicators'] += 1
-                        
-                        col1, col2, col3, col4, col5 = st.columns(5)
-                        
-                        with col1:
-                            st.metric("Total Drawings", result['total_drawings'])
-                        with col2:
-                            st.metric("Zones", counts['zones'])
-                        with col3:
-                            st.metric("Patterns", counts['patterns'])
-                        with col4:
-                            st.metric("Indicators", counts['indicators'])
-                        with col5:
-                            st.metric("Key Levels", counts['levels'])
-                
-                except Exception as e:
-                    st.error(f"❌ Error: {str(e)}")
-                    import traceback
-                    st.code(traceback.format_exc())
-    
-    # Display Results if available
-    if hasattr(st.session_state, 'drawing_result') and st.session_state.drawing_result:
+                                counts["indicators"] += 1
+
+                        mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+                        mc1.metric("Total", result["total_drawings"])
+                        mc2.metric("Zones", counts["zones"])
+                        mc3.metric("Patterns", counts["patterns"])
+                        mc4.metric("Indicators", counts["indicators"])
+                        mc5.metric("Key Levels", counts["levels"])
+
+                elif resp.status_code == 401:
+                    err = resp.json().get("detail", {})
+                    st.error("❌ API Authentication Error — token expired.")
+                    st.info(
+                        f"**Fix:** {err.get('fix_instructions', {}).get('step_3', 'Update API_BEARER_TOKEN in .env')}"
+                    )
+                elif resp.status_code == 422:
+                    st.error(f"❌ Validation error: {resp.json()}")
+                else:
+                    st.error(f"❌ API returned HTTP {resp.status_code}: {resp.text[:300]}")
+
+            except _req.exceptions.ConnectionError:
+                st.error(
+                    f"❌ Cannot connect to Drawing API at `{api_url}`.  \n"
+                    "Make sure **api_chat_drawing.py** is running:  \n"
+                    "`python api_chat_drawing.py`"
+                )
+            except _req.exceptions.Timeout:
+                st.error("❌ Request timed out (180 s). The analysis may be taking too long — try a shorter period.")
+            except Exception as e:
+                st.error(f"❌ Unexpected error: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+
+    # ── Display Results ───────────────────────────────────────────────────────
+    if hasattr(st.session_state, "drawing_result") and st.session_state.drawing_result:
         result = st.session_state.drawing_result
-        
+
         st.markdown("---")
         st.markdown("#### 📄 Generated JSON")
-        
-        # Tabs for different views
+
         tab1, tab2, tab3 = st.tabs(["📊 Summary", "📝 JSON Output", "💾 Download"])
-        
+
         with tab1:
             st.markdown("##### Drawing Instructions Summary")
-            
-            for idx, drawing in enumerate(result['drawings'][:10], 1):  # Show first 10
-                with st.expander(f"{idx}. {drawing['type']} - {drawing.get('state', {}).get('text', 'N/A')}"):
+            for idx, drawing in enumerate(result["drawings"][:10], 1):
+                with st.expander(f"{idx}. {drawing['type']} — {drawing.get('state', {}).get('text', 'N/A')}"):
                     st.json(drawing)
-            
-            if len(result['drawings']) > 10:
+            if len(result["drawings"]) > 10:
                 st.info(f"Showing first 10 of {len(result['drawings'])} drawings. Download JSON to see all.")
-        
+
         with tab2:
-            # Create columns for header and copy button
             col1, col2 = st.columns([5, 1])
-            
             with col1:
                 st.markdown("##### 📝 Complete JSON Output")
-            
             with col2:
-                # Prepare JSON string
                 json_str_for_copy = json.dumps(result, indent=2)
-                
-                # Copy button with custom HTML/JS for reliable clipboard access
                 copy_button_html = f"""
                 <div style="text-align: right;">
                     <button onclick="copyToClipboard()" style="
                         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                        color: white;
-                        border: none;
-                        padding: 0.5rem 1rem;
-                        font-weight: 600;
-                        border-radius: 0.5rem;
-                        cursor: pointer;
-                        box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
-                        font-size: 14px;
-                    ">
+                        color: white; border: none; padding: 0.5rem 1rem;
+                        font-weight: 600; border-radius: 0.5rem; cursor: pointer;
+                        box-shadow: 0 2px 8px rgba(102,126,234,0.3); font-size: 14px;">
                         📋 Copy JSON
                     </button>
-                    <div id="copyStatus" style="
-                        margin-top: 5px;
-                        font-size: 12px;
-                        color: #10b981;
-                        display: none;
-                    ">
+                    <div id="copyStatus" style="margin-top:5px;font-size:12px;color:#10b981;display:none;">
                         ✅ Copied!
                     </div>
                 </div>
-                
                 <script>
                 const jsonData = {json.dumps(json_str_for_copy)};
-                
                 function copyToClipboard() {{
-                    // Try modern clipboard API first
                     if (navigator.clipboard && navigator.clipboard.writeText) {{
-                        navigator.clipboard.writeText(jsonData).then(function() {{
-                            showCopyStatus();
-                        }}, function(err) {{
-                            // Fallback to textarea method
-                            fallbackCopy();
-                        }});
-                    }} else {{
-                        // Fallback for older browsers
-                        fallbackCopy();
-                    }}
+                        navigator.clipboard.writeText(jsonData).then(showCopyStatus, fallbackCopy);
+                    }} else {{ fallbackCopy(); }}
                 }}
-                
                 function fallbackCopy() {{
-                    const textarea = document.createElement('textarea');
-                    textarea.value = jsonData;
-                    textarea.style.position = 'fixed';
-                    textarea.style.opacity = '0';
-                    document.body.appendChild(textarea);
-                    textarea.select();
-                    
-                    try {{
-                        document.execCommand('copy');
-                        showCopyStatus();
-                    }} catch (err) {{
-                        console.error('Fallback copy failed:', err);
-                        alert('Copy failed. Please copy manually from the JSON display below.');
-                    }}
-                    
-                    document.body.removeChild(textarea);
+                    const t = document.createElement('textarea');
+                    t.value = jsonData; t.style.position='fixed'; t.style.opacity='0';
+                    document.body.appendChild(t); t.select();
+                    try {{ document.execCommand('copy'); showCopyStatus(); }} catch(e) {{}}
+                    document.body.removeChild(t);
                 }}
-                
                 function showCopyStatus() {{
-                    const status = document.getElementById('copyStatus');
-                    status.style.display = 'block';
-                    setTimeout(function() {{
-                        status.style.display = 'none';
-                    }}, 2000);
+                    const s = document.getElementById('copyStatus');
+                    s.style.display='block';
+                    setTimeout(()=>{{ s.style.display='none'; }}, 2000);
                 }}
-                </script>
-                """
-                
+                </script>"""
                 components.html(copy_button_html, height=80)
-            
             st.markdown("---")
-            
-            # Display JSON
             st.json(result)
-        
+
         with tab3:
-            # Download JSON
+            _sym = result.get("symbol", symbol_input)
+            _tf  = result.get("timeframe", timeframe)
             json_str = json.dumps(result, indent=2)
             st.download_button(
                 label="💾 Download JSON",
                 data=json_str,
-                file_name=f"drawings_{result['symbol']}_{timeframe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                file_name=f"drawings_{_sym}_{_tf}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json",
-                use_container_width=True
+                use_container_width=True,
             )
-            
             st.markdown("---")
             st.markdown("##### 📖 How to Use")
             st.info("""
             **Using the Generated JSON:**
-            
+
             1. **Download the JSON** file using the button above
-            2. **Import into TradingView** - Compatible with TradingView's drawing format
+            2. **Import into TradingView** — compatible with TradingView's drawing format
             3. **Use with Trading Bots** that accept drawing instructions
             4. **Integrate with your own tools** via the JSON format
-            
+
             **JSON Structure (TradingView Compatible):**
-            - `symbol`: Stock symbol analyzed
+            - `symbol` / `resolved_symbol`: Stock symbol analyzed
             - `total_drawings`: Number of drawing instructions
+            - `drawing_types_generated`: Which analysis types were included
+            - `parsed_intent`: LLM's understanding of your request + confidence
             - `drawings`: Array of drawing objects with:
-              - `id`: Unique 6-character identifier
               - `type`: Drawing tool type (LineToolRectangle, LineToolNote, etc.)
-              - `state`: Visual properties (colors, text, style, intervals)
-              - `points`: Price and timestamp coordinates with offset
-              - `zorder`: Layer ordering
-              - `linkKey`: Unique link identifier
-              - `ownerSource`: Source identifier
+              - `state`: Visual properties (colors, text, style)
+              - `points`: Price and timestamp coordinates
             """)
 
-elif view_option == "🔧 System Info":
+elif view_option == "⚙️ System Info":
     # System Info
     st.subheader("🔧 System Information")
     st.info("**Pydantic AI Agent**: Using Google Gemini with 4-key rotation")
@@ -5734,9 +5139,8 @@ elif view_option == "🔧 System Info":
     st.info("**Data Sources**: Yahoo Finance + Tavily web search (screener.in only)")
 
 # Footer
-st.markdown("---")
 st.markdown("""
-<div style="text-align: center; color: #94a3b8; padding: 1rem; font-size: 0.85rem;">
+<div style="text-align: center; color: #94a3b8; padding: 0.25rem 0; margin: 0; font-size: 0.8rem; border-top: 1px solid #333;">
     <strong>Stock Analysis</strong> | AI-Powered Investment Insights
 </div>
 """, unsafe_allow_html=True)
