@@ -909,7 +909,10 @@ WHAT TO DO:
 ❌ FORBIDDEN: DO NOT add "Here's the analysis..." or ANY introduction
 ❌ FORBIDDEN: DO NOT summarize or rewrite ANY part of the tool output
 ❌ FORBIDDEN: DO NOT skip any sections or details
+❌ FORBIDDEN: DO NOT use markdown table format (| Column | Column |) — use bullet points (•) with **bold** headers as the tool provides
+❌ FORBIDDEN: DO NOT generate analysis from your own knowledge — you MUST call the tools
 ✅ REQUIRED: Display the tool's return value EXACTLY as provided - be a PASSTHROUGH only
+✅ REQUIRED: ALWAYS call validate_and_get_stock first, then analyze_stock_request — never skip tools
 
 CRITICAL MULTIPLE CHOICE RULE:
 If the tool returns a list of options (e.g., "Multiple stocks found"), you MUST display that EXACT list.
@@ -1686,10 +1689,14 @@ def validate_and_get_stock(ctx: RunContext[ConversationState], stock_name: str) 
     # Mark as done for this turn immediately (before any async work)
     ctx.deps.validation_done_this_turn = True
     
-    # Reset analysis_complete flag when starting a new search
+    # Reset analysis state when starting a new search so a different stock can be analyzed
     if hasattr(ctx.deps, 'analysis_complete'):
         ctx.deps.analysis_complete = False
-        print("🔄 Reset analysis_complete flag for new search")
+        ctx.deps.company_data = None
+        ctx.deps.stock_symbol = None
+        ctx.deps.stock_name = None
+        ctx.deps.last_analysis_response = None
+        print("🔄 Reset analysis state for new search")
 
     # ── MERGED STOCK PRE-CHECK ──
     # Check if the user's query matches a known merged/delisted company

@@ -232,18 +232,18 @@ CRITICAL RULES:
 Return JSON:"""
 
             try:
-                # Use the model name string directly for OpenAI client
-                model_name = "openai/gpt-oss-20b"  # Use a reliable model for extraction
-                
+                # Try primary model first, fall back to default if it returns null
                 response = guarded_llm_call(
-                    model=model_name,
                     messages=[
                         {"role": "system", "content": "You are a financial data extraction expert. Extract data accurately and return valid JSON only."},
                         {"role": "user", "content": extraction_prompt}
                     ],
                 )
-                
-                response_text = safe_llm_content(response).strip()
+
+                response_text = (response.choices[0].message.content or "").strip()
+                if not response_text:
+                    print(f"⚠️ LLM returned empty response for Tavily extraction. Skipping.")
+                    return {'success': False, 'data': {}, 'updated_fields': []}
                 
                 # Parse JSON from response
                 if "```json" in response_text:
@@ -311,9 +311,7 @@ Return JSON:"""
                 return {'success': False, 'data': {}, 'updated_fields': []}
             
         except Exception as e:
-            print(f"❌ Error fetching fresh data from Tavily: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"⚠️ Tavily data extraction unavailable: {e}")
             return {'success': False, 'data': {}, 'updated_fields': []}
     
     @staticmethod
@@ -1472,6 +1470,65 @@ OUTPUT FORMAT (JSON only):
 
     
     @staticmethod
+    def _apply_screener_to_info(info: dict, screener_data: dict) -> list:
+        """
+        Apply screener.in data onto the yfinance info dict.
+        Screener.in is more accurate for Indian stocks — these values
+        override yfinance for ratios, margins, holdings, and valuations.
+
+        Returns list of updated field names.
+        """
+        updated = []
+
+        field_map = {
+            # screener_key: (info_key, needs_pct_to_decimal)
+            'market_cap':       ('marketCap', False),
+            'current_price':    ('currentPrice', False),
+            'pe_ratio':         ('trailingPE', False),
+            'debt_to_equity':   ('debtToEquity', False),
+            'total_debt':       ('totalDebt', False),
+            'total_assets':     ('totalAssets', False),
+            'operating_margin': ('operatingMargins', True),
+            'profit_margin':    ('profitMargins', True),
+            'dividend_yield':   ('dividendYield', True),
+            'promoter_holding': ('heldPercentInsiders', True),
+            'fii_holding':      ('heldPercentInstitutions', True),
+            'enterprise_value': ('enterpriseValue', False),
+            'ev_ebitda':        ('enterpriseToEbitda', False),
+            'roe':              ('returnOnEquity', True),
+            'roce':             ('returnOnAssets', True),
+            'peg_ratio':        ('pegRatio', False),
+            'free_cash_flow':   ('freeCashflow', False),
+            'high_52week':      ('fiftyTwoWeekHigh', False),
+            'low_52week':       ('fiftyTwoWeekLow', False),
+        }
+
+        for s_key, (i_key, pct) in field_map.items():
+            val = screener_data.get(s_key)
+            if val is not None:
+                info[i_key] = val / 100 if pct else val
+                updated.append(s_key)
+
+        # PB ratio (calculated from book_value + current_price)
+        bv = screener_data.get('book_value')
+        cp = screener_data.get('current_price')
+        if bv and cp and bv > 0:
+            info['priceToBook'] = cp / bv
+            updated.append('pb_ratio')
+
+        # DII (yfinance has no DII field — India-specific)
+        if screener_data.get('dii_holding') is not None:
+            info['_dii_holding'] = screener_data['dii_holding']
+            updated.append('dii_holding')
+
+        # Dividend payout ratio
+        if screener_data.get('dividend_payout') is not None:
+            info['payoutRatio'] = screener_data['dividend_payout'] / 100
+            updated.append('dividend_payout')
+
+        return updated
+
+    @staticmethod
     def get_realtime_data(stock_symbol: str) -> CompanyData:
         """
         Tool 1: Gather comprehensive real-time data using Tavily + yfinance
@@ -1516,110 +1573,199 @@ OUTPUT FORMAT (JSON only):
             return value
         
         try:
-            # Check rate limits before making request
+            is_indian_stock = stock_symbol.endswith('.NS') or stock_symbol.endswith('.BO')
+            import warnings
+            warnings.filterwarnings('ignore')
+
+            # ================================================================
+            # PHASE 1: PRIMARY SOURCES — screener.in + Tavily (Indian stocks)
+            # For Indian stocks: fetch screener.in + Tavily FIRST, yfinance LAST
+            # For non-Indian stocks: go straight to yfinance
+            # ================================================================
+            import pandas as _pd
+            info = {}
+            hist = _pd.DataFrame()
+            _screener_applied = False
+            _p1_screener_data = None
+            _p1_tavily_data = None
+
+            if is_indian_stock:
+                print(f"\n{'='*60}")
+                print(f"📊 PHASE 1: Fetching from PRIMARY sources (screener.in + Tavily)")
+                print(f"{'='*60}")
+
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                from utils.screener_scraper import get_screener_financial_data
+
+                def _phase1_screener():
+                    return get_screener_financial_data(stock_symbol)
+
+                def _phase1_tavily():
+                    """Search nseindia/bseindia/moneycontrol for revenue, profit, EPS, etc."""
+                    clean_sym = stock_symbol.replace('.NS', '').replace('.BO', '')
+                    query = f"{clean_sym} latest quarterly results revenue net profit EPS financial data 2025 2026"
+                    return StockTools._fetch_fresh_data_from_tavily(
+                        company_name=clean_sym,
+                        stock_symbol=stock_symbol,
+                        current_data={}
+                    )
+
+                _p1_screener_data = None
+                _p1_tavily_data = None
+
+                with ThreadPoolExecutor(max_workers=2) as p1_pool:
+                    fut_scr = p1_pool.submit(_phase1_screener)
+                    fut_tav = p1_pool.submit(_phase1_tavily)
+
+                    try:
+                        _p1_screener_data = fut_scr.result(timeout=30)
+                    except Exception as e:
+                        print(f"⚠️ Screener.in fetch failed: {e}")
+
+                    try:
+                        _p1_tavily_data = fut_tav.result(timeout=30)
+                    except Exception as e:
+                        print(f"⚠️ Tavily domain search failed: {e}")
+
+                # ── PHASE 2: Build base info dict from screener.in + Tavily ──
+                print(f"\n📊 PHASE 2: Building base data from screener.in + Tavily...")
+
+                # Apply screener.in data first (highest priority)
+                if _p1_screener_data and _p1_screener_data.get('success'):
+                    _scr_updated = StockTools._apply_screener_to_info(info, _p1_screener_data)
+                    _screener_applied = True
+                    info['symbol'] = stock_symbol
+                    # Use screener company name as base
+                    if _p1_screener_data.get('company_name'):
+                        info['longName'] = _p1_screener_data['company_name']
+                    print(f"   ✅ Screener.in: {len(_scr_updated)} fields applied: {', '.join(_scr_updated)}")
+                else:
+                    print(f"   ⚠️ Screener.in data not available")
+
+                # Apply Tavily data for fields still missing (secondary priority)
+                if _p1_tavily_data and _p1_tavily_data.get('success'):
+                    _tav_count = 0
+                    for field, value in _p1_tavily_data.get('data', {}).items():
+                        if value is not None and info.get(field) is None:
+                            info[field] = value
+                            _tav_count += 1
+                    print(f"   ✅ Tavily (nseindia/moneycontrol/bseindia): {_tav_count} gap fields filled")
+                else:
+                    print(f"   ⚠️ Tavily domain search data not available")
+
+                # ── PHASE 3: yfinance GAP-FILL (only for truly missing fields) ──
+                print(f"\n📊 PHASE 3: yfinance gap-fill (description, sector, price history, etc.)...")
+
+            # For non-Indian stocks OR yfinance gap-fill for Indian stocks:
+            # Fetch yfinance data
             should_wait, wait_time = should_wait_for_rate_limit('yfinance')
             if should_wait:
                 api_logger.logger.warning(f"⏳ YFinance rate limit reached, waiting {wait_time} seconds")
                 time.sleep(min(wait_time, 30))
-            
-            # Step 1: Get structured data from yfinance
+
             start_time = time.time()
             ticker = yf.Ticker(stock_symbol)
-            
-            # Suppress yfinance warnings and errors
-            import warnings
-            warnings.filterwarnings('ignore')
-            
-            info = ticker.info
-            
-            # Check if we got valid data - if info is empty or has no symbol, the stock doesn't exist
-            if not info or 'symbol' not in info or info.get('symbol') is None:
-                # Log the failed request
-                api_logger.log_request(
-                    api_name='yfinance',
-                    endpoint=f'/ticker/{stock_symbol}/info',
-                    method='GET',
-                    response_status=404,
-                    response_time=time.time() - start_time,
-                    error=f"Stock {stock_symbol} not found or delisted"
-                )
-                
-                # Try to find if stock was merged or renamed
-                company_name = stock_symbol.replace('.NS', '').replace('.BO', '')
-                search_results, answer = StockTools._search_with_tavily(
-                    f"{company_name} stock merged delisted renamed new ticker symbol India NSE BSE 2025 2026"
-                )
+            yf_info = ticker.info
 
-                # Try to extract a new ticker symbol from the Tavily answer and auto-retry
-                if answer:
-                    import re as _re
-                    # Look for patterns like "ticker changed to TMPV", "renamed to XYZ", "new symbol is ABC"
-                    new_ticker_patterns = [
-                        r'ticker[^.]*?changed to\s+([A-Z]{2,20})',
-                        r'renamed to\s+([A-Z]{2,20})',
-                        r'new ticker[^.]*?(?:is|symbol)\s+([A-Z]{2,20})',
-                        r'now trades? (?:as|under)\s+([A-Z]{2,20})',
-                        r'symbol changed to\s+([A-Z]{2,20})',
-                        r'listed (?:as|under)\s+([A-Z]{2,20})',
-                        r'new symbol\s+([A-Z]{2,20})',
-                    ]
+            if not yf_info or 'symbol' not in yf_info or yf_info.get('symbol') is None:
+                # For Indian stocks with screener data, don't fail — just skip yfinance
+                if is_indian_stock and _screener_applied:
+                    print(f"⚠️ yfinance returned no data for {stock_symbol}, using screener.in data only")
+                    yf_info = {}
+                else:
+                    # Non-Indian stock with no yfinance = fatal
+                    api_logger.log_request(
+                        api_name='yfinance',
+                        endpoint=f'/ticker/{stock_symbol}/info',
+                        method='GET',
+                        response_status=404,
+                        response_time=time.time() - start_time,
+                        error=f"Stock {stock_symbol} not found or delisted"
+                    )
 
-                    new_ticker = None
-                    for pattern in new_ticker_patterns:
-                        match = _re.search(pattern, answer, _re.IGNORECASE)
-                        if match:
-                            candidate = match.group(1).upper()
-                            # Skip if it's the same as the original
-                            if candidate != company_name.upper():
-                                new_ticker = candidate
-                                break
+                    company_name = stock_symbol.replace('.NS', '').replace('.BO', '')
+                    search_results, answer = StockTools._search_with_tavily(
+                        f"{company_name} stock merged delisted renamed new ticker symbol India NSE BSE 2025 2026"
+                    )
 
-                    if new_ticker:
-                        # Try the new ticker on yfinance
-                        for suffix in ['.NS', '.BO']:
-                            try_new = f"{new_ticker}{suffix}"
-                            print(f"🔄 Stock renamed/demerged. Trying new ticker: {try_new}")
-                            try:
-                                new_yf_ticker = yf.Ticker(try_new)
-                                new_info = new_yf_ticker.info
-                                if new_info and 'symbol' in new_info and new_info.get('symbol'):
-                                    print(f"✅ Found renamed stock: {try_new}")
-                                    # Recursively call with the correct new symbol
-                                    return StockTools.get_realtime_data(try_new)
-                            except Exception:
-                                continue
+                    if answer:
+                        import re as _re
+                        new_ticker_patterns = [
+                            r'ticker[^.]*?changed to\s+([A-Z]{2,20})',
+                            r'renamed to\s+([A-Z]{2,20})',
+                            r'new ticker[^.]*?(?:is|symbol)\s+([A-Z]{2,20})',
+                            r'now trades? (?:as|under)\s+([A-Z]{2,20})',
+                            r'symbol changed to\s+([A-Z]{2,20})',
+                            r'listed (?:as|under)\s+([A-Z]{2,20})',
+                            r'new symbol\s+([A-Z]{2,20})',
+                        ]
+                        new_ticker = None
+                        for pattern in new_ticker_patterns:
+                            match = _re.search(pattern, answer, _re.IGNORECASE)
+                            if match:
+                                candidate = match.group(1).upper()
+                                if candidate != company_name.upper():
+                                    new_ticker = candidate
+                                    break
+                        if new_ticker:
+                            for suffix in ['.NS', '.BO']:
+                                try_new = f"{new_ticker}{suffix}"
+                                print(f"🔄 Stock renamed/demerged. Trying new ticker: {try_new}")
+                                try:
+                                    new_yf_ticker = yf.Ticker(try_new)
+                                    new_info = new_yf_ticker.info
+                                    if new_info and 'symbol' in new_info and new_info.get('symbol'):
+                                        print(f"✅ Found renamed stock: {try_new}")
+                                        return StockTools.get_realtime_data(try_new)
+                                except Exception:
+                                    continue
 
-                error_msg = f"❌ **Stock Not Found: {stock_symbol}**\n\n"
-                error_msg += f"The ticker symbol **{stock_symbol}** is not available on Yahoo Finance. This could mean:\n\n"
-                error_msg += "• The stock has been **delisted**\n"
-                error_msg += "• The stock has been **merged** with another company\n"
-                error_msg += "• The ticker symbol is **incorrect**\n\n"
+                    error_msg = f"❌ **Stock Not Found: {stock_symbol}**\n\n"
+                    error_msg += f"The ticker symbol **{stock_symbol}** is not available. This could mean:\n\n"
+                    error_msg += "• The stock has been **delisted**\n"
+                    error_msg += "• The stock has been **merged** with another company\n"
+                    error_msg += "• The ticker symbol is **incorrect**\n\n"
+                    if answer:
+                        error_msg += f"**Latest Information:**\n{answer}\n\n"
+                    raise Exception(error_msg)
 
-                if answer:
-                    error_msg += f"**Latest Information:**\n{answer}\n\n"
-
-                error_msg += "**What you can do:**\n"
-                error_msg += "• Try searching for the company name instead of the ticker\n"
-                error_msg += "• Check if the company has been merged with another entity\n"
-                error_msg += "• Verify the correct ticker symbol from screener.in or moneycontrol.com\n"
-
-                raise Exception(error_msg)
-            
-            # Log the info request
             api_logger.log_request(
                 api_name='yfinance',
                 endpoint=f'/ticker/{stock_symbol}/info',
                 method='GET',
-                response_status=200 if info else 404,
+                response_status=200 if yf_info else 404,
                 response_time=time.time() - start_time
             )
-            
-            # Try to get history, but don't fail if it errors
+
+            # MERGE yfinance into info — only for keys that are STILL missing
+            # yfinance-only fields always get applied; shared fields only if screener didn't set them
+            _yf_only_keys = {
+                'longName', 'longBusinessSummary', 'sector', 'industry', 'exchange',
+                'fullTimeEmployees', 'website', 'city', 'country', 'founded',
+                'ebitda', 'totalCash', 'operatingCashflow', 'grossMargins',
+                'beta', 'averageVolume', 'volume',
+                'netIncomeToCommon', 'totalRevenue', 'trailingEps',
+                'totalLiabilities',
+                'companyOfficers', 'shortName',
+            }
+            for k, v in yf_info.items():
+                if v is None:
+                    continue
+                if k in _yf_only_keys:
+                    # Always use yfinance for these (no other source)
+                    info[k] = v
+                elif info.get(k) is None:
+                    # Only fill gaps — don't overwrite screener.in values
+                    info[k] = v
+
+            if is_indian_stock and _screener_applied:
+                _yf_gap_count = sum(1 for k in _yf_only_keys if info.get(k) is not None)
+                print(f"   ✅ yfinance gap-fill: {_yf_gap_count} fields (description, sector, history, etc.)")
+
+            # Fetch price history (always from yfinance — only source for daily prices)
             try:
                 hist_start_time = time.time()
-                hist = ticker.history(period="5y")  # Get 5 years for CAGR calculation
-                
-                # Log the history request
+                hist = ticker.history(period="5y")
                 api_logger.log_request(
                     api_name='yfinance',
                     endpoint=f'/ticker/{stock_symbol}/history/5y',
@@ -1761,46 +1907,14 @@ OUTPUT FORMAT (JSON only):
             if len(hist) >= 1260:  # 5 years
                 year_5_cagr = (((current_price / hist['Close'].iloc[0]) ** (1/5)) - 1) * 100
         
-        # Step 7: Build comprehensive Financial data
-        financials = FinancialData(
-            # Income Statement
-            revenue=info.get('totalRevenue'),
-            net_profit=info.get('netIncomeToCommon'),
-            ebitda=info.get('ebitda'),
-            eps=info.get('trailingEps'),
-            dividend_yield=info.get('dividendYield'),
-            payout_ratio=info.get('payoutRatio'),
-            
-            # Balance Sheet
-            total_assets=info.get('totalAssets'),
-            total_liabilities=info.get('totalLiabilities'),
-            debt_to_equity=info.get('debtToEquity'),
-            cash_balance=info.get('totalCash'),
-            total_debt=info.get('totalDebt'),
-            
-            # Cash Flow
-            operating_cash_flow=info.get('operatingCashflow'),
-            free_cash_flow=info.get('freeCashflow'),
-            
-            # Valuation
-            pe_ratio=info.get('trailingPE'),
-            pb_ratio=info.get('priceToBook'),
-            peg_ratio=info.get('pegRatio'),
-            enterprise_value=info.get('enterpriseValue'),
-            ev_ebitda=info.get('enterpriseToEbitda'),
-            
-            # Margins
-            profit_margin=info.get('profitMargins'),
-            operating_margin=info.get('operatingMargins'),
-            gross_margin=info.get('grossMargins')
-        )
-        
-        # ── THREADING: Launch competitor + screener + CEO in parallel ──
-        # These 3 tasks are independent and I/O-bound (network waits).
-        # Running them concurrently saves ~15-20s vs sequential execution.
+        # NOTE: FinancialData is built AFTER parallel tasks complete,
+        # so screener.in data can be merged into info dict first.
+
+        # ── THREADING: Launch competitor + CEO in parallel ──
+        # Screener.in already fetched in Phase 1 (reuse _p1_screener_data)
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        print(f"\n⚡ Launching parallel tasks: competitors + screener + CEO...")
+        print(f"\n⚡ Launching parallel tasks: competitors + CEO...")
 
         def _task_competitors():
             """Resolve competitors via LLM + yfinance."""
@@ -1809,39 +1923,23 @@ OUTPUT FORMAT (JSON only):
                 company_name, stock_symbol, info
             )
 
-        def _task_screener():
-            """Scrape screener.in financial data for Indian stocks."""
-            is_indian = stock_symbol.endswith('.NS') or stock_symbol.endswith('.BO')
-            if not is_indian:
-                return None
-            try:
-                from utils.screener_scraper import get_screener_financial_data
-                return get_screener_financial_data(stock_symbol)
-            except Exception as e:
-                print(f"⚠️ Screener thread error: {e}")
-                return None
-
         def _task_ceo():
             """Fetch CEO name via Tavily + LLM."""
             return StockTools._fetch_ceo_name(company_name, stock_symbol, info)
 
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="data") as pool:
             fut_competitors = pool.submit(_task_competitors)
-            fut_screener = pool.submit(_task_screener)
             fut_ceo = pool.submit(_task_ceo)
 
-        # Collect results (all threads are done after exiting the 'with' block)
+        # Collect results
         try:
             competitors_data = fut_competitors.result(timeout=120)
         except Exception as e:
             print(f"⚠️ Competitor thread failed: {e}")
             competitors_data = []
 
-        try:
-            _parallel_screener_data = fut_screener.result(timeout=30)
-        except Exception as e:
-            print(f"⚠️ Screener thread failed: {e}")
-            _parallel_screener_data = None
+        # Reuse screener data from Phase 1 (already fetched and applied)
+        _parallel_screener_data = _p1_screener_data if is_indian_stock else None
 
         try:
             _parallel_ceo_name = fut_ceo.result(timeout=60)
@@ -1849,9 +1947,43 @@ OUTPUT FORMAT (JSON only):
             print(f"⚠️ CEO thread failed: {e}")
             _parallel_ceo_name = 'N/A'
 
-        print(f"✅ Parallel tasks complete: {len(competitors_data)} competitors, "
-              f"screener={'OK' if _parallel_screener_data else 'N/A'}, CEO={_parallel_ceo_name[:30]}")
-        
+        print(f"✅ Parallel tasks complete: {len(competitors_data)} competitors, CEO={_parallel_ceo_name[:30]}")
+
+        # Apply CEO result from parallel fetch
+        if _parallel_ceo_name and _parallel_ceo_name != 'N/A':
+            snapshot.ceo = _parallel_ceo_name
+            print(f"✅ CEO: {snapshot.ceo} (from parallel fetch)")
+
+        # Step 7: Build comprehensive Financial data (uses MERGED info — screener.in wins)
+        financials = FinancialData(
+            # Income Statement
+            revenue=info.get('totalRevenue'),
+            net_profit=info.get('netIncomeToCommon'),
+            ebitda=info.get('ebitda'),
+            eps=info.get('trailingEps'),
+            dividend_yield=info.get('dividendYield'),
+            payout_ratio=info.get('payoutRatio'),
+            # Balance Sheet
+            total_assets=info.get('totalAssets'),
+            total_liabilities=info.get('totalLiabilities'),
+            debt_to_equity=info.get('debtToEquity'),
+            cash_balance=info.get('totalCash'),
+            total_debt=info.get('totalDebt'),
+            # Cash Flow
+            operating_cash_flow=info.get('operatingCashflow'),
+            free_cash_flow=info.get('freeCashflow'),
+            # Valuation
+            pe_ratio=info.get('trailingPE'),
+            pb_ratio=info.get('priceToBook'),
+            peg_ratio=info.get('pegRatio'),
+            enterprise_value=info.get('enterpriseValue'),
+            ev_ebitda=info.get('enterpriseToEbitda'),
+            # Margins
+            profit_margin=info.get('profitMargins'),
+            operating_margin=info.get('operatingMargins'),
+            gross_margin=info.get('grossMargins')
+        )
+
         # Calculate overall high and low from price history
         overall_high = None
         overall_low = None
@@ -1934,10 +2066,22 @@ OUTPUT FORMAT (JSON only):
         # Build lists first, filter None values, then create SWOTAnalysis
         sector = safe_get(info, 'sector', 'N/A', str)
         
+        # Helper to format currency in Indian format (Cr/L) for SWOT
+        def _fmt_inr(value):
+            if value is None or not isinstance(value, (int, float)):
+                return 'N/A'
+            abs_val = abs(value)
+            if abs_val >= 1e7:
+                return f"₹{value/1e7:.2f} Cr"
+            elif abs_val >= 1e5:
+                return f"₹{value/1e5:.2f} L"
+            else:
+                return f"₹{value:,.0f}"
+
         strengths_list = [
-            f"Strong market cap of ${info.get('marketCap', 0):,.0f}" if info.get('marketCap') else None,
+            f"Strong market cap of {_fmt_inr(info.get('marketCap', 0))}" if info.get('marketCap') else None,
             f"Healthy profit margin of {info.get('profitMargins', 0)*100:.2f}%" if info.get('profitMargins') and info.get('profitMargins') > 0.1 else None,
-            f"Positive free cash flow of ${info.get('freeCashflow', 0):,.0f}" if info.get('freeCashflow') and info.get('freeCashflow') > 0 else None,
+            f"Positive free cash flow of {_fmt_inr(info.get('freeCashflow', 0))}" if info.get('freeCashflow') and info.get('freeCashflow') > 0 else None,
             "Established market presence" if info.get('marketCap', 0) > 1e9 else None
         ]
         weaknesses_list = [
@@ -1970,49 +2114,91 @@ OUTPUT FORMAT (JSON only):
             threats=threats_filtered
         )
         
-        # Step 11: Enhanced News from Tavily search results (prioritize Tavily, filter empty items)
+        # Step 11: Fetch LATEST NEWS from dedicated news domains
+        print(f"\n📰 Fetching latest news for {company_name}...")
         news = []
-        
-        # First, add news from Tavily search results (higher quality, more relevant)
-        for result in all_search_results[:5]:
-            title = result.get('title', '').strip()
-            url = result.get('url', '').strip()
-            content = result.get('content', '').strip()[:200]
-            
-            # Only add if we have valid title and URL
-            if title and url and len(title) > 5:
-                # Avoid duplicates
-                if not any(n['title'] == title for n in news):
+        _seen_titles = set()
+
+        _NEWS_DOMAINS = [
+            "moneycontrol.com",
+            "economictimes.indiatimes.com",
+            "livemint.com",
+            "financialexpress.com",
+            "simplywall.st",
+            "reuters.com",
+            "investing.com",
+            "tipranks.com",
+            "morningstar.in",
+            "stockanalysis.com",
+            "in.tradingview.com",
+            "kotakneo.com",
+            "koyfin.com",
+            "forecaster.biz",
+        ]
+
+        # Dedicated news queries (NOT the financial data queries from Step 4)
+        _news_queries = [
+            f"{company_name} latest news analysis 2025 2026",
+            f"{stock_symbol.split('.')[0]} stock news today recent developments",
+        ]
+
+        for _nq in _news_queries:
+            try:
+                _n_results, _n_answer = StockTools._search_with_tavily(
+                    _nq, domain=_NEWS_DOMAINS
+                )
+                for result in _n_results:
+                    title = (result.get('title') or '').strip()
+                    url = (result.get('url') or '').strip()
+                    content = (result.get('content') or '').strip()[:300]
+
+                    if not title or len(title) < 10 or not url:
+                        continue
+                    # Deduplicate by title
+                    _title_key = title.lower()[:60]
+                    if _title_key in _seen_titles:
+                        continue
+                    _seen_titles.add(_title_key)
+
+                    # Extract publisher from URL domain
+                    try:
+                        publisher = url.split('/')[2].replace('www.', '')
+                    except Exception:
+                        publisher = 'Web'
+
                     news.append({
                         'title': title,
-                        'publisher': url.split('/')[2] if '/' in url else 'Web',
+                        'publisher': publisher,
                         'link': url,
-                        'summary': content if content else 'No summary available',
+                        'summary': content if content else '',
                         'source': 'tavily'
                     })
-        
-        # Then, add news from yfinance only if we have fewer than 3 news items and they're valid
+            except Exception as _nq_err:
+                print(f"⚠️ News query failed: {_nq_err}")
+
+        # Fallback: yfinance news if we got very few from Tavily
         if len(news) < 3:
             try:
-                news_data = ticker.news[:3] if hasattr(ticker, 'news') else []
-                for item in news_data:
-                    title = item.get('title', '').strip()
-                    publisher = item.get('publisher', '').strip()
-                    link = item.get('link', '').strip()
-                    
-                    # Only add if we have valid title, publisher, and link
-                    if title and publisher and link and len(title) > 5:
-                        # Avoid duplicates
-                        if not any(n['title'] == title for n in news):
+                _yf_news = ticker.news[:5] if hasattr(ticker, 'news') and ticker.news else []
+                for item in _yf_news:
+                    title = (item.get('title') or '').strip()
+                    publisher = (item.get('publisher') or '').strip()
+                    link = (item.get('link') or '').strip()
+                    if title and link and len(title) > 5:
+                        _title_key = title.lower()[:60]
+                        if _title_key not in _seen_titles:
+                            _seen_titles.add(_title_key)
                             news.append({
                                 'title': title,
-                                'publisher': publisher,
+                                'publisher': publisher or 'Yahoo Finance',
                                 'link': link,
+                                'summary': '',
                                 'source': 'yfinance'
                             })
             except Exception as e:
-                print(f"Warning: Could not fetch yfinance news: {e}")
-                pass
+                print(f"⚠️ yfinance news fallback failed: {e}")
+
+        print(f"📰 Collected {len(news)} news items from {len(_seen_titles)} unique sources")
         
         # Step 12: Extract announcements from web insights
         announcements = []
@@ -2032,38 +2218,17 @@ OUTPUT FORMAT (JSON only):
             announcements=announcements
         )
         
-        # Step 13.5 + 13.6: Apply parallel results (screener + CEO — already fetched above)
-        is_indian_stock = stock_symbol.endswith('.NS') or stock_symbol.endswith('.BO')
+        # Save news to database for API access
+        try:
+            from database_utility.database import StockDatabase as _NewsDB
+            _news_db = _NewsDB()
+            if _news_db.connect():
+                _news_db.create_news_table()
+                _news_db.save_news(stock_symbol, company_name, news[:8])
+                _news_db.disconnect()
+        except Exception as _news_err:
+            print(f"⚠️ Failed to save news to DB: {_news_err}")
 
-        if is_indian_stock and _parallel_screener_data and _parallel_screener_data.get('success'):
-            screener_data = _parallel_screener_data
-            print(f"✅ Applying screener.in data (from parallel fetch)...")
-            if screener_data.get('pe_ratio') is not None:
-                info['trailingPE'] = screener_data['pe_ratio']
-                print(f"   ✓ PE Ratio: {screener_data['pe_ratio']}")
-            if screener_data.get('book_value') and screener_data.get('current_price'):
-                pb = screener_data['current_price'] / screener_data['book_value'] if screener_data['book_value'] > 0 else None
-                if pb:
-                    info['priceToBook'] = pb
-                    print(f"   ✓ PB Ratio: {pb:.2f}")
-            if screener_data.get('debt_to_equity') is not None:
-                info['debtToEquity'] = screener_data['debt_to_equity']
-            if screener_data.get('promoter_holding') is not None:
-                info['heldPercentInsiders'] = screener_data['promoter_holding'] / 100
-                print(f"   ✓ Promoter Holding: {screener_data['promoter_holding']}%")
-            if screener_data.get('fii_holding') is not None:
-                info['heldPercentInstitutions'] = screener_data['fii_holding'] / 100
-                print(f"   ✓ FII Holding: {screener_data['fii_holding']}%")
-            # Store DII for later use (yfinance has no DII field)
-            if screener_data.get('dii_holding') is not None:
-                info['_dii_holding'] = screener_data['dii_holding']
-                print(f"   ✓ DII Holding: {screener_data['dii_holding']}%")
-
-        # Apply CEO result from parallel fetch
-        if _parallel_ceo_name and _parallel_ceo_name != 'N/A':
-            snapshot.ceo = _parallel_ceo_name
-            print(f"✅ CEO: {snapshot.ceo} (from parallel fetch)")
-        
         # Step 13.7: Validate data quality and add warnings
         print(f"\n🔍 Validating data quality for {company_name}...")
         try:
@@ -2104,97 +2269,23 @@ OUTPUT FORMAT (JSON only):
                 if has_critical_issues:
                     print(f"   • Critical data inconsistencies found")
                 
-                print(f"\n🔄 Attempting to fetch fresh data from screener.in...")
-                
+                print(f"\n🔄 Attempting to fetch fresh data...")
+
                 try:
-                    # Try screener.in first (most accurate for Indian stocks)
-                    from utils.screener_scraper import get_screener_financial_data
-                    
-                    screener_data = get_screener_financial_data(stock_symbol)
-                    
-                    if screener_data and screener_data.get('success'):
+                    if _screener_applied:
+                        # Screener.in data was already applied early — skip re-fetch
+                        print(f"   ℹ️ Screener.in data already applied. Skipping re-fetch.")
+                        # Just re-validate with current info
+                        screener_data = _parallel_screener_data  # reuse
+                    else:
+                        # Try screener.in (most accurate for Indian stocks)
+                        from utils.screener_scraper import get_screener_financial_data
+                        screener_data = get_screener_financial_data(stock_symbol)
+
+                    if screener_data and screener_data.get('success') and not _screener_applied:
                         print(f"✅ Fresh data retrieved from screener.in!")
-                        
-                        # Map screener.in data to yfinance field names
-                        updated_fields = []
-                        
-                        if screener_data.get('market_cap') is not None:
-                            info['marketCap'] = screener_data['market_cap']
-                            updated_fields.append('market_cap')
-                        
-                        if screener_data.get('current_price') is not None:
-                            info['currentPrice'] = screener_data['current_price']
-                            updated_fields.append('current_price')
-                        
-                        if screener_data.get('pe_ratio') is not None:
-                            info['trailingPE'] = screener_data['pe_ratio']
-                            updated_fields.append('pe_ratio')
-                        
-                        if screener_data.get('book_value') is not None:
-                            # Calculate PB ratio if we have market cap and book value
-                            if screener_data.get('market_cap'):
-                                # PB = Market Cap / (Book Value * Shares Outstanding)
-                                # Or use direct calculation if available
-                                info['priceToBook'] = screener_data.get('current_price', 0) / screener_data['book_value'] if screener_data['book_value'] > 0 else None
-                                if info.get('priceToBook'):
-                                    updated_fields.append('pb_ratio')
-                        
-                        if screener_data.get('debt_to_equity') is not None:
-                            info['debtToEquity'] = screener_data['debt_to_equity']
-                            updated_fields.append('debt_to_equity')
-                        
-                        if screener_data.get('total_debt') is not None:
-                            info['totalDebt'] = screener_data['total_debt']
-                            updated_fields.append('total_debt')
-                        
-                        if screener_data.get('total_assets') is not None:
-                            info['totalAssets'] = screener_data['total_assets']
-                            updated_fields.append('total_assets')
-                        
-                        if screener_data.get('operating_margin') is not None:
-                            info['operatingMargins'] = screener_data['operating_margin'] / 100  # Convert % to decimal
-                            updated_fields.append('operating_margin')
-                        
-                        if screener_data.get('profit_margin') is not None:
-                            info['profitMargins'] = screener_data['profit_margin'] / 100  # Convert % to decimal
-                            updated_fields.append('profit_margin')
-                        
-                        if screener_data.get('dividend_yield') is not None:
-                            info['dividendYield'] = screener_data['dividend_yield'] / 100  # Convert % to decimal
-                            updated_fields.append('dividend_yield')
-                        
-                        if screener_data.get('promoter_holding') is not None:
-                            info['heldPercentInsiders'] = screener_data['promoter_holding'] / 100  # Convert % to decimal
-                            updated_fields.append('promoter_holding')
-                        
-                        if screener_data.get('fii_holding') is not None:
-                            info['heldPercentInstitutions'] = screener_data['fii_holding'] / 100  # Convert % to decimal
-                            updated_fields.append('fii_holding')
-                        
-                        if screener_data.get('high_52week') is not None:
-                            info['fiftyTwoWeekHigh'] = screener_data['high_52week']
-                            updated_fields.append('52w_high')
-                        
-                        if screener_data.get('low_52week') is not None:
-                            info['fiftyTwoWeekLow'] = screener_data['low_52week']
-                            updated_fields.append('52w_low')
-                        
-                        if screener_data.get('enterprise_value') is not None:
-                            info['enterpriseValue'] = screener_data['enterprise_value']
-                            updated_fields.append('enterprise_value')
-                        
-                        if screener_data.get('ev_ebitda') is not None:
-                            info['enterpriseToEbitda'] = screener_data['ev_ebitda']
-                            updated_fields.append('ev_ebitda')
-                        
-                        if screener_data.get('roe') is not None:
-                            info['returnOnEquity'] = screener_data['roe'] / 100  # Convert % to decimal
-                            updated_fields.append('roe')
-                        
-                        if screener_data.get('roce') is not None:
-                            info['returnOnAssets'] = screener_data['roce'] / 100  # Convert % to decimal (using as proxy)
-                            updated_fields.append('roce')
-                        
+                        updated_fields = StockTools._apply_screener_to_info(info, screener_data)
+                        _screener_applied = True
                         print(f"   • Updated {len(updated_fields)} fields from screener.in")
                         for field in updated_fields:
                             print(f"     - {field}")

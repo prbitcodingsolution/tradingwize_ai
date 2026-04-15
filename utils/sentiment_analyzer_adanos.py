@@ -308,233 +308,224 @@ BE OBJECTIVE. Return ONLY valid JSON:
         return self._get_default_sentiment()
     
     def analyze_yahoo_finance_sentiment(self, stock_symbol: str, stock_name: str) -> Dict:
-        """Analyze sentiment from Yahoo Finance with yfinance fallback"""
-        print(f"📊 Analyzing Yahoo Finance sentiment for {stock_symbol}...")
-        
-        # Try yfinance FIRST for most reliable data
-        print(f"   🔄 Fetching data from yfinance (direct Yahoo Finance API)...")
+        """
+        Analyze Yahoo Finance sentiment using FinBERT on Yahoo-sourced text.
+
+        Pipeline (unified with News / Twitter / Reddit):
+          1. Collect textual content about the stock from Yahoo Finance:
+             - yfinance Ticker.news (recent Yahoo Finance news items)
+             - Tavily search restricted to finance.yahoo.com (for
+               augmentation when yfinance returns few items or for stocks
+               that lack yfinance news coverage)
+          2. Score the collected texts with FinBERT — same engine as the
+             other three sources. The FinBERT score IS the Yahoo score.
+          3. Fetch analyst recommendation counts + target price from
+             yfinance as SUPPLEMENTARY METADATA for display only. They do
+             NOT influence the score, but they are surfaced in
+             `key_insights` / `buy_recommendations` / etc. so the UI still
+             shows analyst context.
+        """
+        print(f"📊 Analyzing Yahoo Finance sentiment for {stock_symbol} (FinBERT)...")
+
+        # --- Metadata containers (for UI display only, not used for scoring) ---
+        buy_count = 0
+        hold_count = 0
+        sell_count = 0
+        target_price = None
+        current_price = None
+
+        # --- Text collection for FinBERT ---
+        texts: List[str] = []
+        seen_texts: set = set()  # dedup across all sources
+
+        def _add_text(combined: str) -> None:
+            """Append a text if non-empty, not a duplicate, and long enough to matter."""
+            if not combined:
+                return
+            combined = combined.strip(". ").strip()
+            if len(combined) < 20:
+                return
+            key = combined[:120].lower()
+            if key in seen_texts:
+                return
+            seen_texts.add(key)
+            texts.append(combined)
+
+        # Relevance filter for yfinance news: the article must actually
+        # mention the stock. Without this, market-wide news items that
+        # yfinance happens to attach to the ticker pollute the pool and
+        # drag the score toward macro sentiment rather than the stock.
+        base_ticker = stock_symbol.split('.')[0].lower()
+        name_tokens = [
+            w.lower() for w in stock_name.split()
+            if len(w) > 3 and w.lower() not in {
+                "limited", "ltd", "ltd.", "inc", "inc.", "corp",
+                "company", "co", "co.", "group", "holdings", "plc",
+                "the", "and",
+            }
+        ]
+
+        def _is_relevant(text: str) -> bool:
+            """True if `text` mentions the ticker or a meaningful name token."""
+            if not text:
+                return False
+            lowered = text.lower()
+            if base_ticker and base_ticker in lowered:
+                return True
+            return any(tok in lowered for tok in name_tokens)
+
+        # Step 1: yfinance — fetch recent Yahoo Finance news + analyst metadata
         try:
             import yfinance as yf
-            
+
             ticker = yf.Ticker(stock_symbol)
-            info = ticker.info
-            
-            # Get analyst recommendations
+            info = ticker.info or {}
+            current_price = info.get('currentPrice')
+            target_price = info.get('targetMeanPrice')
+
+            # Analyst recommendation counts (DISPLAY METADATA ONLY)
             try:
                 recommendations = ticker.recommendations
                 if recommendations is not None and not recommendations.empty:
                     latest = recommendations.iloc[-1]
-                    
                     buy_count = int(latest.get('strongBuy', 0) + latest.get('buy', 0))
                     hold_count = int(latest.get('hold', 0))
                     sell_count = int(latest.get('sell', 0) + latest.get('strongSell', 0))
-                    total = buy_count + hold_count + sell_count
-                    
-                    if total > 0:
-                        # Calculate sentiment score based on recommendations (0-100 scale)
-                        # Buy = +1, Hold = 0, Sell = -1
-                        # Convert from -1 to +1 range to 0-100 scale
-                        raw_score = (buy_count - sell_count) / total  # -1 to +1
-                        sentiment_score = (raw_score + 1) * 50  # Convert to 0-100
-                        
-                        # Determine rating
-                        if buy_count > hold_count and buy_count > sell_count:
-                            rating = "Buy"
-                        elif sell_count > buy_count and sell_count > hold_count:
-                            rating = "Sell"
-                        else:
-                            rating = "Hold"
-                        
-                        target_price = info.get('targetMeanPrice')
-                        current_price = info.get('currentPrice')
-                        
-                        result = {
-                            'sentiment_score': round(sentiment_score, 1),
-                            'analyst_rating': rating,
-                            'buy_recommendations': buy_count,
-                            'hold_recommendations': hold_count,
-                            'sell_recommendations': sell_count,
-                            'average_price_target': target_price,
-                            'institutional_sentiment': 'Positive' if sentiment_score > 20 else 'Negative' if sentiment_score < -20 else 'Neutral',
-                            'key_insights': [
-                                f"{total} analysts covering {stock_name}",
-                                f"Consensus: {rating} ({buy_count} buy, {hold_count} hold, {sell_count} sell)",
-                                f"Target price: ₹{target_price:.2f}" if target_price else "No target price available"
-                            ]
-                        }
-                        
-                        print(f"   ✅ Yahoo Finance sentiment (yfinance): {result['sentiment_score']}/100 ({result['analyst_rating']})")
-                        return result
-                    else:
-                        print(f"   ⚠️ No analyst recommendations available (total = 0)")
-                else:
-                    print(f"   ⚠️ No analyst recommendations data for {stock_symbol}")
-                    
-                # If no analyst data, try to infer sentiment from other metrics
-                print(f"   🔄 Attempting to infer sentiment from other Yahoo Finance metrics...")
-                
-                # Get institutional holdings, insider transactions, etc.
-                current_price = info.get('currentPrice')
-                fifty_two_week_high = info.get('fiftyTwoWeekHigh')
-                fifty_two_week_low = info.get('fiftyTwoWeekLow')
-                recommendation_mean = info.get('recommendationMean')  # 1=Strong Buy, 5=Strong Sell
-                
-                # Calculate price position (where current price is relative to 52-week range)
-                if current_price and fifty_two_week_high and fifty_two_week_low:
-                    price_range = fifty_two_week_high - fifty_two_week_low
-                    if price_range > 0:
-                        price_position = ((current_price - fifty_two_week_low) / price_range) * 100
-                        
-                        # Convert price position to sentiment score (0-100 scale)
-                        # Use a more balanced approach - middle range is neutral (50)
-                        # Near highs = bullish, near lows = potential value opportunity (neutral to slightly bearish)
-                        if price_position >= 75:
-                            base_sentiment = 75  # Near 52-week high = bullish
-                        elif price_position >= 60:
-                            base_sentiment = 65
-                        elif price_position >= 40:
-                            base_sentiment = 55  # Middle range = neutral to slightly positive
-                        elif price_position >= 25:
-                            base_sentiment = 50  # Below middle = neutral
-                        else:
-                            base_sentiment = 45  # Near 52-week low = slightly bearish (but could be value opportunity)
-                        
-                        # Adjust based on recommendation mean if available
-                        if recommendation_mean:
-                            # recommendationMean: 1=Strong Buy, 2=Buy, 3=Hold, 4=Sell, 5=Strong Sell
-                            # Convert to 0-100 scale: 1→100, 2→75, 3→50, 4→25, 5→0
-                            rec_score = (5 - recommendation_mean) * 25
-                            sentiment_score = (base_sentiment + rec_score) / 2
-                        else:
-                            sentiment_score = base_sentiment
-                        
-                        # Determine rating based on sentiment score (0-100 scale)
-                        if sentiment_score >= 65:
-                            rating = "Buy"
-                        elif sentiment_score <= 35:
-                            rating = "Sell"
-                        else:
-                            rating = "Hold"
-                        
-                        result = {
-                            'sentiment_score': round(sentiment_score, 1),
-                            'analyst_rating': rating,
-                            'buy_recommendations': 0,
-                            'hold_recommendations': 0,
-                            'sell_recommendations': 0,
-                            'average_price_target': None,
-                            'institutional_sentiment': 'Positive' if sentiment_score > 20 else 'Negative' if sentiment_score < -20 else 'Neutral',
-                            'key_insights': [
-                                f"Limited analyst coverage for {stock_name}",
-                                f"Current price: ₹{current_price:.2f}" if current_price else "Price data unavailable",
-                                f"52-week range: ₹{fifty_two_week_low:.2f} - ₹{fifty_two_week_high:.2f}" if fifty_two_week_low and fifty_two_week_high else "Range data unavailable",
-                                f"Price at {price_position:.1f}% of 52-week range" + (" (near lows - potential value opportunity)" if price_position < 30 else " (near highs)" if price_position > 70 else "")
-                            ],
-                            'data_source': 'price_metrics'
-                        }
-                        
-                        print(f"   ✅ Yahoo Finance sentiment (price metrics): {result['sentiment_score']}/100 ({result['analyst_rating']})")
-                        return result
-                        
+                    print(f"   ✅ Analyst counts (metadata only): "
+                          f"buy={buy_count}, hold={hold_count}, sell={sell_count}")
             except Exception as e:
-                print(f"   ⚠️ Could not fetch recommendations from yfinance: {e}")
-        
-        except ImportError:
-            print(f"   ⚠️ yfinance not installed, trying Tavily...")
-        except Exception as e:
-            print(f"   ⚠️ Error using yfinance: {e}, trying Tavily...")
-        
-        # Fallback to Tavily search + FinBERT scoring
-        print(f"   🔄 Trying Tavily search as fallback...")
-        query = f"{stock_name} {stock_symbol} site:finance.yahoo.com analyst rating recommendation"
-        results, answer = self._search_tavily(query, domains=["finance.yahoo.com"], max_results=5)
+                print(f"   ⚠️ Could not fetch analyst recommendations: {e}")
 
-        if results or answer:
-            # Collect text snippets for FinBERT
-            snippets = []
-            if answer:
-                snippets.append(answer)
-            for r in results:
-                title = r.get('title', '')
-                content = r.get('content', '')
-                if title or content:
-                    snippets.append(f"{title} {content}")
-
-            content = answer + "\n\n" + "\n\n".join([
-                f"{r.get('title', '')}\n{r.get('content', '')}"
-                for r in results
-            ])
-
-            # --- FinBERT for scoring ---
-            yahoo_finbert_score = 50.0
-            if USE_FINBERT and snippets:
-                try:
-                    from .finbert_sentiment import FinBERTSentimentAnalyzer
-                    finbert = FinBERTSentimentAnalyzer.get_instance()
-                    fb = finbert.analyze_texts(snippets)
-                    yahoo_finbert_score = fb['score']
-                    print(f"   ✅ Yahoo Finance FinBERT Score: {yahoo_finbert_score:.1f}/100")
-                except Exception as e:
-                    print(f"   ⚠️ FinBERT for Yahoo Tavily failed: {e}")
-
-            # --- LLM for structured fields only (analyst counts, price target, insights) ---
-            struct_prompt = f"""From this Yahoo Finance content about {stock_name} ({stock_symbol}), extract ONLY:
-- analyst_rating (Buy/Hold/Sell)
-- buy_recommendations (integer)
-- hold_recommendations (integer)
-- sell_recommendations (integer)
-- average_price_target (number or null)
-- institutional_sentiment (Positive/Neutral/Negative)
-- key_insights (list of 2-3 strings)
-
-Content:
-{content[:3000]}
-
-Return ONLY valid JSON:
-{{
-  "analyst_rating": "<Buy/Hold/Sell>",
-  "buy_recommendations": <number>,
-  "hold_recommendations": <number>,
-  "sell_recommendations": <number>,
-  "average_price_target": <number or null>,
-  "institutional_sentiment": "<Positive/Neutral/Negative>",
-  "key_insights": ["insight1", "insight2"]
-}}"""
-
+            # Yahoo Finance news items — this is what FinBERT will score.
+            # yfinance news schema has changed across versions; handle both
+            # the legacy flat shape and the newer nested {content: {...}} shape.
             try:
-                response = self.client.chat.completions.create(
-                    model="openai/gpt-oss-120b",
-                    messages=[
-                        {"role": "system", "content": "You are a financial analyst. Extract structured fields and return ONLY valid JSON."},
-                        {"role": "user", "content": struct_prompt},
-                    ],
-                    temperature=0.1,
-                    max_tokens=500,
-                )
-                result_text = response.choices[0].message.content.strip()
-                if "```json" in result_text:
-                    result_text = result_text.split("```json")[1].split("```")[0].strip()
-                elif "```" in result_text:
-                    result_text = result_text.split("```")[1].split("```")[0].strip()
-                struct = json.loads(result_text)
-                result = {
-                    'sentiment_score': round(yahoo_finbert_score, 1),
-                    'analyst_rating': struct.get('analyst_rating', 'Hold'),
-                    'buy_recommendations': struct.get('buy_recommendations', 0),
-                    'hold_recommendations': struct.get('hold_recommendations', 0),
-                    'sell_recommendations': struct.get('sell_recommendations', 0),
-                    'average_price_target': struct.get('average_price_target'),
-                    'institutional_sentiment': struct.get('institutional_sentiment', 'Neutral'),
-                    'key_insights': struct.get('key_insights', []),
-                    'data_source': 'tavily_finbert',
-                }
-                print(f"   ✅ Yahoo Finance sentiment (Tavily+FinBERT): {result['sentiment_score']}/100 ({result['analyst_rating']})")
-                return result
+                raw_news = ticker.news or []
+                yfin_added = 0
+                yfin_filtered = 0
+                for item in raw_news[:25]:
+                    title = item.get('title', '') or ''
+                    summary = item.get('summary', '') or ''
+                    if not title or not summary:
+                        content = item.get('content') if isinstance(item.get('content'), dict) else {}
+                        title = title or (content.get('title', '') or '')
+                        summary = summary or (content.get('summary', '') or content.get('description', '') or '')
+                    combined = f"{title}. {summary}"
+                    # Drop items that don't actually mention this stock —
+                    # yfinance sometimes returns market-wide news attached
+                    # to the ticker.
+                    if not _is_relevant(combined):
+                        yfin_filtered += 1
+                        continue
+                    before = len(texts)
+                    _add_text(combined)
+                    if len(texts) > before:
+                        yfin_added += 1
+                print(f"   ✅ yfinance news: {yfin_added} kept, "
+                      f"{yfin_filtered} filtered as off-topic")
             except Exception as e:
-                print(f"   ⚠️ Error extracting Yahoo Finance structured fields: {e}")
-        
-        print(f"   ⚠️ Returning default Yahoo Finance sentiment")
-        return self._get_default_yahoo_sentiment()
+                print(f"   ⚠️ Could not fetch yfinance news: {e}")
+
+        except ImportError:
+            print(f"   ⚠️ yfinance not installed")
+        except Exception as e:
+            print(f"   ⚠️ yfinance error: {e}")
+
+        # Step 2: Tavily augmentation — ALWAYS runs, across multiple
+        # Yahoo-related domains, using the SAME query framing the News
+        # path uses. This is critical for agreement with the News score:
+        #   - identical query shape → similar article tone
+        #   - larger pool (aim for 15-25 texts) → lower variance
+        #   - multi-domain coverage → works for Indian stocks where
+        #     finance.yahoo.com alone is thin
+        print(f"   🔄 Running Tavily augmentation (multi-domain, neutral query)...")
+        tavily_query = f"{stock_name} {stock_symbol} stock news latest updates"
+        for domain in ("finance.yahoo.com", "news.yahoo.com"):
+            try:
+                results, answer = self._search_tavily(
+                    tavily_query,
+                    domains=[domain],
+                    max_results=8,
+                )
+                # Only use the answer for the first successful domain so
+                # we don't double-count the same summary across domains.
+                if answer and domain == "finance.yahoo.com":
+                    _add_text(answer)
+                for r in results:
+                    t = r.get('title', '') or ''
+                    c = r.get('content', '') or ''
+                    combined = f"{t}. {c}"
+                    _add_text(combined)
+            except Exception as e:
+                print(f"   ⚠️ Tavily {domain} failed: {e}")
+        print(f"   ✅ After Tavily augmentation: {len(texts)} unique texts")
+
+        # Step 3: FinBERT scoring — the ONLY scoring path
+        if not texts:
+            print(f"   ⚠️ No Yahoo Finance text available — returning default neutral")
+            return self._get_default_yahoo_sentiment()
+
+        if not USE_FINBERT:
+            print(f"   ⚠️ FINBERT_ENABLED is false — returning default neutral")
+            return self._get_default_yahoo_sentiment()
+
+        try:
+            from .finbert_sentiment import FinBERTSentimentAnalyzer
+            finbert = FinBERTSentimentAnalyzer.get_instance()
+            fb_result = finbert.analyze_texts(texts)
+            yahoo_score = fb_result['score']
+            breakdown = fb_result.get('breakdown', {})
+            print(f"   ✅ Yahoo FinBERT score: {yahoo_score:.1f}/100  "
+                  f"(positive={breakdown.get('positive', 0)}, "
+                  f"negative={breakdown.get('negative', 0)}, "
+                  f"neutral={breakdown.get('neutral', 0)})")
+        except Exception as e:
+            print(f"   ❌ FinBERT Yahoo scoring failed: {e}")
+            return self._get_default_yahoo_sentiment()
+
+        # Step 4: derive rating label + institutional sentiment from the
+        # FinBERT score. Same threshold band used elsewhere: ≥60 Buy /
+        # ≤40 Sell / otherwise Hold.
+        if yahoo_score >= 60:
+            analyst_rating = "Buy"
+            institutional = "Positive"
+        elif yahoo_score <= 40:
+            analyst_rating = "Sell"
+            institutional = "Negative"
+        else:
+            analyst_rating = "Hold"
+            institutional = "Neutral"
+
+        # Step 5: assemble key_insights — analyst metadata surfaces here
+        # for display but did NOT affect the score.
+        key_insights: List[str] = []
+        total_analysts = buy_count + hold_count + sell_count
+        if total_analysts > 0:
+            key_insights.append(
+                f"{total_analysts} analysts covering {stock_name}: "
+                f"{buy_count} buy, {hold_count} hold, {sell_count} sell"
+            )
+        if target_price:
+            key_insights.append(f"Average price target: ₹{target_price:.2f}")
+        if current_price:
+            key_insights.append(f"Current price: ₹{current_price:.2f}")
+        key_insights.append(
+            f"FinBERT sentiment over {len(texts)} Yahoo Finance news items: {analyst_rating}"
+        )
+
+        return {
+            'sentiment_score': round(yahoo_score, 1),
+            'analyst_rating': analyst_rating,
+            'buy_recommendations': buy_count,
+            'hold_recommendations': hold_count,
+            'sell_recommendations': sell_count,
+            'average_price_target': target_price,
+            'institutional_sentiment': institutional,
+            'key_insights': key_insights,
+            'data_source': 'yfinance_news_finbert',
+            'news_count': len(texts),
+            'finbert_result': fb_result,
+        }
     
     def analyze_twitter_sentiment_rapidapi(self, stock_symbol: str, stock_name: str) -> Dict:
         """

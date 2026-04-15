@@ -8,28 +8,39 @@
         "sector": "Consumer Cyclical",
         "industry": "Apparel Manufacturing",
         "headquarters": "Ludhiana, India",
-        "founded_year": 1994,
-        "ceo": "Nitin Bhandari",
+        "founded_year": "1993",
+        "ceo": "Mr. Nitin  Bhandari",
         "employees": 428,
         "website": "https://www.bhandariexport.com"
     },
     "business_overview": {
         "description": "Bhandari Hosiery Exports Limited operates as a textile and garments manufacturing company in India and internationally. The company offers knitted fabrics kora and dyed; and knitted hosiery garments, such as bermudas, track suits, pajamas, lowers, and ladies knitted tops with embroidery and prints, etc. It also manufactures, processes, and trades dyed and non-dyed fabrics. In addition, the company provides natural and synthetic circular knitted fabrics; open and tubular width fabrics; and specialised finishes comprising teflon, stain resistance, viscose, and lycra. Further, it offers tees and leggings for women; t-shirts, sweatshirts, pullovers, and polos for men; and t-shirts, sweatshirts, pullovers, polos, and joggers for kids. The company was incorporated in 1993 and is based in Ludhiana, India.",
         "main_products": [
-            "hosiery"
+            "Knitted Fabrics",
+            "Cotton Hosiery Garments",
+            "Fashion Apparel (T\u2011shirts, Pullovers, Sweatshirts)",
+            "Polo Shirts & Tracksuits",
+            "Ladies Knitted Tops with Embroidery"
         ],
         "revenue_sources": [
-            "garment exports"
+            "Domestic Textile Sales",
+            "International Garment Exports",
+            "Trading of Dyed and Non\u2011Dyed Fabrics",
+            "OEM Manufacturing for Overseas Brands"
         ],
         "geographic_presence": "India",
-        "growth_segments": []
+        "growth_segments": [
+            "Export of Cotton\u2011Knitted Garments",
+            "Capacity Expansion for Knitted Apparel",
+            "High\u2011Fashion Cotton Knitwear Market"
+        ]
     },
     "financials": {
         "revenue": 2796915968.0,
         "net_profit": 84804000.0,
         "ebitda": 292714752.0,
-        "eps": 0.37,
-        "dividend_yield": 0.0069,
+        "eps": 0.31,
+        "dividend_yield": 0.006,
         "payout_ratio": 0.0558,
         "total_assets": 185799999.99999997,
         "total_liabilities": 283.0,
@@ -38,34 +49,31 @@
         "total_debt": 30600000.0,
         "operating_cash_flow": null,
         "free_cash_flow": null,
-        "pe_ratio": 285.0,
-        "pb_ratio": 0.44512665,
+        "pe_ratio": 327.0,
+        "pb_ratio": 0.51266307,
         "peg_ratio": null,
-        "enterprise_value": 1705287936.0,
-        "ev_ebitda": 5.826,
+        "enterprise_value": 1794106368.0,
+        "ev_ebitda": 6.129,
         "profit_margin": 0.020922491678554443,
         "operating_margin": -0.0033,
         "gross_margin": 0.28424
     },
     "market_data": {
-        "current_price": 2.9,
-        "week_52_high": 6.63,
+        "current_price": 3.34,
+        "week_52_high": 5.82,
         "week_52_low": 2.0,
         "overall_high": 8.161809921264648,
         "overall_low": 2.0299999713897705,
-        "percentage_change_from_high": -64.4686653086053,
+        "percentage_change_from_high": -59.07770418301439,
         "max_drop_after_high": -75.12806606656152,
-        "market_cap": 1250000000.0,
-        "volume": 2086502,
-        "avg_volume": 553289,
-        "beta": -0.174,
+        "market_cap": 1440000000.0,
+        "volume": 704352,
+        "avg_volume": 590182,
+        "beta": 0.109,
         "promoter_holding": 41.83,
-        "fii_holding": 0.00029999999,
-        "dii_holding": null,
+        "fii_holding": 0.0,
+        "dii_holding": 0.0,
         "price_history": {
-            "2024-10-14": 6.756663799285889,
-            "2024-10-15": 6.776595115661621,
-            "2024-10-16": 6.9759063720703125,
             "2024-10-17": 6.806491374969482,
             "2024-10-18": 6.66697359085083,
             "2024-10-21": 6.6869049072265625,
@@ -427,39 +435,68 @@
             "2026-03-27": 2.25,
             "2026-03-30": 2.0299999713897705,
             "2026-04-01": 2.430000066757202,
-            "2026-04-02": 2.9000000953674316
+            "2026-04-02": 2.9000000953674316,
+            "2026-04-06": 3.1700000762939453,
+            "2026-04-07": 3.2699999809265137,
+            "2026-04-08": 3.3399999141693115
         },
-        "day_change": 19.341564432030545,
-        "week_change": 18.367348527570677,
-        "month_change": -18.09658429223015,
-        "month_6_change": -48.676966309913354,
-        "year_change": -38.4774617321507,
-        "year_5_cagr": 9.0,
+        "day_change": 2.1406707538562197,
+        "week_change": 48.44444062974718,
+        "month_change": -4.251359323507205,
+        "month_6_change": -41.20112683840719,
+        "year_change": -30.176340318602602,
+        "year_5_cagr": null,
         "sector": "Consumer Cyclical",
         "sector_performance": "consumer-cyclical",
         "competitors": [
             {
                 "name": "Bhandari Hosiery Exports Limited",
                 "symbol": "BHANDARI.NS",
-                "market_cap": 977396992,
-                "pe_ratio": 7.837838,
-                "pb_ratio": 0.44512665,
+                "market_cap": 1440000000.0,
+                "pe_ratio": 327.0,
+                "pb_ratio": 0.51266307,
                 "revenue": 2796915968,
-                "profit_margin": 0.03032,
-                "roe": "N/A",
-                "debt_to_equity": 64.953,
+                "profit_margin": 0.020922491678554443,
+                "roe": 0.0435,
+                "debt_to_equity": 0.2595419847328244,
                 "is_main_company": true
             },
             {
-                "name": "K.P.R. Mill Limited",
-                "symbol": "KPRMILL.NS",
-                "market_cap": 284259483648,
-                "pe_ratio": 33.558434,
-                "pb_ratio": 5.3038244,
-                "revenue": 66346999808,
-                "profit_margin": 0.12719,
+                "name": "Raymond Limited",
+                "symbol": "RAYMOND.NS",
+                "market_cap": 24524201984,
+                "pe_ratio": 46.763958,
+                "pb_ratio": 0.7543763,
+                "revenue": 22017200128,
+                "profit_margin": 2.4857202,
                 "roe": "N/A",
-                "debt_to_equity": 6.46,
+                "debt_to_equity": 29.425,
+                "source": "batch_llm_yfinance",
+                "is_main_company": false
+            },
+            {
+                "name": "Arvind Limited",
+                "symbol": "ARVIND.NS",
+                "market_cap": 99957415936,
+                "pe_ratio": 24.61911,
+                "pb_ratio": 2.6014028,
+                "revenue": 89707896832,
+                "profit_margin": 0.04518,
+                "roe": "N/A",
+                "debt_to_equity": 39.143,
+                "source": "batch_llm_yfinance",
+                "is_main_company": false
+            },
+            {
+                "name": "Vardhman Polytex Limited",
+                "symbol": "VARDMNPOLY.NS",
+                "market_cap": 3521208576,
+                "pe_ratio": 52.071426,
+                "pb_ratio": -1.5247855,
+                "revenue": 2530533888,
+                "profit_margin": 0.03076,
+                "roe": "N/A",
+                "debt_to_equity": "N/A",
                 "source": "batch_llm_yfinance",
                 "is_main_company": false
             },
@@ -475,55 +512,17 @@
                 "debt_to_equity": "N/A",
                 "source": "batch_llm_yfinance",
                 "is_main_company": false
-            },
-            {
-                "name": "Trident Limited",
-                "symbol": "TRIDENT.NS",
-                "market_cap": 123038523392,
-                "pe_ratio": 30.150002,
-                "pb_ratio": 2.638084,
-                "revenue": 69328601088,
-                "profit_margin": 0.058909997,
-                "roe": "N/A",
-                "debt_to_equity": 34.742,
-                "source": "batch_llm_yfinance",
-                "is_main_company": false
-            },
-            {
-                "name": "Vardhman Polytex Limited",
-                "symbol": "VARDMNPOLY.NS",
-                "market_cap": 3328001024,
-                "pe_ratio": 49.214283,
-                "pb_ratio": -1.441121,
-                "revenue": 2530533888,
-                "profit_margin": 0.03076,
-                "roe": "N/A",
-                "debt_to_equity": "N/A",
-                "source": "batch_llm_yfinance",
-                "is_main_company": false
-            },
-            {
-                "name": "Arvind Limited",
-                "symbol": "ARVIND.NS",
-                "market_cap": 95737372672,
-                "pe_ratio": 23.640778,
-                "pb_ratio": 2.4915755,
-                "revenue": 89707896832,
-                "profit_margin": 0.04518,
-                "roe": "N/A",
-                "debt_to_equity": 39.143,
-                "source": "batch_llm_yfinance",
-                "is_main_company": false
             }
         ]
     },
     "swot": {
         "strengths": [
-            "Strong market cap of $977,396,992"
+            "Strong market cap of \u20b9144.00 Cr",
+            "Established market presence"
         ],
         "weaknesses": [
-            "High debt-to-equity ratio of 64.95",
-            "Low profit margin of 3.03%"
+            "Low profit margin of 2.09%",
+            "High PE ratio indicating overvaluation"
         ],
         "opportunities": [
             "Growing sector: Consumer Cyclical",
@@ -538,35 +537,63 @@
     },
     "news": [
         {
-            "title": "Bhandari Hosiery Exports Income Statement - NSE - Stock Analysis",
+            "title": "Bhandari Hosiery Closes Trading Window Ahead of FY26 ...",
+            "publisher": "tipranks.com",
+            "link": "https://www.tipranks.com/news/company-announcements/bhandari-hosiery-closes-trading-window-ahead-of-fy26-results",
+            "summary": "Bhandari Hosiery Exports will shut its trading window from April 1, 2026, for insiders and related parties. The window stays closed until 48",
+            "source": "tavily"
+        },
+        {
+            "title": "Bhandari Hosiery Exports Ltd.",
+            "publisher": "economictimes.indiatimes.com",
+            "link": "https://economictimes.indiatimes.com/bhandari-hosiery-exports-ltd/stocksupdate/companyid-8645.cms",
+            "summary": "Pursuant to Regulation 30 and other applicable provisions of SEBI (Listing Obligations and Disclosure Requirements) Regulations, 2015, we would like to inform you that the Board of Directors of the Company in its Meeting held on 2nd January, 2026, have inter-alia, transacted the following business:1",
+            "source": "tavily"
+        },
+        {
+            "title": "Bhandari Hosiery Exports Future Growth",
+            "publisher": "simplywall.st",
+            "link": "https://simplywall.st/stocks/in/consumer-durables/bse-512608/bhandari-hosiery-exports-shares/future",
+            "summary": "| Date | Revenue | Earnings | Free Cash Flow | Cash from Op | Avg. No. Analysts |\n ---  ---  --- |\n| 12/31/2025 | 2,797 | 85 | N/A | N/A | N/A |\n| 9/30/2025 | 2,836 | 83 | -521 | -486 | N/A |\n| 6/30/2025 | 2,836 | 79 | N/A | N/A | N/A |\n| 3/31/2025 | 2,787 | 77 | -273 | -254 | N/A |\n| 12/31/2024 | 2",
+            "source": "tavily"
+        },
+        {
+            "title": "Bhandari Hosiery Exports Limited (BOM:512608)",
             "publisher": "stockanalysis.com",
-            "link": "https://stockanalysis.com/quote/nse/BHANDARI/financials/",
-            "summary": "| Advertising Expenses  1.72 | 0.94 | 0.82 | 0.8 | 0.15 | [...] Source: S&P Global Market Intelligence. Standard template. Financial Sources. [...] | Dividend Growth  100.00%  -  - |\n| Gross Margin | ",
+            "link": "https://stockanalysis.com/quote/bom/512608/",
+            "summary": "## Financial Performance\n\nIn fiscal year 2025, Bhandari Hosiery Exports's revenue was 2.79 billion, an increase of 4.45% compared to the previous year's 2.67 billion. Earnings were 77.13 million, an increase of 18.06%.\n\n#### Install The App\n\nDownload on the App Store\nGet it on Google Play\n\n#### Sect",
             "source": "tavily"
         },
         {
-            "title": "Bhandari Hosiery Exports Ltd share price | Key Insights - Screener",
-            "publisher": "www.screener.in",
-            "link": "https://www.screener.in/company/BHANDARI/",
-            "summary": "| Mar 2014 | Mar 2015 | Mar 2016 | Mar 2017 | Mar 2018 | Mar 2019 | Mar 2020 | Mar 2021 | Mar 2022 | Mar 2023 | Mar 2024 | Mar 2025 | TTM |\n ---  ---  ---  ---  ---  --- \n|  | 110 | 125 | 198 | 214 | ",
+            "title": "Bhandari Hosiery Share Price Today, Bhandari Hosiery Stock Price Live NSE/BSE Updates",
+            "publisher": "economictimes.indiatimes.com",
+            "link": "https://economictimes.indiatimes.com/bhandari-hosiery-exports-ltd/stocks/companyid-8645.cms",
+            "summary": "Bhandari Hosiery Exports Ltd., incorporated in the year 1993, is a Small Cap company (having a market cap of Rs 111.21 Crore) operating in Apparels sector. Bhandari Hosiery Exports Ltd. key Products/Revenue Segments include Knitted Cloth, Garments, Yarn for the year ending 31-Mar-2025.For the quarte",
             "source": "tavily"
         },
         {
-            "title": "Bhandari Hosiery Exports Limited (BHANDARI.NS) Income Statement",
-            "publisher": "finance.yahoo.com",
-            "link": "https://finance.yahoo.com/quote/BHANDARI.NS/financials/",
-            "summary": "### [...] ### New on Yahoo [...] 211,683\n\n212,835\n\n196,090\n\n182,338\n\n171,074\n\nNet Non Operating Interest Income Expense\n\n-107,750\n\n-113,606\n\n-110,976\n\n-103,209\n\n-102,152\n\nPretax Income\n\n106,886\n\n101,9",
+            "title": "Bhandari Hosiery Exports Ltd Stock Price Today | NSE: BHEX Live - Investing.com",
+            "publisher": "investing.com",
+            "link": "https://www.investing.com/equities/bhandari-hosiery-exports-ltd",
+            "summary": "Title: Bhandari Hosiery Exports Ltd Stock Price Today | NSE: BHEX Live - Investing.com\n# Bhandari Hosiery Exports Ltd (BHEX). Bhandari Hosiery Exports Ltd stock price live, this page displays NSE BHEX stock exchange data. Monitor the latest movements within the Bhandari Hosiery Exports Ltd real time",
             "source": "tavily"
         },
         {
-            "title": "Bhandari Hosiery Exports Ltd BSE (BHEX) Income Statement",
-            "publisher": "ng.investing.com",
-            "link": "https://ng.investing.com/equities/bhandari-hosiery-exports-ltd-income-statement?cid=987372",
-            "summary": "|  | |  | | | | | | | | | |\n|  | Gross Profit Growth | aa.aa | aa.aa | aa.aa | aa.aa | aa.aa | -15.57% | +33.77% | +6.03% | -4.72% | +16.32% |\n|  | |  | | | | | | | | | |\n|  | Gross Profit Margin % | ",
+            "title": "Bhandari Hosiery Exports RE2 Ltd.",
+            "publisher": "moneycontrol.com",
+            "link": "https://www.moneycontrol.com/india/stockpricequote/textilesapparel/bhandarihosieryexportsre2/BHE05",
+            "summary": "### \\ BSE Market Depth (16 Mar 2026)\n\n| BUY | | SELL | |\n ---  --- |\n| QTY | PRICE | PRICE | QTY |\n| 0 | 0.00 | 0.03 | 467166 |\n| 0 | 0.00 | 0.04 | 199194 |\n| 0 | 0.00 | 0.00 | 0 |\n| 0 | 0.00 | 0.00 | 0 |\n| 0 | 0.00 | 0.00 | 0 |\n| 0 | Total | Total | 0 |\n\nAs on 16 Mar, 2026 | 04:00\n\n### \\ BSE Market",
+            "source": "tavily"
+        },
+        {
+            "title": "BHANDARI Stock Price and Chart \u2014 NSE:BHANDARI \u2014 TradingView \u2014 India",
+            "publisher": "in.tradingview.com",
+            "link": "https://in.tradingview.com/symbols/NSE-BHANDARI",
+            "summary": "Bhandari Hosiery Exports Ltd\nBhandari Hosiery Exports Ltd\nBhandari Hosiery Exports Ltd\n\n# Bhandari Hosiery Exports Ltd\n\n## Chart\ufeff\n\n## Key stats\ufeff\n\n## Employees\ufeff\n\n## About Bhandari Hosiery Exports Ltd\n\n## Related stocks\n\n## Financials\ufeff\n\n## News\ufeff\n\n## Ideas\ufeff\n\nNSE:BHANDARI\n\nNSE:BHANDARI\n\nNSE:BHANDARI\n\nSe",
             "source": "tavily"
         }
     ],
     "announcements": [],
-    "timestamp": "2026-04-03T10:51:14.320538",
+    "timestamp": "2026-04-08T19:28:52.318386",
     "finrobot_report": null
 }

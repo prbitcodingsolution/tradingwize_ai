@@ -241,6 +241,102 @@ class StockDatabase:
             return []
 
 
+    def create_news_table(self):
+        """Create the stock_news table if it doesn't exist"""
+        try:
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stock_news (
+                id SERIAL PRIMARY KEY,
+                stock_symbol VARCHAR(50) NOT NULL,
+                stock_name VARCHAR(255),
+                title TEXT NOT NULL,
+                publisher VARCHAR(255),
+                link TEXT,
+                summary TEXT,
+                source VARCHAR(50),
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_news_symbol ON stock_news(stock_symbol);
+            CREATE INDEX IF NOT EXISTS idx_news_fetched ON stock_news(fetched_at);
+            """)
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"❌ News table creation failed: {e}")
+            self.conn.rollback()
+            return False
+
+    def save_news(self, stock_symbol: str, stock_name: str, news_list: list) -> bool:
+        """
+        Batch insert news items for a stock. Skips duplicates by title+symbol.
+
+        Args:
+            stock_symbol: e.g. 'TCS.NS'
+            stock_name: e.g. 'Tata Consultancy Services Limited'
+            news_list: List of dicts with keys: title, publisher, link, summary, source
+        """
+        if not news_list:
+            return True
+        try:
+            inserted = 0
+            for item in news_list:
+                title = (item.get('title') or '').strip()
+                if not title:
+                    continue
+                # Skip if this exact title already exists for this symbol (within 24h)
+                self.cursor.execute(
+                    "SELECT 1 FROM stock_news WHERE stock_symbol = %s AND title = %s "
+                    "AND fetched_at > NOW() - INTERVAL '24 hours' LIMIT 1",
+                    (stock_symbol, title)
+                )
+                if self.cursor.fetchone():
+                    continue
+                self.cursor.execute(
+                    "INSERT INTO stock_news (stock_symbol, stock_name, title, publisher, link, summary, source) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        stock_symbol,
+                        stock_name,
+                        title,
+                        item.get('publisher', ''),
+                        item.get('link', ''),
+                        item.get('summary', ''),
+                        item.get('source', 'tavily'),
+                    )
+                )
+                inserted += 1
+            self.conn.commit()
+            if inserted:
+                print(f"✅ Saved {inserted} news items to DB for {stock_symbol}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to save news: {e}")
+            self.conn.rollback()
+            return False
+
+    def get_news(self, stock_symbol: str, limit: int = 20, max_age_hours: int = 72) -> list:
+        """
+        Get recent news for a stock symbol.
+
+        Returns:
+            List of dicts with title, publisher, link, summary, source, fetched_at
+        """
+        try:
+            self.cursor.execute(
+                "SELECT title, publisher, link, summary, source, fetched_at "
+                "FROM stock_news "
+                "WHERE stock_symbol = %s AND fetched_at > NOW() - INTERVAL '%s hours' "
+                "ORDER BY fetched_at DESC LIMIT %s",
+                (stock_symbol, max_age_hours, limit)
+            )
+            rows = self.cursor.fetchall()
+            columns = [desc[0] for desc in self.cursor.description]
+            return [dict(zip(columns, row)) for row in rows]
+        except Exception as e:
+            print(f"❌ Failed to get news: {e}")
+            return []
+
+
 def extract_tech_analysis_json(company_data) -> Dict[str, Any]:
     """
     Extract technical analysis data from CompanyData object

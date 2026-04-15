@@ -1504,18 +1504,25 @@ What stock would you like to analyze today?"""
                             deps.last_analysis_response = None
                             deps.last_validation_response = None
 
-                            # Reset analysis_complete when user is selecting a new stock
-                            # from the pending variants list (e.g. "1", "analyze 1", "analyze 2")
+                            # Reset analysis state when user wants to analyze a new/different stock
                             import re as _re_reset
                             _input_stripped = user_input.strip().lower()
                             _is_number_selection = _input_stripped.isdigit() or bool(_re_reset.match(r'^(analyze|select|choose|pick|option)\s*\d+', _input_stripped))
                             _has_pending = bool(getattr(deps, 'pending_variants', None))
-                            if _is_number_selection and _has_pending:
+                            _is_new_stock_request = bool(_re_reset.search(r'(analy[sz]e|tell me about|check|review|look at|search|find|show)\s+', _input_stripped))
+
+                            if (_is_number_selection and _has_pending) or (_is_new_stock_request and getattr(deps, 'analysis_complete', False)):
                                 deps.analysis_complete = False
                                 deps.company_data = None
                                 deps.stock_symbol = None
                                 deps.stock_name = None
-                                print(f"🔄 Reset analysis state for new stock selection: '{user_input.strip()}'")
+                                deps.last_analysis_response = None
+                                deps.report_generated = False
+                                # Clear message history so the LLM doesn't see the old analysis
+                                # and skip tool calls for the new stock
+                                message_history = []
+                                st.session_state.message_history = []
+                                print(f"🔄 Reset analysis state and history for new stock request: '{user_input.strip()}'")
                         
                             # Trim message history to last MAX_HISTORY turns to prevent the LLM
                             # from re-calling tools it already called in previous turns.
@@ -1873,6 +1880,13 @@ The system couldn't display the analysis properly. Please try your request again
                 # Update Session State from Deps
                 if st.session_state.deps.stock_name:
                     st.session_state.current_stock = st.session_state.deps.stock_name
+                elif isinstance(response, str) and len(response) > 200:
+                    # Fallback: extract stock name from response if deps don't have it
+                    import re as _re_extract
+                    _stock_match = _re_extract.search(r'Stock Analysis\s*[–\-]\s*(.+?)\s*\(', response)
+                    if _stock_match:
+                        st.session_state.current_stock = _stock_match.group(1).strip()
+                        print(f"📊 Extracted stock name from response: {st.session_state.current_stock}")
                 if st.session_state.deps.company_data:
                     st.session_state.company_data = st.session_state.deps.company_data
         
@@ -4018,63 +4032,133 @@ elif view_option == "📈 Data Dashboard":
             except Exception as _e:
                 print(f"⚠️ Dashboard enrichment failed: {_e}")
 
-        col1, col2 = st.columns(2)
+        col1, col2 = st.columns([2, 1])
 
-        # -------- Price Trend --------
+        # -------- Price Trend (TradingView style) --------
         with col1:
             if data.market_data.price_history:
-                st.subheader("📈 Price Trend")
-
-                p1, p2, p3, p4, p5, p6 = st.columns(6)
-                with p1: period_1w = st.button("1W", key="pt_1w")
-                with p2: period_1m = st.button("1M", key="pt_1m")
-                with p3: period_3m = st.button("3M", key="pt_3m")
-                with p4: period_6m = st.button("6M", key="pt_6m")
-                with p5: period_1y = st.button("1Y", key="pt_1y", type="primary")
-                with p6: period_all = st.button("ALL", key="pt_all")
-
-                if period_1w:
-                    days = 7
-                elif period_1m:
-                    days = 30
-                elif period_3m:
-                    days = 90
-                elif period_6m:
-                    days = 180
-                else:
-                    days = 365
+                st.markdown("#### Chart")
 
                 all_dates = list(data.market_data.price_history.keys())
                 all_prices = list(data.market_data.price_history.values())
 
+                # Period selector via session state
+                if "pt_period" not in st.session_state:
+                    st.session_state.pt_period = "1Y"
+
+                period_map = {"1 day": 1, "5 days": 5, "1 month": 30, "6 months": 180, "Year to date": None, "1 year": 365, "All time": len(all_dates)}
+
+                # Determine days for current selected period
+                selected = st.session_state.pt_period
+                period_days_map = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365, "ALL": len(all_dates)}
+                days = period_days_map.get(selected, 365)
+
                 dates = all_dates[-days:]
                 prices = all_prices[-days:]
 
+                current_price = prices[-1] if prices else 0
                 price_change = prices[-1] - prices[0] if len(prices) > 1 else 0
                 is_positive = price_change >= 0
+                line_color = "#089981" if is_positive else "#F23645"
+                fill_color = "rgba(8,153,129,0.12)" if is_positive else "rgba(242,54,69,0.12)"
 
                 fig = go.Figure()
+
+                # Area fill trace
                 fig.add_trace(go.Scatter(
                     x=dates,
                     y=prices,
                     mode="lines",
                     fill="tozeroy",
-                    line=dict(
-                        color="#10b981" if is_positive else "#ef4444",
-                        width=2.5,
-                        shape="spline"
-                    )
+                    fillcolor=fill_color,
+                    line=dict(color=line_color, width=1.5, shape="spline"),
+                    hovertemplate="₹%{y:,.2f}<br>%{x}<extra></extra>"
                 ))
 
                 fig.update_layout(
-                    template="plotly_white",
+                    template="plotly_dark",
                     height=380,
-                    yaxis=dict(tickprefix="₹"),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
                     showlegend=False,
-                    margin=dict(l=40, r=20, t=30, b=40)
+                    margin=dict(l=0, r=50, t=10, b=10),
+                    xaxis=dict(
+                        showgrid=False,
+                        showline=False,
+                        zeroline=False,
+                        tickfont=dict(color="#787B86", size=11),
+                        tickformat="%b '%y" if days > 90 else "%d %b",
+                    ),
+                    yaxis=dict(
+                        showgrid=False,
+                        showline=False,
+                        zeroline=False,
+                        side="right",
+                        tickprefix="₹",
+                        tickfont=dict(color="#787B86", size=11),
+                    ),
+                    hoverlabel=dict(bgcolor="#1E222D", font_size=12, font_color="#D1D4DC"),
+                    hovermode="x unified",
+                )
+
+                # Current price annotation on right edge
+                fig.add_annotation(
+                    x=dates[-1], y=current_price,
+                    text=f"₹{current_price:,.2f}",
+                    showarrow=False,
+                    xanchor="left", xshift=8,
+                    font=dict(color="white", size=12),
+                    bgcolor=line_color,
+                    borderpad=4,
+                )
+
+                # Prev close line
+                prev_close = prices[0] if prices else 0
+                fig.add_hline(
+                    y=prev_close, line_dash="dot",
+                    line_color="#787B86", line_width=0.8,
+                    annotation_text=f"Prev close  ₹{prev_close:,.2f}",
+                    annotation_position="bottom right",
+                    annotation_font_color="#787B86",
+                    annotation_font_size=10,
                 )
 
                 st.plotly_chart(fig, width='stretch')
+
+                # --- Period buttons BELOW chart (TradingView style) ---
+                def _set_period(p):
+                    st.session_state.pt_period = p
+
+                btn_cols = st.columns(6)
+                period_labels = ["1W", "1M", "3M", "6M", "1Y", "ALL"]
+                for i, label in enumerate(period_labels):
+                    with btn_cols[i]:
+                        is_active = st.session_state.pt_period == label
+                        st.button(
+                            label, key=f"pt_{label}",
+                            type="primary" if is_active else "secondary",
+                            on_click=_set_period, args=(label,),
+                            use_container_width=True,
+                        )
+
+                # --- Performance metrics below buttons (TradingView style) ---
+                metric_periods = {"1 day": 1, "5 days": 5, "1 month": 30, "6 months": 180, "1 year": 365, "All time": len(all_dates)}
+                metric_cols = st.columns(len(metric_periods))
+                for idx, (mlabel, mdays) in enumerate(metric_periods.items()):
+                    mdays = min(mdays, len(all_prices))
+                    if mdays >= 2:
+                        start_p = all_prices[-mdays]
+                        end_p = all_prices[-1]
+                        pct = ((end_p - start_p) / start_p) * 100 if start_p else 0
+                        color = "#089981" if pct >= 0 else "#F23645"
+                        with metric_cols[idx]:
+                            st.markdown(
+                                f"<div style='text-align:center;padding:4px 0'>"
+                                f"<div style='color:#787B86;font-size:12px'>{mlabel}</div>"
+                                f"<div style='color:{color};font-size:14px;font-weight:600'>{pct:+.2f}%</div>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
 
         with col2:
             st.subheader("💰 Financial Breakdown")
@@ -4084,12 +4168,12 @@ elif view_option == "📈 Data Dashboard":
                 divisor = 1e7 if is_indian else 1e9
                 unit_label = "Cr" if is_indian else "Billion"
                 currency_sym = "₹" if is_indian else "$"
-                
+
                 # Safely handle None values
                 revenue_val = (data.financials.revenue or 0) / divisor
                 net_profit_val = (data.financials.net_profit or 0) / divisor
                 free_cash_flow_val = (data.financials.free_cash_flow or 0) / divisor
-                
+
                 fin_fig = go.Figure(data=[
                     go.Bar(
                         x=["Revenue", "Net Profit", "Free Cash Flow"],
@@ -4104,120 +4188,249 @@ elif view_option == "📈 Data Dashboard":
                 st.plotly_chart(fin_fig, width='stretch')
 
         st.markdown("---")
-        st.subheader("🔬 Technical Analysis")
 
-        m1, m2, m3, m4 = st.columns(4)
-        with m1:
-            if data.market_data.current_price is not None:
-                st.metric("Current Price", f"₹{data.market_data.current_price:.2f}")
+        # ── CSS for Technical Analysis cards ──
+        st.markdown("""
+        <style>
+        .ta-section-title {
+            font-size: 12px; color: #888; letter-spacing: 0.06em;
+            text-transform: uppercase; font-weight: 600;
+            border-bottom: 0.5px solid #333; padding-bottom: 8px; margin-bottom: 12px; margin-top: 24px;
+        }
+        .ta-card {
+            background: #1a1a1a; border-radius: 8px; padding: 14px 16px;
+            height: 100%; min-height: 90px;
+        }
+        .ta-label { font-size: 11px; color: #888; margin-bottom: 4px; }
+        .ta-value { font-size: 20px; font-weight: 500; color: #fff; margin-bottom: 4px; }
+        .ta-sub { font-size: 11px; }
+        .ta-badge {
+            display: inline-block; border-radius: 99px; padding: 2px 8px;
+            font-size: 11px; font-weight: 500;
+        }
+        .ta-badge-green { background: #dcfce7; color: #166534; }
+        .ta-badge-red { background: #fee2e2; color: #991b1b; }
+        .ta-badge-amber { background: #fef3c7; color: #92400e; }
+        .ta-badge-blue { background: #e0f2fe; color: #0c4a6e; }
+        .ta-range-track {
+            background: #333; border-radius: 99px; height: 4px; width: 100%;
+            margin: 8px 0 4px 0; position: relative;
+        }
+        .ta-range-fill {
+            border-radius: 99px; height: 4px; position: absolute; top: 0; left: 0;
+        }
+        .ta-ma-row {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 6px 0; border-bottom: 0.5px solid #2a2a2a;
+        }
+        .ta-ma-row:last-child { border-bottom: none; }
+        .ta-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+        </style>
+        """, unsafe_allow_html=True)
+
+        # ── Helper values ──
+        _is_indian = data.symbol.endswith('.NS') or data.symbol.endswith('.BO')
+        _cur = "₹" if _is_indian else "$"
+        _divisor = 1e7 if _is_indian else 1e9
+        _unit = "Cr" if _is_indian else "B"
+
+        def _fmt_large(val):
+            if val is None: return "—"
+            if _is_indian:
+                return f"{_cur}{val/_divisor:,.2f} {_unit}" if abs(val) >= 1e7 else f"{_cur}{val/1e5:,.2f} L"
+            return f"{_cur}{val/_divisor:,.2f} {_unit}"
+
+        def _badge(text, kind="green"):
+            return f'<span class="ta-badge ta-badge-{kind}">{text}</span>'
+
+        # ══════════════════════════════════════════════
+        # 1. PRICE & VALUATION
+        # ══════════════════════════════════════════════
+        st.markdown('<div class="ta-section-title">PRICE & VALUATION</div>', unsafe_allow_html=True)
+
+        pv1, pv2, pv3, pv4 = st.columns(4)
+
+        # Current Price
+        with pv1:
+            cp = data.market_data.current_price
+            day_chg = data.market_data.day_change
+            chg_color = "#22c55e" if day_chg and day_chg >= 0 else "#ef4444"
+            chg_text = f'<div class="ta-sub" style="color:{chg_color}">{day_chg:+.2f}% today</div>' if day_chg is not None else ""
+            st.markdown(f'''<div class="ta-card">
+                <div class="ta-label">Current Price</div>
+                <div class="ta-value">{_cur}{cp:,.2f}</div>{chg_text}
+            </div>''' if cp is not None else '<div class="ta-card"><div class="ta-label">Current Price</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+
+        # 52W Range
+        with pv2:
+            w52h = data.market_data.week_52_high
+            w52l = data.market_data.week_52_low
+            if w52h and w52l and cp:
+                range_pct = ((cp - w52l) / (w52h - w52l)) * 100 if w52h != w52l else 50
+                range_pct = max(0, min(100, range_pct))
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">52W Range</div>
+                    <div class="ta-value" style="font-size:16px">{_cur}{w52l:,.0f} – {_cur}{w52h:,.0f}</div>
+                    <div class="ta-range-track"><div class="ta-range-fill" style="width:{range_pct}%;background:#2962FF;"></div></div>
+                    <div class="ta-sub" style="color:#888">at {range_pct:.0f}% of range</div>
+                </div>''', unsafe_allow_html=True)
             else:
-                st.metric("Current Price", "N/A")
-        with m2:
-            if data.financials.pe_ratio:
-                st.metric("PE Ratio", f"{data.financials.pe_ratio:.2f}")
-            else:
-                st.metric("PE Ratio", "N/A")
-        with m3:
-            if data.financials.profit_margin:
-                st.metric("Profit Margin", f"{data.financials.profit_margin*100:.2f}%")
-            else:
-                st.metric("Profit Margin", "N/A")
-        with m4:
-            if data.market_data.market_cap:
-                val = data.market_data.market_cap
-                is_indian = data.symbol.endswith('.NS') or data.symbol.endswith('.BO')
-                if is_indian:
-                    fmt_val = f"₹{val/1e7:.2f} Cr" if val >= 1e7 else f"₹{val/1e5:.2f} L"
+                st.markdown('<div class="ta-card"><div class="ta-label">52W Range</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+
+        # Market Cap
+        with pv3:
+            mcap = data.market_data.market_cap
+            if mcap:
+                if _is_indian:
+                    cap_label = "Large Cap" if mcap >= 2e11 else ("Mid Cap" if mcap >= 5e10 else "Small Cap")
                 else:
-                    fmt_val = f"${val/1e9:.2f} B"
-                st.metric("Market Cap", fmt_val)
+                    cap_label = "Large Cap" if mcap >= 1e10 else ("Mid Cap" if mcap >= 2e9 else "Small Cap")
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">Market Cap</div>
+                    <div class="ta-value">{_fmt_large(mcap)}</div>
+                    <div class="ta-sub" style="color:#888">{cap_label}</div>
+                </div>''', unsafe_allow_html=True)
             else:
-                st.metric("Market Cap", "N/A")
+                st.markdown('<div class="ta-card"><div class="ta-label">Market Cap</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
 
-        m5, m6, m7, m8 = st.columns(4)
-        with m5:
-            if getattr(data.financials, "ebitda", None):
-                val = data.financials.ebitda
-                is_indian = data.symbol.endswith('.NS') or data.symbol.endswith('.BO')
-                if is_indian:
-                    fmt_val = f"₹{val/1e7:.2f} Cr" if val >= 1e7 else f"₹{val/1e5:.2f} L"
+        # Avg Volume (10D)
+        with pv4:
+            avg_vol = data.market_data.avg_volume
+            if avg_vol:
+                if avg_vol >= 1e7:
+                    vol_str = f"{avg_vol/1e7:.2f} Cr"
+                elif avg_vol >= 1e5:
+                    vol_str = f"{avg_vol/1e5:.2f} L"
                 else:
-                    fmt_val = f"${val/1e9:.2f} B"
-                st.metric("EBITDA", fmt_val)
+                    vol_str = f"{avg_vol:,.0f}"
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">Avg Volume (10D)</div>
+                    <div class="ta-value">{vol_str}</div>
+                </div>''', unsafe_allow_html=True)
             else:
-                st.metric("EBITDA", "N/A")
-        with m6:
-            if getattr(data.financials, "eps", None):
-                st.metric("EPS", f"{data.financials.eps:.2f}")
-            else:
-                st.metric("EPS", "N/A")
-        with m7:
-            if getattr(data.financials, "debt_to_equity", None):
-                st.metric("Debt / Equity", f"{data.financials.debt_to_equity:.2f}")
-            else:
-                st.metric("Debt / Equity", "N/A")
-        with m8:
-            # Display Max Drop After High
-            max_drop = getattr(data.market_data, 'max_drop_after_high', None)
-            if max_drop is not None:
-                st.metric("Max Drop After High", f"{max_drop:.2f}%")
-            else:
-                st.metric("Max Drop After High", "N/A")
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">Avg Volume (10D)</div>
+                    <div class="ta-value">—</div>
+                </div>''', unsafe_allow_html=True)
 
-        # New row for Overall High, Overall Low, Percentage Change, and Selection Status
-        m9, m10, m11, m12 = st.columns(4)
-        with m9:
-            if data.market_data.overall_high is not None:
-                st.metric("Overall High", f"₹{data.market_data.overall_high:.2f}")
+        # ══════════════════════════════════════════════
+        # 2. FUNDAMENTALS
+        # ══════════════════════════════════════════════
+        st.markdown('<div class="ta-section-title">FUNDAMENTALS</div>', unsafe_allow_html=True)
+
+        f1, f2, f3, f4 = st.columns(4)
+
+        # P/E Ratio
+        with f1:
+            pe = data.financials.pe_ratio
+            if pe:
+                pe_badge = _badge("Moderate", "amber") if 15 <= pe <= 30 else (_badge("Low", "green") if pe < 15 else _badge("High", "red"))
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">P/E Ratio</div>
+                    <div class="ta-value">{pe:.2f}</div>{pe_badge}
+                </div>''', unsafe_allow_html=True)
             else:
-                st.metric("Overall High", "N/A")
-        with m10:
-            if data.market_data.overall_low is not None:
-                st.metric("Overall Low", f"₹{data.market_data.overall_low:.2f}")
+                st.markdown('<div class="ta-card"><div class="ta-label">P/E Ratio</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+
+        # EPS (TTM)
+        with f2:
+            eps = getattr(data.financials, "eps", None)
+            st.markdown(f'''<div class="ta-card">
+                <div class="ta-label">EPS (TTM)</div>
+                <div class="ta-value">{_cur}{eps:,.2f}</div>
+                <div class="ta-sub" style="color:#888">Earnings/share</div>
+            </div>''' if eps else '<div class="ta-card"><div class="ta-label">EPS (TTM)</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+
+        # Profit Margin
+        with f3:
+            pm = data.financials.profit_margin
+            if pm is not None:
+                pm_pct = pm * 100
+                pm_badge = _badge("Healthy", "green") if pm_pct > 10 else (_badge("Low", "red") if pm_pct < 5 else _badge("Moderate", "amber"))
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">Profit Margin</div>
+                    <div class="ta-value">{pm_pct:.2f}%</div>{pm_badge}
+                </div>''', unsafe_allow_html=True)
             else:
-                st.metric("Overall Low", "N/A")
-        with m11:
-            if data.market_data.percentage_change_from_high is not None:
-                delta_color = "inverse" if data.market_data.percentage_change_from_high < 0 else "normal"
-                st.metric("% Change from High", f"{data.market_data.percentage_change_from_high:.2f}%", 
-                         delta=f"{data.market_data.percentage_change_from_high:.2f}%")
+                st.markdown('<div class="ta-card"><div class="ta-label">Profit Margin</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+
+        # Debt / Equity
+        with f4:
+            de = getattr(data.financials, "debt_to_equity", None)
+            if de is not None:
+                de_badge = _badge("Low", "green") if de < 0.5 else (_badge("Moderate", "amber") if de < 1.5 else _badge("High", "red"))
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">Debt / Equity</div>
+                    <div class="ta-value">{de:.2f}</div>{de_badge}
+                </div>''', unsafe_allow_html=True)
             else:
-                st.metric("% Change from High", "N/A")
-        with m12:
-            # Display selection status based on maximum drop after high
-            # Use getattr for backward compatibility with old data
-            max_drop = getattr(data.market_data, 'max_drop_after_high', None)
-            
-            if max_drop is not None:
-                is_selected = max_drop <= -25
-                status_text = "✅ Selected" if is_selected else "❌ Not Selected"
-                st.metric("Selection Status", status_text)
-                
-                # Show explanation in small text
-                if is_selected:
-                    st.caption(f"Dropped {abs(max_drop):.1f}% after peak")
-            elif data.market_data.percentage_change_from_high is not None:
-                # Fallback to current price comparison
-                is_selected = data.market_data.percentage_change_from_high <= -25
-                status_text = "✅ Selected" if is_selected else "❌ Not Selected"
-                st.metric("Selection Status", status_text)
+                st.markdown('<div class="ta-card"><div class="ta-label">Debt / Equity</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+
+        # ══════════════════════════════════════════════
+        # 3. GROWTH & PROFITABILITY
+        # ══════════════════════════════════════════════
+        st.markdown('<div class="ta-section-title">GROWTH & PROFITABILITY</div>', unsafe_allow_html=True)
+
+        g1, g2, g3, g4 = st.columns(4)
+
+        # Revenue (TTM)
+        with g1:
+            rev = data.financials.revenue
+            rev_yoy = ""
+            st.markdown(f'''<div class="ta-card">
+                <div class="ta-label">Revenue (TTM)</div>
+                <div class="ta-value">{_fmt_large(rev)}</div>
+            </div>''', unsafe_allow_html=True)
+
+        # EBITDA
+        with g2:
+            ebitda = getattr(data.financials, "ebitda", None)
+            ebitda_margin = ""
+            if ebitda and rev:
+                ebitda_margin = f'<div class="ta-sub" style="color:#888">Margin: ~{(ebitda/rev)*100:.0f}%</div>'
+            st.markdown(f'''<div class="ta-card">
+                <div class="ta-label">EBITDA</div>
+                <div class="ta-value">{_fmt_large(ebitda)}</div>{ebitda_margin}
+            </div>''', unsafe_allow_html=True)
+
+        # ROE
+        with g3:
+            roe = getattr(data.financials, "roe", None)
+            if roe is not None:
+                roe_pct = roe * 100 if abs(roe) < 1 else roe
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">ROE</div>
+                    <div class="ta-value">{roe_pct:.1f}%</div>
+                </div>''', unsafe_allow_html=True)
             else:
-                st.metric("Selection Status", "N/A")
+                st.markdown('<div class="ta-card"><div class="ta-label">ROE</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+
+        # Dividend Yield
+        with g4:
+            dy = getattr(data.financials, "dividend_yield", None)
+            if dy is not None:
+                dy_pct = dy * 100 if abs(dy) < 1 else dy
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">Dividend Yield</div>
+                    <div class="ta-value">{dy_pct:.2f}%</div>
+                </div>''', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="ta-card"><div class="ta-label">Dividend Yield</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+
+        # ══════════════════════════════════════════════
+        # 4. TECHNICAL SIGNALS
+        # ══════════════════════════════════════════════
+        st.markdown('<div class="ta-section-title">TECHNICAL SIGNALS</div>', unsafe_allow_html=True)
 
         # Initialize default values for price analysis
         all_dates = []
         all_prices = []
-        
-        # Get price history if available
         if data.market_data.price_history:
             all_dates = list(data.market_data.price_history.keys())
             all_prices = list(data.market_data.price_history.values())
 
-        # Only perform technical analysis if we have price data
         if all_prices and len(all_prices) > 1:
-            prices_series = pd.Series(
-                all_prices, index=pd.to_datetime(all_dates)
-            )
+            prices_series = pd.Series(all_prices, index=pd.to_datetime(all_dates))
 
             sma20 = prices_series.rolling(20).mean()
             sma50 = prices_series.rolling(50).mean()
@@ -4226,47 +4439,173 @@ elif view_option == "📈 Data Dashboard":
             returns = prices_series.pct_change().dropna()
             volatility = returns.std() * (252 ** 0.5)
 
-            delta = prices_series.diff()
-            up = delta.clip(lower=0)
-            down = -delta.clip(upper=0)
+            delta_vals = prices_series.diff()
+            up = delta_vals.clip(lower=0)
+            down = -delta_vals.clip(upper=0)
             rs = up.rolling(14).mean() / down.rolling(14).mean()
             rsi = 100 - (100 / (1 + rs))
 
             latest_price = prices_series.iloc[-1]
+            latest_sma20 = sma20.dropna().iloc[-1] if not sma20.dropna().empty else None
             latest_sma50 = sma50.dropna().iloc[-1] if not sma50.dropna().empty else None
-            trend = "Bullish" if latest_sma50 and latest_price > latest_sma50 else "Bearish"
+            latest_sma200 = sma200.dropna().iloc[-1] if not sma200.dropna().empty else None
+            latest_rsi = rsi.dropna().iloc[-1] if not rsi.dropna().empty else None
 
-            st.markdown("**Technical Summary**")
-            st.write(f"- Trend: {trend}")
-            st.write(f"- Annualized Volatility: {volatility:.2%}")
+            # MACD
+            ema12 = prices_series.ewm(span=12, adjust=False).mean()
+            ema26 = prices_series.ewm(span=26, adjust=False).mean()
+            macd_line = ema12 - ema26
+            macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+            latest_macd = macd_line.iloc[-1]
+            latest_macd_signal = macd_signal.iloc[-1]
+            macd_bullish = latest_macd > latest_macd_signal
 
+            ts1, ts2, ts3 = st.columns(3)
+
+            # Moving Averages card
+            with ts1:
+                ma_rows = ""
+                for ma_label, ma_val in [("MA 20", latest_sma20), ("MA 50", latest_sma50), ("MA 200", latest_sma200)]:
+                    if ma_val is not None:
+                        above = latest_price > ma_val
+                        dot_color = "#22c55e" if above else "#ef4444"
+                        signal_text = f'<span style="color:{dot_color}">{"Above" if above else "Below"}</span>'
+                        ma_rows += f'''<div class="ta-ma-row">
+                            <span><span class="ta-dot" style="background:{dot_color}"></span><span style="color:#ccc">{ma_label}</span></span>
+                            <span style="color:#888">{_cur}{ma_val:,.0f} · {signal_text}</span>
+                        </div>'''
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">Moving Averages</div>{ma_rows}
+                </div>''', unsafe_allow_html=True)
+
+            # Momentum card
+            with ts2:
+                rsi_color = "#22c55e" if latest_rsi and latest_rsi < 70 and latest_rsi > 30 else ("#ef4444" if latest_rsi and latest_rsi >= 70 else "#22c55e")
+                rsi_label = "Neutral" if latest_rsi and 30 < latest_rsi < 70 else ("Overbought" if latest_rsi and latest_rsi >= 70 else "Oversold")
+                rsi_badge_kind = "amber" if rsi_label == "Neutral" else ("red" if rsi_label == "Overbought" else "green")
+                macd_badge = _badge("Bullish", "green") if macd_bullish else _badge("Bearish", "red")
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">Momentum</div>
+                    <div class="ta-ma-row">
+                        <span style="color:#ccc">RSI (14)</span>
+                        <span style="color:#fff;font-weight:500">{latest_rsi:.1f} {_badge(rsi_label, rsi_badge_kind)}</span>
+                    </div>
+                    <div class="ta-ma-row">
+                        <span style="color:#ccc">MACD</span>
+                        <span>{macd_badge}</span>
+                    </div>
+                    <div class="ta-ma-row">
+                        <span style="color:#ccc">Volatility</span>
+                        <span style="color:#fff;font-weight:500">{volatility:.1%}</span>
+                    </div>
+                </div>''' if latest_rsi else '<div class="ta-card"><div class="ta-label">Momentum</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+
+            # Drawdown & Risk card
+            with ts3:
+                pct_from_ath = data.market_data.percentage_change_from_high
+                yr_return = data.market_data.year_change
+                beta = data.market_data.beta
+                rows_dd = ""
+                if pct_from_ath is not None:
+                    dd_color = "#ef4444" if pct_from_ath < 0 else "#22c55e"
+                    rows_dd += f'<div class="ta-ma-row"><span style="color:#ccc">From ATH</span><span style="color:{dd_color};font-weight:500">{pct_from_ath:+.2f}%</span></div>'
+                if yr_return is not None:
+                    yr_color = "#22c55e" if yr_return >= 0 else "#ef4444"
+                    rows_dd += f'<div class="ta-ma-row"><span style="color:#ccc">1Y Return</span><span style="color:{yr_color};font-weight:500">{yr_return:+.2f}%</span></div>'
+                if beta is not None:
+                    rows_dd += f'<div class="ta-ma-row"><span style="color:#ccc">Beta</span><span style="color:#fff;font-weight:500">{beta:.2f}</span></div>'
+                if not rows_dd:
+                    rows_dd = '<div class="ta-value">—</div>'
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">Drawdown & Risk</div>{rows_dd}
+                </div>''', unsafe_allow_html=True)
+
+            # ── SMA Chart ──
             sma_fig = go.Figure()
-            sma_fig.add_trace(go.Scatter(x=prices_series.index, y=prices_series, name="Price"))
-            sma_fig.add_trace(go.Scatter(x=sma20.index, y=sma20, name="SMA 20"))
-            sma_fig.add_trace(go.Scatter(x=sma50.index, y=sma50, name="SMA 50"))
-            sma_fig.add_trace(go.Scatter(x=sma200.index, y=sma200, name="SMA 200"))
-
+            sma_fig.add_trace(go.Scatter(x=prices_series.index, y=prices_series, name="Price", line=dict(color="#2962FF", width=1.5)))
+            sma_fig.add_trace(go.Scatter(x=sma20.index, y=sma20, name="SMA 20", line=dict(color="#FF9800", width=1, dash="dot")))
+            sma_fig.add_trace(go.Scatter(x=sma50.index, y=sma50, name="SMA 50", line=dict(color="#AB47BC", width=1, dash="dot")))
+            sma_fig.add_trace(go.Scatter(x=sma200.index, y=sma200, name="SMA 200", line=dict(color="#26A69A", width=1, dash="dot")))
             sma_fig.update_layout(
-                title="Price with Simple Moving Averages",
-                template="plotly_white",
-                height=350
+                template="plotly_dark", height=350,
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=0, r=50, t=10, b=10),
+                xaxis=dict(showgrid=False, showline=False, zeroline=False, tickfont=dict(color="#787B86", size=10)),
+                yaxis=dict(showgrid=False, showline=False, zeroline=False, side="right", tickprefix=_cur, tickfont=dict(color="#787B86", size=10)),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=11, color="#aaa")),
             )
             st.plotly_chart(sma_fig, width='stretch')
 
-            # -------- RSI Chart --------
+            # ── RSI Chart ──
             if not rsi.dropna().empty:
                 rsi_fig = go.Figure()
-                rsi_fig.add_trace(go.Scatter(x=rsi.index, y=rsi, name="RSI"))
-                rsi_fig.add_hline(y=70, line_dash="dash", line_color="red")
-                rsi_fig.add_hline(y=30, line_dash="dash", line_color="green")
+                rsi_fig.add_trace(go.Scatter(x=rsi.index, y=rsi, name="RSI", line=dict(color="#AB47BC", width=1.5), fill="tozeroy", fillcolor="rgba(171,71,188,0.08)"))
+                rsi_fig.add_hline(y=70, line_dash="dash", line_color="#ef4444", line_width=0.8)
+                rsi_fig.add_hline(y=30, line_dash="dash", line_color="#22c55e", line_width=0.8)
+                rsi_fig.add_hrect(y0=30, y1=70, fillcolor="rgba(255,255,255,0.02)", line_width=0)
                 rsi_fig.update_layout(
-                    title="RSI (14)",
-                    template="plotly_white",
-                    height=220
+                    template="plotly_dark", height=180,
+                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                    margin=dict(l=0, r=50, t=10, b=10), showlegend=False,
+                    xaxis=dict(showgrid=False, showline=False, zeroline=False, tickfont=dict(color="#787B86", size=10)),
+                    yaxis=dict(showgrid=False, showline=False, zeroline=False, side="right", tickfont=dict(color="#787B86", size=10), range=[0, 100]),
                 )
                 st.plotly_chart(rsi_fig, width='stretch')
         else:
-            st.info("📊 No price history available for technical analysis")
+            ts1, ts2, ts3 = st.columns(3)
+            with ts1:
+                st.markdown('<div class="ta-card"><div class="ta-label">Moving Averages</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+            with ts2:
+                st.markdown('<div class="ta-card"><div class="ta-label">Momentum</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+            with ts3:
+                st.markdown('<div class="ta-card"><div class="ta-label">Drawdown & Risk</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+            st.info("No price history available for technical analysis")
+
+        # ══════════════════════════════════════════════
+        # 5. ANALYST & SENTIMENT
+        # ══════════════════════════════════════════════
+        st.markdown('<div class="ta-section-title">ANALYST & SENTIMENT</div>', unsafe_allow_html=True)
+
+        an1, an2 = st.columns(2)
+
+        # Selection Status card (reuses max_drop logic)
+        with an1:
+            max_drop = getattr(data.market_data, 'max_drop_after_high', None)
+            if max_drop is not None:
+                is_selected = max_drop <= -25
+            elif data.market_data.percentage_change_from_high is not None:
+                is_selected = data.market_data.percentage_change_from_high <= -25
+            else:
+                is_selected = None
+
+            if is_selected is not None:
+                sel_text = "Selected" if is_selected else "Not Selected"
+                sel_color = "#22c55e" if is_selected else "#ef4444"
+                sel_icon = "✅" if is_selected else "❌"
+                drop_sub = f'<div class="ta-sub" style="color:#888;margin-top:4px">Dropped {abs(max_drop):.1f}% after peak</div>' if max_drop is not None else ""
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">Selection Status</div>
+                    <div class="ta-value">{sel_icon} {sel_text}</div>{drop_sub}
+                </div>''', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="ta-card"><div class="ta-label">Selection Status</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+
+        # Overall High/Low card
+        with an2:
+            oh = data.market_data.overall_high
+            ol = data.market_data.overall_low
+            if oh is not None and ol is not None:
+                st.markdown(f'''<div class="ta-card">
+                    <div class="ta-label">Overall Price Range</div>
+                    <div class="ta-value" style="font-size:16px">{_cur}{ol:,.2f} – {_cur}{oh:,.2f}</div>
+                    <div class="ta-sub" style="color:{"#ef4444" if data.market_data.percentage_change_from_high and data.market_data.percentage_change_from_high < 0 else "#22c55e"};margin-top:4px">
+                        {data.market_data.percentage_change_from_high:+.2f}% from ATH</div>
+                </div>''' if data.market_data.percentage_change_from_high is not None else f'''<div class="ta-card">
+                    <div class="ta-label">Overall Price Range</div>
+                    <div class="ta-value" style="font-size:16px">{_cur}{ol:,.2f} – {_cur}{oh:,.2f}</div>
+                </div>''', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="ta-card"><div class="ta-label">Overall Price Range</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
 
         # =========================
         # =========================

@@ -16,25 +16,25 @@
     "business_overview": {
         "description": "Jio Financial Services Limited, through its subsidiaries, engages in the business of investing and financing, insurance broking, payment bank and payment aggregator, and payment gateway services in India. The company provides loans, savings accounts, recharges, digital insurance, financial tracking, management tools, digital banking, unified payments interface transactions, bill payments, and insurance advisory; and asset and wealth management, and broking services, as well as operating lease solutions to consumers and businesses through a Device-as-a-Service model. It also provides insurance broking services, such as car, bike, health, term, investment, SMEs, MSMEs, property, cyber risk, commercial lines, corporate, and education. In addition, it offers digital banking services, including zero balance, savings, salary, wallet, and online and offline payment solutions; debit cards; payment systems, including aadhaar enabled payment and domestic money transfer; digital payment solutions. Further, it provides home loan; home loan against balance transfer; loan against property, mutual funds, and shares; solar financing; corporate loans and lease; and distribution of life, non-life, and health insurance products. The company was formerly known as Reliance Strategic Investments Limited and changed its name to Jio Financial Services Limited in July 2023. Jio Financial Services Limited was incorporated in 1999 and is based in Mumbai, India.",
         "main_products": [
-            "Digital Banking",
-            "Loans & Credit",
+            "Consumer Loans",
+            "Digital Banking Services",
             "Insurance Broking",
-            "Wealth Management",
-            "Payment Solutions"
+            "Asset & Wealth Management",
+            "Payment Bank & Payment Solutions"
         ],
         "revenue_sources": [
-            "Interest income from loans",
-            "Payment processing fees",
-            "Insurance brokerage commissions",
-            "Wealth management fees",
-            "Operating lease income"
+            "Interest Income from Loans",
+            "Fees from Insurance Broking",
+            "Transaction Fees from Payment Services",
+            "Asset Management Fees",
+            "Leasing and Device-as-a-Service Revenue"
         ],
         "geographic_presence": "India",
         "growth_segments": [
-            "Digital Lending",
-            "Payment Solutions",
-            "Insurance Broking",
-            "Wealth Management",
+            "Asset Management & Wealth Management",
+            "Digital Payments & Platform Services",
+            "Insurance Distribution",
+            "Device-as-a-Service Leasing",
             "Solar Financing"
         ]
     },
@@ -42,45 +42,41 @@
         "revenue": 25062899712.0,
         "net_profit": 16047899648.0,
         "ebitda": null,
-        "eps": 2.52,
+        "eps": 2.53,
         "dividend_yield": 0.0021,
         "payout_ratio": 0.2,
         "total_assets": 1149300000000.0,
-        "total_liabilities": 144863.0,
+        "total_liabilities": 152500000000.0,
         "debt_to_equity": 0.006510690501226779,
         "cash_balance": 8100599808.0,
         "total_debt": 7430000000.0,
         "operating_cash_flow": null,
         "free_cash_flow": null,
-        "pe_ratio": 94.5,
-        "pb_ratio": 1.1035715,
+        "pe_ratio": 95.4,
+        "pb_ratio": 1.1226415094339623,
         "peg_ratio": null,
-        "enterprise_value": 1566616977408.0,
+        "enterprise_value": 1654483845120.0,
         "ev_ebitda": null,
         "profit_margin": 0.5371485943775101,
         "operating_margin": 0.68,
         "gross_margin": 1.0
     },
     "market_data": {
-        "current_price": 235.0,
-        "week_52_high": 338.6,
-        "week_52_low": 216.62,
+        "current_price": 238.0,
+        "week_52_high": 339.0,
+        "week_52_low": 223.0,
         "overall_high": 344.6625671386719,
         "overall_low": 200.607177734375,
-        "percentage_change_from_high": -31.721625021925544,
+        "percentage_change_from_high": -30.946954299147073,
         "max_drop_after_high": -41.79606465541629,
-        "market_cap": 1494890000000.0,
-        "volume": 13771959,
-        "avg_volume": 14700502,
+        "market_cap": 1509510000000.0,
+        "volume": 15377762,
+        "avg_volume": 15011799,
         "beta": 0.623,
         "promoter_holding": 47.12,
         "fii_holding": 11.55,
         "dii_holding": 15.36,
         "price_history": {
-            "2024-10-11": 340.9682922363281,
-            "2024-10-14": 339.5205383300781,
-            "2024-10-15": 336.2257080078125,
-            "2024-10-16": 333.1305236816406,
             "2024-10-17": 328.6375427246094,
             "2024-10-18": 329.8356628417969,
             "2024-10-21": 326.6905822753906,
@@ -441,35 +437,39 @@
             "2026-04-01": 231.92999267578125,
             "2026-04-02": 229.47999572753906,
             "2026-04-06": 235.30999755859375,
-            "2026-04-07": 235.3300018310547
+            "2026-04-07": 235.3300018310547,
+            "2026-04-08": 246.86000061035156,
+            "2026-04-09": 238.83999633789062,
+            "2026-04-10": 243.1999969482422,
+            "2026-04-13": 237.67999267578125
         },
-        "day_change": 0.008501242050268733,
-        "week_change": -0.8510656079696715,
-        "month_change": -8.998454649357639,
-        "month_6_change": -26.136957615568367,
-        "year_change": 4.3923108939471485,
-        "year_5_cagr": null,
+        "day_change": -2.269738627355207,
+        "week_change": 3.5732948844822277,
+        "month_change": -7.499520768936041,
+        "month_6_change": -24.86961692302112,
+        "year_change": 3.3160969552897726,
+        "year_5_cagr": 52.0,
         "sector": "Financial Services",
         "sector_performance": "financial-services",
         "competitors": [
             {
                 "name": "Jio Financial Services Limited",
                 "symbol": "JIOFIN.NS",
-                "market_cap": 1495084826624,
-                "pe_ratio": 93.384926,
-                "pb_ratio": 1.1035715,
+                "market_cap": 1509510000000.0,
+                "pe_ratio": 95.4,
+                "pb_ratio": 1.1226415094339623,
                 "revenue": 25062899712,
-                "profit_margin": 0.6403,
-                "roe": "N/A",
-                "debt_to_equity": 7.797,
+                "profit_margin": 0.5371485943775101,
+                "roe": 0.0123,
+                "debt_to_equity": 0.006510690501226779,
                 "is_main_company": true
             },
             {
                 "name": "HDFC Bank Limited",
                 "symbol": "HDFCBANK.NS",
-                "market_cap": 11883596742656,
-                "pe_ratio": 17.22061,
-                "pb_ratio": 2.1021562,
+                "market_cap": 12233024208896,
+                "pe_ratio": 17.73488,
+                "pb_ratio": 2.163968,
                 "revenue": 2845330898944,
                 "profit_margin": 0.26187,
                 "roe": 0.14015001,
@@ -480,9 +480,9 @@
             {
                 "name": "ICICI Bank Limited",
                 "symbol": "ICICIBANK.NS",
-                "market_cap": 8917576843264,
-                "pe_ratio": 17.017351,
-                "pb_ratio": 2.5541594,
+                "market_cap": 9675494916096,
+                "pe_ratio": 18.450089,
+                "pb_ratio": 2.7707143,
                 "revenue": 1924702535680,
                 "profit_margin": 0.27513,
                 "roe": 0.16798,
@@ -493,9 +493,9 @@
             {
                 "name": "Axis Bank Limited",
                 "symbol": "AXISBANK.NS",
-                "market_cap": 3887701426176,
-                "pe_ratio": 14.84503,
-                "pb_ratio": 1.8750451,
+                "market_cap": 4209444126720,
+                "pe_ratio": 16.058844,
+                "pb_ratio": 2.0302863,
                 "revenue": 768435683328,
                 "profit_margin": 0.3417,
                 "roe": 0.13625,
@@ -504,15 +504,28 @@
                 "is_main_company": false
             },
             {
-                "name": "Bajaj Finance Limited",
-                "symbol": "BAJFINANCE.NS",
-                "market_cap": 5315597172736,
-                "pe_ratio": 29.547338,
-                "pb_ratio": 5.145377,
-                "revenue": 412833284096,
-                "profit_margin": 0.4368,
+                "name": "Kotak Mahindra Bank Limited",
+                "symbol": "KOTAKBANK.NS",
+                "market_cap": 3698728632320,
+                "pe_ratio": 19.666843,
+                "pb_ratio": 2.2005525,
+                "revenue": 765436690432,
+                "profit_margin": 0.24558,
                 "roe": "N/A",
-                "debt_to_equity": 310.294,
+                "debt_to_equity": "N/A",
+                "source": "batch_llm_yfinance",
+                "is_main_company": false
+            },
+            {
+                "name": "Bajaj Finserv Ltd.",
+                "symbol": "BAJAJFINSV.NS",
+                "market_cap": 2856804417536,
+                "pe_ratio": 29.864729,
+                "pb_ratio": 3.7209737,
+                "revenue": 1470303567872,
+                "profit_margin": 0.06583,
+                "roe": "N/A",
+                "debt_to_equity": 237.537,
                 "source": "batch_llm_yfinance",
                 "is_main_company": false
             }
@@ -520,12 +533,11 @@
     },
     "swot": {
         "strengths": [
-            "Strong market cap of $1,495,084,826,624",
-            "Healthy profit margin of 64.03%",
+            "Strong market cap of \u20b9150951.00 Cr",
+            "Healthy profit margin of 53.71%",
             "Established market presence"
         ],
         "weaknesses": [
-            "High debt-to-equity ratio of 7.80",
             "High PE ratio indicating overvaluation"
         ],
         "opportunities": [
@@ -541,28 +553,63 @@
     },
     "news": [
         {
-            "title": "Jio Financial Services (NSE:JIOFIN) Statistics & Valuation Metrics",
-            "publisher": "stockanalysis.com",
-            "link": "https://stockanalysis.com/quote/nse/JIOFIN/statistics/",
-            "summary": "|  |  |\n --- |\n| Revenue | 25.06B |\n| Gross Profit | 25.06B |\n| Operating Income | 15.92B |\n| Pretax Income | 19.69B |\n| Net Income | 16.05B |\n| EBITDA | n/a |\n| EBIT | n/a |\n| Earnings Per Share (EPS",
+            "title": "Jio Financial Services (BSE:543940) - Earnings & Revenue Performance - Simply Wall St",
+            "publisher": "simplywall.st",
+            "link": "https://simplywall.st/stocks/in/diversified-financials/bse-543940/jio-financial-services-shares/past",
+            "summary": "## Recent past performance updates\n\n### Third quarter 2026 earnings released: EPS: \u20b90.42 (vs \u20b90.46 in 3Q 2025)\n\n### Jio Financial Services Limited to Report Q3, 2026 Results on Jan 15, 2026\n\n### Second quarter 2026 earnings released: EPS: \u20b91.10 (vs \u20b91.09 in 2Q 2025)\n\n### Jio Financial Services Limit",
             "source": "tavily"
         },
         {
-            "title": "Jio Financial Services Limited (JIOFIN.NS) - Yahoo Finance",
-            "publisher": "finance.yahoo.com",
-            "link": "https://finance.yahoo.com/quote/JIOFIN.NS/key-statistics/",
-            "summary": "### Income Statement\n\n|  |  |\n --- |\n| Revenue (ttm) | 25.06B |\n| Revenue Per Share (ttm) | 3.88 |\n| Quarterly Revenue Growth (yoy) | 57.30% |\n| Gross Profit (ttm) | 25.06B |\n| EBITDA \n| Net Income Av",
+            "title": "Jio Financial Services Share Price Today, Jio Financial Services Stock Price Live NSE/BSE Updates",
+            "publisher": "economictimes.indiatimes.com",
+            "link": "https://economictimes.indiatimes.com/jio-financial-services-ltd/stocks/companyid-14555.cms",
+            "summary": "Stock Forecast:   \n After showing 901.05 Cr. of sales and 10.11% of quarterly net loss, there have been multiple ups and downs in the Jio Financial Services stock prices in the past few weeks. For example, Jio Financial Services stock price on 3rd of April 2026 was around Rs. 229.48. Jio Financial S",
             "source": "tavily"
         },
         {
-            "title": "Jio Financial Services Limited (JIOFIN.NS) Income Statement",
-            "publisher": "finance.yahoo.com",
-            "link": "https://finance.yahoo.com/quote/JIOFIN.NS/financials/",
-            "summary": "--\n\n234,600\n\n129,100\n\n1,300\n\n--\n\nTotal Expenses\n\n6,506,000\n\n1,654,000\n\n2,592,500\n\n-226,500\n\n1,316\n\nNet Income from Continuing & Discontinued Operation\n\n16,048,400\n\n16,125,900\n\n16,045,500\n\n312,500\n\n16,",
+            "title": "Reliance Jio IPO set for 2026, analysts see tariff hike and execution risks ahead - The Economic Times",
+            "publisher": "economictimes.indiatimes.com",
+            "link": "https://economictimes.indiatimes.com/markets/ipos/fpos/reliance-jio-ipo-set-for-2026-analysts-see-tariff-hike-and-execution-risks-ahead/articleshow/123626186.cms",
+            "summary": "| 03:59 PM | 2 Apr 2026 | -3.73(-1.49%) | Upside |\n| Infosys Share Price | 1300.8 | 28.4% |\n| 03:59 PM | 2 Apr 2026 | 25.1(1.97%) | Upside |\n| IRCTC Share Price | 511.8 | 51.9% |\n| 03:59 PM | 2 Apr 2026 | 0.61(0.12%) | Upside |\n| ITC Share Price | 292.85 | 23.9% |\n| 03:59 PM | 2 Apr 2026 | 1.16(0.4%",
+            "source": "tavily"
+        },
+        {
+            "title": "Jio Financial Services shares in focus as firm likely to venture into life, general insurance business in 2026 - The Economic Times",
+            "publisher": "economictimes.indiatimes.com",
+            "link": "https://economictimes.indiatimes.com/markets/stocks/news/jio-financial-services-shares-in-focus-as-firm-likely-to-venture-into-life-general-insurance-business-in-2026/articleshow/129890717.cms",
+            "summary": "The Economic Times\n\nThe Economic Times\n\n# Jio Financial Services shares in focus as firm likely to venture into life, general insurance business in 2026\n\nArticle Image\n\nSpeaking about the company\u2019s newly expanded offerings on the app, Sethia said that it is showing very good traction, with users owi",
+            "source": "tavily"
+        },
+        {
+            "title": "Jio Financial Services Q2 Results 2026 - Find Jio Financial Services Q2 Earnings Result | JIOFIN Q2 results",
+            "publisher": "livemint.com",
+            "link": "https://www.livemint.com/market/market-stats/jio-financial-services-q2-results-s0005518",
+            "summary": "## Quarterly - Jio Financial Services Q2 Results\n\n| Fiscal Period | Sep 25 | Jun 25 | QoQ Comp | Sep 24 | YoY Comp |\n ---  ---  --- |\n| Total Operating Expense | 300.68 | 161.71 | 85.94% | 146.07 | 105.85% |\n| Depreciation/ Amortization | 7.75 | 6.13 | 26.43% | 5.61 | 38.15% |\n| Operating Income | 5",
+            "source": "tavily"
+        },
+        {
+            "title": "Jio Financial Services Share Price Today 13 Apr 2026: Live NSE/BSE Rates, Technical Analysis and Expert Forecasts",
+            "publisher": "livemint.com",
+            "link": "https://www.livemint.com/market/market-stats/stocks-jio-financial-services-share-price-nse-bse-s0005518",
+            "summary": "| Meeting Date | Purpose |\n --- |\n| 2026-01-15 | Quarterly Results |\n| 2025-10-16 | Quarterly Results |\n| 2025-07-30 | Others |\n| 2025-07-17 | Quarterly Results |\n| 2025-04-17 | Audited Results & Final Dividend |\n\nJio Financial Services is trading at 237.65 as on Mon Apr 13 2026 10:29:32. This is -2",
+            "source": "tavily"
+        },
+        {
+            "title": "Jio Financial Share Price, Jio Financial Stock Price, Jio Financial Services Ltd. Stock Price, Share Price, Live BSE/NSE, Jio Financial Services Ltd. Bids Offers. Buy/Sell Jio Financial Services Ltd. news & tips, & F&O Quotes, NSE/BSE Forecast News and Live Quotes - Moneycontrol.com",
+            "publisher": "moneycontrol.com",
+            "link": "https://www.moneycontrol.com/india/stockpricequote/finance-others/jiofinancialservices/JFS",
+            "summary": "Jio Financial Services stock rated u2018buyu2019, Motilal Oswal sees 48% profit CAGR; check target price, upside\n\nJio Financial Services stock rated u2018buyu2019, Motilal Oswal sees 48% profit CAGR; check target price, upside\nMar 12 2026 10:33 AM\n\nBuy JIO Financial Services; target of Rs 320: Motil",
+            "source": "tavily"
+        },
+        {
+            "title": "Jio Financial Services Q1 Results 2026 - Find Jio Financial Services Q1 Earnings Result | JIOFIN Q1 results",
+            "publisher": "livemint.com",
+            "link": "https://www.livemint.com/market/market-stats/jio-financial-services-q1-results-s0005518",
+            "summary": "View Market Dashboard\n\n Home\n Market\n Market Stats\n Jio Financial Services Q1 Results\n\n# Jio Financial Services Q1 Results\n\n BSE: 543940\n NSE: JIOFIN\n ISIN: INE758E01017\n Sector: Consumer Financial Services\n\nBSE\n\n237.65-5.60 (-2.30%)\n\nVolume1.18 M\n\nUpdated:Mon 13 Apr, 2026 | 15:59:32\n\nNSE\n\n237.68-5.",
             "source": "tavily"
         }
     ],
     "announcements": [],
-    "timestamp": "2026-04-07T16:30:58.787844",
+    "timestamp": "2026-04-13T17:41:40.978538",
     "finrobot_report": null
 }

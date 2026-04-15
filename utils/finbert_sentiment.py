@@ -48,6 +48,12 @@ class FinBERTSentimentAnalyzer:
         print("Loading ProsusAI/finbert model (first call only)...")
 
         # Try GPU if available
+        # NOTE: top_k=None makes the pipeline return the full probability
+        # distribution (positive/negative/neutral) per text instead of only
+        # the top label. We need that so near-neutral predictions still
+        # contribute a directional score via (p_pos - p_neg) — without it,
+        # anything FinBERT labels "neutral" gets pegged at exactly 50 and
+        # tweet/Reddit averages collapse to ~50 every time.
         if has_cuda:
             try:
                 self.__class__._pipeline = hf_pipeline(
@@ -56,6 +62,7 @@ class FinBERTSentimentAnalyzer:
                     device=0,
                     truncation=True,
                     max_length=512,
+                    top_k=None,
                 )
                 print("FinBERT model loaded on GPU.")
                 return True
@@ -70,6 +77,7 @@ class FinBERTSentimentAnalyzer:
                 device=-1,
                 truncation=True,
                 max_length=512,
+                top_k=None,
             )
             print("FinBERT model loaded on CPU.")
             return True
@@ -81,21 +89,24 @@ class FinBERTSentimentAnalyzer:
     # Score mapping helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _label_to_score(label: str, confidence: float) -> float:
-        """Map FinBERT label + confidence to 0-100 score."""
-        label = label.lower()
-        if label == "positive":
-            return 50 + confidence * 50
-        elif label == "negative":
-            return 50 - confidence * 50
-        else:  # neutral
-            return 50.0
+    def _probs_to_score(p_pos: float, p_neg: float) -> float:
+        """
+        Map FinBERT class probabilities to a 0-100 sentiment score.
+
+        Uses the *differential* (p_pos - p_neg) rather than only the top
+        class. This way a text that FinBERT classifies as "neutral" with a
+        small positive lean (e.g., pos=0.30, neu=0.55, neg=0.15) still
+        produces a score > 50 instead of being pegged flat at 50.
+        """
+        # (p_pos - p_neg) ranges from -1 (all negative) to +1 (all positive).
+        # Scale to 0-100 with 50 as neutral midpoint.
+        return 50.0 + (p_pos - p_neg) * 50.0
 
     @staticmethod
     def _score_to_label(score: float) -> str:
-        if score >= 70:
+        if score >= 60:
             return "Positive"
-        elif score <= 30:
+        elif score <= 40:
             return "Negative"
         else:
             return "Neutral"
@@ -147,18 +158,39 @@ class FinBERTSentimentAnalyzer:
         total_confidence = 0.0
 
         for text, res in zip(clean_texts, raw_results):
-            label = res["label"].lower()
-            confidence = float(res["score"])
-            score = self._label_to_score(label, confidence)
+            # With top_k=None the pipeline returns a list of {label, score}
+            # dicts per input (one entry per class). Older configurations
+            # return a single dict with the top label — handle both.
+            if isinstance(res, list):
+                probs = {
+                    item["label"].lower(): float(item["score"])
+                    for item in res
+                }
+            else:
+                # Single top-label fallback: treat as one-hot.
+                probs = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
+                probs[res["label"].lower()] = float(res["score"])
 
-            breakdown[label] = breakdown.get(label, 0) + 1
+            p_pos = probs.get("positive", 0.0)
+            p_neg = probs.get("negative", 0.0)
+            p_neu = probs.get("neutral", 0.0)
+
+            # Score uses the full probability distribution so near-neutral
+            # predictions still register directional sentiment.
+            score = self._probs_to_score(p_pos, p_neg)
+
+            # Top-class label (still used for the breakdown counts).
+            top_label = max(probs.items(), key=lambda kv: kv[1])[0]
+            top_conf = probs[top_label]
+
+            breakdown[top_label] = breakdown.get(top_label, 0) + 1
             total_score += score
-            total_confidence += confidence
+            total_confidence += top_conf
 
             individual_results.append({
                 "text": text[:200],
-                "label": label.capitalize(),
-                "confidence": round(confidence, 4),
+                "label": top_label.capitalize(),
+                "confidence": round(top_conf, 4),
                 "score": round(score, 2),
             })
 
