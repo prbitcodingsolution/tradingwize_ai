@@ -150,6 +150,14 @@ class ChatDrawingResponse(BaseModel):
     drawing_types_generated: List[str] = Field(description="Types of drawings generated")
     total_drawings: int = Field(description="Total number of drawings generated")
     drawings: List[dict] = Field(description="Array of drawing instructions")
+    explanations: dict = Field(
+        default_factory=dict,
+        description=(
+            "LLM-powered explanations of the returned drawings — "
+            "includes a summary, per-drawing rationale, key levels, "
+            "and actionable trading insights."
+        ),
+    )
     metadata: dict = Field(description="Additional metadata about the analysis")
     message: Optional[str] = Field(None, description="Success or error message")
 
@@ -206,7 +214,7 @@ async def get_examples():
         "examples": [
             {
                 "message": "mark supply and demand zones on this stock",
-                "description": "Generates supply and demand zones only",
+                "description": "Generates BigBeluga Supply/Demand Zones — ATR-tall boxes anchored at high-volume 3-bar impulses, labelled with impulse-leg volume delta and its share of total",
                 "drawing_types": ["supply_demand_zones"]
             },
             {
@@ -230,8 +238,43 @@ async def get_examples():
                 "drawing_types": ["smc"]
             },
             {
+                "message": "mark market structure on this stock",
+                "description": "Generates Market Structure Breaks (MSB) with Order Blocks (OB) and Breaker/Mitigation Blocks (BB/MB)",
+                "drawing_types": ["market_structure"]
+            },
+            {
+                "message": "draw price action on this stock",
+                "description": "Generates BigBeluga Price-Action / SMC: 5-bar swing BOS & CHoCH structure lines, sweeps (x), and volumetric order blocks",
+                "drawing_types": ["price_action"]
+            },
+            {
+                "message": "draw order blocks on this stock",
+                "description": "Generates wugamlo Order Block Finder zones: institutional OB = last opposite-colour candle before N consecutive trending candles",
+                "drawing_types": ["order_block"]
+            },
+            {
+                "message": "draw liquidity on this stock",
+                "description": "Generates LuxAlgo Liquidity Swings: pivot-high/low liquidity levels with per-zone touch count and accumulated volume",
+                "drawing_types": ["liquidity"]
+            },
+            {
+                "message": "show smart money concepts",
+                "description": "Generates the legacy SMC output PLUS the BigBeluga Price-Action BOS/CHoCH/VOB visualisation",
+                "drawing_types": ["smc", "price_action"]
+            },
+            {
+                "message": "draw all the patterns and zones",
+                "description": "Generates supply/demand zones, candlestick patterns and market structure together",
+                "drawing_types": ["supply_demand_zones", "candlestick_patterns", "market_structure"]
+            },
+            {
                 "message": "show fair value gaps (FVG)",
-                "description": "Generates Fair Value Gap rectangles",
+                "description": "Generates Fair Value Gap rectangles plus ATR-wide order-block zones (BigBeluga FVG-OB)",
+                "drawing_types": ["fvg"]
+            },
+            {
+                "message": "draw fvg order blocks",
+                "description": "Same as above — 3-candle imbalance gap + ATR-wide OB zone per gap",
                 "drawing_types": ["fvg"]
             },
             {
@@ -254,11 +297,17 @@ async def get_examples():
             "supply_demand_zones",
             "fvg",
             "smc",
+            "price_action",
+            "order_block",
+            "liquidity",
+            "market_structure",
             "candlestick_patterns",
             "bollinger_bands",
             "rsi_signals",
+            "macd",
             "macd_crossovers",
             "key_levels",
+            "liquidity_sweeps",
             "all"
         ]
     }
@@ -354,6 +403,7 @@ async def generate_from_chat(request: ChatDrawingRequest):
             drawing_types_generated=parsed_intent.get('drawing_types', []),
             total_drawings=result.get('total_drawings', 0),
             drawings=result.get('drawings', []),
+            explanations=result.get('explanations', {}),
             metadata={
                 "generated_at": datetime.now().isoformat(),
                 "data_source": "external_api",
@@ -367,7 +417,14 @@ async def generate_from_chat(request: ChatDrawingRequest):
                 "user_wants": parsed_intent.get('user_wants', ''),
                 "filtered": result.get('filtered', False)
             },
-            message=f"Successfully generated {result.get('total_drawings', 0)} drawings based on your request"
+            # Prefer the agent's chat-ready explanation summary as the
+            # `message` so the user sees real analysis in the chat. Fall
+            # back to a generic line if the agent didn't produce one
+            # (e.g. when the explanation pipeline was skipped entirely).
+            message=result.get('message') or (
+                f"Successfully generated {result.get('total_drawings', 0)} "
+                f"drawings based on your request"
+            )
         )
         
         logger.info(f"📤 Sending response with {response.total_drawings} drawings")
@@ -459,16 +516,40 @@ async def test_chat_endpoint():
                 {
                     "type": "LineToolRectangle",
                     "state": {
-                        "text": "🔴 SUPPLY ZONE",
-                        "backgroundColor": "rgba(255, 82, 82, 0.2)"
+                        "text": "Supply: -1.66M | 5%",
+                        "backgroundColor": "rgba(255, 152, 0, 0.18)"
+                    },
+                    "metadata": {
+                        "sdz_type": "supply_zone",
+                        "sdz_direction": "supply",
+                        "sdz_delta": -1660000.0,
+                        "sdz_share_pct": 5.0
                     }
                 }
-            ]
+            ],
+            "explanations": {
+                "summary": "Detected 3 active supply zones above current price and 2 demand zones below — bias is mildly bearish.",
+                "context": "Stock has been in a corrective down-leg for the past 8 sessions after failing to break 105.",
+                "drawings": [
+                    {
+                        "id": "Ab3c9Z",
+                        "category": "supply_zone",
+                        "title": "Active Supply 96–99",
+                        "why": "Marked at the last bullish candle before a 3-bar bearish impulse with above-average volume — classic institutional distribution signature.",
+                        "how_to_trade": "Treat 96–99 as overhead resistance; look for rejection on retest with declining volume before considering shorts."
+                    }
+                ],
+                "key_levels": ["96.50–99.00 (supply_zone)", "89.20–91.40 (demand_zone)"],
+                "trading_insights": "Let price come to the zones — chasing entries in between is lower probability.",
+                "disclaimer": "This analysis is for educational purposes only and does not constitute financial advice."
+            }
         },
         "example_messages": [
             "mark supply and demand zones",
             "show fair value gaps (FVG)",
             "mark SMC on this stock",
+            "mark market structure on this stock",
+            "draw all the patterns and zones",
             "show candlestick patterns",
             "add RSI and MACD",
             "show support resistance",
@@ -510,6 +591,12 @@ if __name__ == "__main__":
     print("   Send natural language messages like:")
     print("   - 'mark supply and demand zones'")
     print("   - 'show candlestick patterns'")
+    print("   - 'mark market structure on this stock'")
+    print("   - 'draw price action on this stock'")
+    print("   - 'draw order blocks on this stock'")
+    print("   - 'draw liquidity on this stock'")
+    print("   - 'show fair value gaps (FVG)'")
+    print("   - 'draw all the patterns and zones'")
     print("   - 'add RSI and MACD indicators'")
     print("\n" + "="*70 + "\n")
     

@@ -4,7 +4,7 @@
     "snapshot": {
         "company_name": "Lupin Limited",
         "ticker_symbol": "LUPIN.NS",
-        "exchange": "NSI",
+        "exchange": "NSE",
         "sector": "Healthcare",
         "industry": "Drug Manufacturers - Specialty & Generic",
         "headquarters": "Mumbai, India",
@@ -16,78 +16,67 @@
     "business_overview": {
         "description": "Lupin Limited, together with its subsidiaries, operates as a pharmaceutical company in India, the United States, and internationally. The company operates in two segments: Pharmaceuticals and Others. It engages in the drug discovery, development, production, marketing, and sale of various branded and generic formulations, biosimilars, over-the-counter and specialty drugs, and active pharmaceutical ingredients (APIs). The company also offers formulations for use in the therapeutic areas of anti-tuberculosis, diabetes management, cardiovascular, chronic obstructive pulmonary diseases, asthma, women's health, and central nervous system areas, as well as pediatrics, gastrointestinal, anti-infective, and nonsteroidal anti-inflammatory drug therapies. In addition, it focuses on various therapeutic spectrum, including rheumatology, oncology, neuroscience, and renal therapies. Further, the company is involved in the provision of diagnostics services, and digital healthcare services; and neuro rehabilition business. It operates through network consists of labs and collection centers. The company has a strategic collaboration with TB Alliance for the development and commercialization of the investigational drug Telacebec for the treatment of multiple mycobacterial diseases including tuberculosis (TB), leprosy, and buruli ulcer. The company was formerly known as Lupin Chemicals Limited and changed its name to Lupin Limited in 2001. Lupin Limited was founded in 1968 and is headquartered in Mumbai, India.",
         "main_products": [
-            "Cardiovascular drugs",
-            "Diabetes drugs",
-            "Anti-tuberculosis drugs",
-            "Respiratory drugs",
-            "Gastrointestinal drugs"
+            "Generic medicines",
+            "Biosimilars",
+            "Injectables",
+            "Respiratory therapies",
+            "TB drugs"
         ],
         "revenue_sources": [
-            "Generic pharmaceuticals",
+            "Pharmaceuticals",
+            "Generic drugs",
             "Active pharmaceutical ingredients (APIs)",
-            "Contract Development and Manufacturing Organization (CDMO) services",
-            "Diagnostics services",
-            "Biosimilars and specialty drugs"
+            "Branded formulations",
+            "Respiratory products"
         ],
         "geographic_presence": "India",
         "growth_segments": [
-            "U.S. market generics",
+            "Complex generics",
             "Biosimilars",
-            "Diagnostics",
-            "Gastrointestinal & hepatology segment",
-            "CDMO services"
+            "Injectables",
+            "Respiratory products",
+            "North America market"
         ]
     },
     "financials": {
         "revenue": 261505007616.0,
         "net_profit": 46450401280.0,
         "ebitda": 68564451328.0,
-        "eps": 101.36,
-        "dividend_yield": 0.0052,
+        "eps": 101.38,
+        "dividend_yield": 0.0051,
         "payout_ratio": 0.17,
         "total_assets": 101350000000.0,
-        "total_liabilities": 33500.0,
+        "total_liabilities": 28978.0,
         "debt_to_equity": 0.09434506635891518,
         "cash_balance": 62820900864.0,
         "total_debt": 6540000000.0,
         "operating_cash_flow": null,
         "free_cash_flow": null,
         "pe_ratio": 21.1,
-        "pb_ratio": 5.334883720930232,
+        "pb_ratio": 5.339534883720931,
         "peg_ratio": null,
-        "enterprise_value": 1049944260608.0,
-        "ev_ebitda": 15.313,
+        "enterprise_value": 1069628129280.0,
+        "ev_ebitda": 15.6,
         "profit_margin": 0.17854684512428298,
         "operating_margin": 0.29,
         "gross_margin": 0.70555997
     },
     "market_data": {
-        "current_price": 2294.0,
-        "week_52_high": 2378.0,
+        "current_price": 2296.0,
+        "week_52_high": 2381.0,
         "week_52_low": 1837.0,
-        "overall_high": 2381.28955078125,
-        "overall_low": 1851.800048828125,
-        "percentage_change_from_high": -3.665642036375298,
+        "overall_high": 2381.0,
+        "overall_low": 1837.0,
+        "percentage_change_from_high": -3.5816539300425823,
         "max_drop_after_high": -22.23541029604782,
-        "market_cap": 1049480000000.0,
-        "volume": 1850190,
-        "avg_volume": 916742,
+        "market_cap": 1049770000000.0,
+        "volume": 274129,
+        "avg_volume": 967853,
         "beta": 0.283,
-        "promoter_holding": 46.89,
-        "fii_holding": 21.5,
-        "dii_holding": 25.58,
+        "promoter_holding": 46.85,
+        "fii_holding": 21.7,
+        "dii_holding": 25.32,
         "price_history": {
-            "2024-10-17": 2162.84814453125,
-            "2024-10-18": 2166.22705078125,
-            "2024-10-21": 2138.6484375,
-            "2024-10-22": 2118.87158203125,
-            "2024-10-23": 2061.72705078125,
-            "2024-10-24": 2118.374755859375,
-            "2024-10-25": 2143.369140625,
-            "2024-10-28": 2191.072509765625,
-            "2024-10-29": 2192.513427734375,
-            "2024-10-30": 2144.90966796875,
-            "2024-10-31": 2173.43212890625,
             "2024-11-01": 2184.11572265625,
             "2024-11-04": 2174.82373046875,
             "2024-11-05": 2168.264404296875,
@@ -441,23 +430,34 @@
             "2026-04-02": 2274.5,
             "2026-04-06": 2279.89990234375,
             "2026-04-07": 2298.300048828125,
-            "2026-04-08": 2294.10009765625
+            "2026-04-08": 2294.10009765625,
+            "2026-04-09": 2295.10009765625,
+            "2026-04-10": 2333.800048828125,
+            "2026-04-13": 2315.10009765625,
+            "2026-04-15": 2338.89990234375,
+            "2026-04-16": 2327.0,
+            "2026-04-17": 2326.10009765625,
+            "2026-04-20": 2328.699951171875,
+            "2026-04-21": 2311.5,
+            "2026-04-22": 2307.89990234375,
+            "2026-04-23": 2341.39990234375,
+            "2026-04-24": 2292.800048828125
         },
-        "day_change": -0.1827416387175601,
-        "week_change": -1.7431878670853627,
-        "month_change": 3.3657834819950403,
-        "month_6_change": 19.598384767075398,
-        "year_change": 18.0509539672545,
-        "year_5_cagr": 9.0,
+        "day_change": -2.0756750466665848,
+        "week_change": -1.4697013825472711,
+        "month_change": -1.9080968331907595,
+        "month_6_change": 18.853355339021174,
+        "year_change": 14.824819660599955,
+        "year_5_cagr": 8.0,
         "sector": "Healthcare",
         "sector_performance": "healthcare",
         "competitors": [
             {
                 "name": "Lupin Limited",
                 "symbol": "LUPIN.NS",
-                "market_cap": 1049480000000.0,
+                "market_cap": 1049770000000.0,
                 "pe_ratio": 21.1,
-                "pb_ratio": 5.334883720930232,
+                "pb_ratio": 5.339534883720931,
                 "revenue": 261505007616,
                 "profit_margin": 0.17854684512428298,
                 "roe": 0.20600000000000002,
@@ -467,9 +467,9 @@
             {
                 "name": "Sun Pharmaceutical Industries Limited",
                 "symbol": "SUNPHARMA.NS",
-                "market_cap": 4113899454464,
-                "pe_ratio": 37.658688,
-                "pb_ratio": 5.28444,
+                "market_cap": 3906597027840,
+                "pe_ratio": 35.761036,
+                "pb_ratio": 5.0181527,
                 "revenue": 568090886144,
                 "profit_margin": 0.19214001,
                 "roe": "N/A",
@@ -480,9 +480,9 @@
             {
                 "name": "Cipla Limited",
                 "symbol": "CIPLA.NS",
-                "market_cap": 982182920192,
-                "pe_ratio": 21.608316,
-                "pb_ratio": 2.9835768,
+                "market_cap": 1039293153280,
+                "pe_ratio": 22.860697,
+                "pb_ratio": 3.1570604,
                 "revenue": 279671898112,
                 "profit_margin": 0.16256,
                 "roe": "N/A",
@@ -493,9 +493,9 @@
             {
                 "name": "Dr. Reddy's Laboratories Limited",
                 "symbol": "DRREDDY.NS",
-                "market_cap": 991953485824,
-                "pe_ratio": 17.53606,
-                "pb_ratio": 2.6638346,
+                "market_cap": 1097110126592,
+                "pe_ratio": 19.412197,
+                "pb_ratio": 2.9462268,
                 "revenue": 345831014400,
                 "profit_margin": 0.16363001,
                 "roe": 0.161,
@@ -506,26 +506,13 @@
             {
                 "name": "Aurobindo Pharma Limited",
                 "symbol": "AUROPHARMA.NS",
-                "market_cap": 775776698368,
-                "pe_ratio": 22.418596,
-                "pb_ratio": 2.213641,
+                "market_cap": 828978167808,
+                "pe_ratio": 23.788334,
+                "pb_ratio": 2.365449,
                 "revenue": 331818598400,
                 "profit_margin": 0.10509,
                 "roe": "N/A",
                 "debt_to_equity": 22.248,
-                "source": "batch_llm_yfinance",
-                "is_main_company": false
-            },
-            {
-                "name": "Divi's Laboratories Limited",
-                "symbol": "DIVISLAB.NS",
-                "market_cap": 1561486163968,
-                "pe_ratio": 62.84188,
-                "pb_ratio": 10.124761,
-                "revenue": 103139999744,
-                "profit_margin": 0.24035,
-                "roe": "N/A",
-                "debt_to_equity": 0.584,
                 "source": "batch_llm_yfinance",
                 "is_main_company": false
             }
@@ -533,62 +520,82 @@
     },
     "swot": {
         "strengths": [
-            "Strong market cap of $1,049,480,000,000",
+            "Scale advantage \u2014 market cap of \u20b9104977.00 Cr",
             "Healthy profit margin of 17.85%",
-            "Established market presence"
+            "Strong ROE of 20.60%"
         ],
         "weaknesses": [
-            "Market competition"
+            "Execution risks in scaling operations"
         ],
         "opportunities": [
-            "Growing sector: Healthcare",
-            "Market expansion potential",
-            "Digital transformation opportunities"
+            "Sector tailwinds in Healthcare",
+            "Consolidation opportunities in Drug Manufacturers - Specialty & Generic"
         ],
         "threats": [
-            "Market volatility and economic uncertainty",
-            "Competitive pressure from industry peers",
-            "Regulatory challenges in Healthcare sector"
+            "Market volatility and macro risks",
+            "Competitive pressure in Drug Manufacturers - Specialty & Generic"
         ]
     },
     "news": [
         {
-            "title": "Lupin Limited (LUPIN.NS) Valuation Measures & Financial Statistics",
-            "publisher": "finance.yahoo.com",
-            "link": "https://finance.yahoo.com/quote/LUPIN.NS/key-statistics/",
-            "summary": "### Income Statement\n\n|  |  |\n --- |\n| Revenue (ttm) | 261.51B |\n| Revenue Per Share (ttm) | 572.69 |\n| Quarterly Revenue Growth (yoy) | 24.30% |\n| Gross Profit (ttm) | 184.51B |\n| EBITDA | 68.56B |\n|",
+            "title": "Lupin  News - Lupin  Announcement, Latest News on Lupin  - The Economic Times",
+            "publisher": "economictimes.indiatimes.com",
+            "link": "https://economictimes.indiatimes.com/lupin-ltd/stocksupdate/companyid-10743.cms",
+            "summary": "Stock Reports Plus, powered by Refinitiv, undertakes detailed company analysis for 4,000+ listed stocks. In addition to detailed company analyses, the report also collates analysts\u2019 forecasts and trend analysis for each component. An average score in Stock Reports Plus is calculated by undertaking q",
             "source": "tavily"
         },
         {
-            "title": "Financial Performance and Reports - Lupin",
-            "publisher": "www.lupin.com",
-            "link": "https://www.lupin.com/investors/financials",
-            "summary": "Lupin Logo\nLupin Logo\n\nGlobe\n\nMenu\nGlobe\nIndia flag icon\nUSA flag icon\nGreat Britain flag icon\nSouth Africa flag icon\nAustralia flag icon\nPhilippines flag icon\nGermany flag icon\nNetherlands flag icon\n",
+            "title": "Lupin (NSE:LUPIN) Stock Price & Overview",
+            "publisher": "stockanalysis.com",
+            "link": "https://stockanalysis.com/quote/nse/LUPIN/",
+            "summary": "logo\n\n# Lupin Limited (NSE:LUPIN)\n\nIndia flag\n\n|  |  |\n --- |\n| Market Cap | 1.07T +19.8% |\n| Revenue (ttm) | 261.51B +18.9% |\n| Net Income | 46.45B +61.9% |\n| EPS | 101.39 +61.7% |\n| Shares Out | n/a |\n| PE Ratio | 23.03 |\n| Forward PE | 23.06 |\n| Dividend | 12.00 (0.52%) |\n| Ex-Dividend Date | Jul",
             "source": "tavily"
         },
         {
-            "title": "Lupin Q3 FY2026 Results - Lupin | Press Release",
-            "publisher": "www.lupin.com",
-            "link": "https://www.lupin.com/media/press-releases/lupin-q3-fy-2026-results",
-            "summary": "| Manufacturing & Other expenses | 19,366 | 27.3% | 16,959 | 30.2% | \u2191 14.2% | 19,796 | 29.0% | \u2193 2.2% |\n| Other Income | 1,147 | 1.6% | 537 | 1.0% | \u2191 113.6% | 900 | 1.3% | \u2191 27.4% |\n| Forex Loss / (",
+            "title": "Lupin Q3 net profit climbs 37.4% in Q3FY26 on strong US, emerging\u2011market demand",
+            "publisher": "moneycontrol.com",
+            "link": "https://www.moneycontrol.com/news/business/earnings/lupin-q3-net-profit-climbs-37-4-in-q3fy26-on-strong-us-emerging-market-demand-13826546.html",
+            "summary": "Managing Director Nilesh Gupta attributed the performance to \u201cour highest ever quarterly sales in the US and double\u2011digit growth in India and all other regions,\u201d adding that Lupin remains on track for a strong close to FY26.\n\nViswanath Pilla\n\nDiscover the latest Business News, Sensex, and Nifty upda",
             "source": "tavily"
         },
         {
-            "title": "Lupin Ltd share price | About Lupin | Key Insights - Screener",
-            "publisher": "www.screener.in",
-            "link": "https://www.screener.in/company/LUPIN/consolidated/",
-            "summary": "| Depreciation | 261 | 435 | 487 | 912 | 1,086 | 846 | 970 | 887 | 1,659 | 881 | 1,197 | 1,169 | 1,322 |\n| Profit before tax | 2,832 | 3,415 | 3,329 | 3,543 | 547 | 1,503 | 887 | 1,676 | -1,372 | 716 ",
+            "title": "Lupin Limited Reports Record Q3 FY26 Revenue Driven by Robust International Sales, ETPharma",
+            "publisher": "pharma.economictimes.indiatimes.com",
+            "link": "https://pharma.economictimes.indiatimes.com/news/financial-performance/strong-international-sales-drive-lupin-q3-fy26-revenue-to-7100-cr-net-profit-jumps-37/128356887",
+            "summary": "pharma\npharma\nIcon: Home\nIcon: Search\n\n# Strong International sales drive Lupin Q3 FY26 revenue to \u20b97,100 Cr; net profit jumps 37%\n\nOnline Bureau\n\nBookMark\nBookMark\nComment\nTwitter\nWhatsapp\nLinkedin\nTelegram\nFacebook\nCopy Link\n\n## Comments\n\ncomment\n\n## All Comments\n\nBy commenting, you agree to the P",
             "source": "tavily"
         },
         {
-            "title": "Lupin Q1 FY2026 Results - FirstWord Pharma",
-            "publisher": "firstwordpharma.com",
-            "link": "https://firstwordpharma.com/story/5986668",
-            "summary": "| Manufacturing & Other expenses | 17,720 | _28.7%_ | 15,984 | _29.0%_ | \u2191 _10.9%_ | 16,876 | _30.3%_ | \u2191 5.0% |\n| Other Income | 790 | _1.3%_ | 678 | _1.2%_ | \u2191 _16.5%_ | 570 | _1.0%_ | \u2191 38.6% |\n| F",
+            "title": "Lupin Limited: Lupin Secures Exclusive Rights to Bofanglutide, a Promising Fortnightly Weight-Loss Drug from China, ETPharma",
+            "publisher": "pharma.economictimes.indiatimes.com",
+            "link": "https://pharma.economictimes.indiatimes.com/news/pharma-industry/lupin-in-licenses-fortnightly-weight-loss-drug-from-chinas-gan-lee-pharma/126242452",
+            "summary": "Get updates on your preferred social platform\n\nFollow us for the latest news, insider access to events and more.\n\nLinkedin\nTwitter\nYoutube\nFacebook\nInstagram\n\nAbout Us\n\nContact Us\n\nNewsletters\n\n### The Economic Times Business Verticals [...] pharma\npharma\nIcon: Home\nIcon: Search\n\n# Lupin in-licenses",
+            "source": "tavily"
+        },
+        {
+            "title": "Lupin Ltd | Reuters",
+            "publisher": "reuters.com",
+            "link": "https://www.reuters.com/company/lupin-ltd/",
+            "summary": "The latest international Lupin Ltd news and views from Reuters - one of the world's largest news agencies.",
+            "source": "tavily"
+        },
+        {
+            "title": "Lupin shares to be in focus on Thursday as USFDA approves Dapagliflozin and Metformin tablets | Stock Market News",
+            "publisher": "livemint.com",
+            "link": "https://www.livemint.com/market/stock-market-news/lupin-shares-to-be-in-focus-on-thursday-as-usfda-approves-dapagliflozin-and-metformin-tablets-11775669174996.html",
+            "summary": "Pharma major Lupin\u2019s shares are likely to be on investors\u2019 radar during Thursday's session, April 9, as the company announced the approval of Dapagliflozin and Metformin Hydrochloride Extended-Release Tablets in the United States.\n\nThe company, in its regulatory filing on Wednesday, said it has rece",
+            "source": "tavily"
+        },
+        {
+            "title": "Lupin Schedules Q4 FY26 Earnings Call for May 8 - TipRanks.com",
+            "publisher": "tipranks.com",
+            "link": "https://www.tipranks.com/news/company-announcements/lupin-schedules-q4-fy26-earnings-call-for-may-8",
+            "summary": "Lupin, a listed Indian pharmaceutical company, will hold its Q4 FY26 earnings call on May 8, 2026, at 16:00 IST via Zoom. The scheduled earnings",
             "source": "tavily"
         }
     ],
     "announcements": [],
-    "timestamp": "2026-04-08T17:38:35.664018",
-    "finrobot_report": null
+    "timestamp": "2026-04-24T11:14:04.655431",
+    "finrobot_report": null,
+    "banking_metrics": null
 }

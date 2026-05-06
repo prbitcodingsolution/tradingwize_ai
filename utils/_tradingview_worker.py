@@ -9,6 +9,47 @@ import sys
 import json
 
 
+def _dismiss_overlays(page) -> None:
+    """Dismiss TradingView's cookie banner / region popup / login dialog
+    if any of them are blocking the article list. Silently ignore misses
+    — we only need to succeed once, and if none are present the scrape
+    proceeds normally.
+    """
+    # Pre-seed the cookie TradingView looks at so the consent banner
+    # doesn't render at all. Safer than trying to click a Shadow-DOM
+    # button after the page has already attached event listeners.
+    try:
+        page.context.add_cookies([
+            {
+                "name": "cookies_policy",
+                "value": "accepted",
+                "domain": ".tradingview.com",
+                "path": "/",
+            }
+        ])
+    except Exception:
+        pass
+
+    # Try the visible consent / close buttons in order. Each selector is
+    # wrapped in its own try/except so one miss doesn't kill the chain.
+    _selectors = [
+        'button[aria-label*="Accept" i]',
+        'button:has-text("Accept all")',
+        'button:has-text("I accept")',
+        'button:has-text("Got it")',
+        'button[aria-label*="close" i]',
+        '[class*="closeButton"]',
+    ]
+    for sel in _selectors:
+        try:
+            btn = page.query_selector(sel)
+            if btn and btn.is_visible():
+                btn.click(timeout=2000)
+                page.wait_for_timeout(400)
+        except Exception:
+            pass
+
+
 def scrape(symbol: str, exchange: str, max_ideas: int):
     from playwright.sync_api import sync_playwright
 
@@ -18,24 +59,71 @@ def scrape(symbol: str, exchange: str, max_ideas: int):
     ideas = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080}
+            viewport={"width": 1920, "height": 1080},
+            locale="en-IN",
+            timezone_id="Asia/Kolkata",
+            extra_http_headers={
+                "Accept-Language": "en-IN,en;q=0.9",
+            },
         )
         page = context.new_page()
 
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-            # Wait for article cards to load
+            # `networkidle` lets TradingView's client-side render finish
+            # (its article list is React-hydrated). `domcontentloaded`
+            # fired too early and frequently yielded an empty article
+            # list on slower CI-like boxes.
             try:
-                page.wait_for_selector('article', timeout=15000)
+                page.goto(url, wait_until="networkidle", timeout=45000)
             except Exception:
+                # Fall back to domcontentloaded — some CDNs keep long-
+                # poll connections open forever, never hitting idle.
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+            _dismiss_overlays(page)
+
+            # Wait for article cards to load. Longer timeout than before
+            # (25s vs 15s) because the bg-thread path was hitting timeouts.
+            _saw_articles = False
+            for _attempt in range(2):
+                try:
+                    page.wait_for_selector('article', timeout=25000)
+                    _saw_articles = True
+                    break
+                except Exception:
+                    # No articles yet — nudge the page (scroll, dismiss
+                    # overlays again) and retry once.
+                    print(
+                        f"worker: article selector missed on attempt "
+                        f"{_attempt + 1}, retrying after nudge",
+                        file=sys.stderr,
+                    )
+                    _dismiss_overlays(page)
+                    page.evaluate("window.scrollBy(0, 600)")
+                    page.wait_for_timeout(1500)
+
+            if not _saw_articles:
+                # Last-ditch: broader selector. If even this misses, the
+                # scroll+extract step will just return [] and we'll surface
+                # the miss to the caller.
                 try:
                     page.wait_for_selector('[class*="card-"]', timeout=10000)
                 except Exception:
-                    pass
+                    print(
+                        "worker: no article/card selector ever matched — "
+                        "page likely region-blocked or rate-limited",
+                        file=sys.stderr,
+                    )
 
             # Scroll to trigger lazy-loaded images AND to pull more idea
             # cards into the DOM. The wrapper now asks for ~3x the user's
@@ -167,6 +255,31 @@ def scrape(symbol: str, exchange: str, max_ideas: int):
         except Exception as e:
             print(json.dumps({"error": str(e)}), file=sys.stderr)
         finally:
+            # Before closing, if we got nothing, dump a short diagnostic
+            # to stderr: DOM size + whether any <article> elements ever
+            # appeared + whether a consent / region-block banner is on
+            # screen. This is what shows up in the Streamlit console
+            # when the bg task reports "No ideas found" so the operator
+            # can see WHY the page didn't render cards.
+            try:
+                if not ideas:
+                    diag = page.evaluate("""() => ({
+                        articles: document.querySelectorAll('article').length,
+                        cards: document.querySelectorAll('[class*="card-"]').length,
+                        bodyLen: (document.body && document.body.innerText || '').length,
+                        title: document.title,
+                        url: location.href,
+                        hasConsent: !!document.querySelector(
+                            '[class*="consent"], [class*="cookie"], [id*="consent"]'
+                        ),
+                    })""")
+                    print(
+                        "worker: empty scrape diagnostics -> "
+                        + json.dumps(diag),
+                        file=sys.stderr,
+                    )
+            except Exception:
+                pass
             browser.close()
 
     return ideas

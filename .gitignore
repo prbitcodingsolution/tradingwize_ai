@@ -2,6 +2,8 @@
 .env
 .env.local
 .env.*.local
+*.pem
+*.key
 
 # Python
 __pycache__/
@@ -10,7 +12,16 @@ __pycache__/
 *.pyd
 .venv/
 venv/
+env/
 *.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
 
 # OS
 .DS_Store
@@ -23,19 +34,44 @@ desktop.ini
 *.swp
 *.swo
 
+# Claude Code local data
+.claude/
+
 # Generated outputs (regenerated on demand)
 generated_ai_scripts/
 PPT_json/
 scanner_cache_tradingview/
+pdf_summaries/
 
 # Downloaded files (PDFs, PPTs from screener.in)
 downloads/
 
-
 # Data / reference PDFs
 data/
+
+# Legacy/backup files (kept only locally)
+backup-all/
+
+# Large media assets (not source)
+video_eng/
+video_hindi/
+static/videos/
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Logs
+*.log
+logs/
+
+# Local databases / pickled caches
+*.sqlite
+*.sqlite3
+*.db
+*.pkl
+*.pickle
 
 # Cached API responses
 reddit_api_response_*.json
 smc_json_*_test.json
-

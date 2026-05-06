@@ -166,7 +166,10 @@ def scrape_screener_financials(stock_symbol: str) -> Dict[str, Any]:
         #                     <span class="value">₹ <span class="number">123</span> Cr.</span>
         #                   </li>
         
-        # Field mapping for all metrics we want to extract
+        # Field mapping for all metrics we want to extract.
+        # Banking-specific ratios (NIM, NPA, CASA, CAR, ROA, etc.) are included
+        # in the same dict — screener.in shows them on banking company pages
+        # via the same <li class='flex'> structure, so one dict covers both.
         field_mapping = {
             'Market Cap': 'market_cap',
             'Current Price': 'current_price',
@@ -193,7 +196,30 @@ def scrape_screener_financials(stock_symbol: str) -> Dict[str, Any]:
             'Enterprise Value': 'enterprise_value',
             'Volume': 'volume',
             'Dividend Payout': 'dividend_payout',
-            'Payout Ratio': 'dividend_payout'
+            'Payout Ratio': 'dividend_payout',
+            # ── Banking-specific ratios ──
+            # screener.in exposes these on the top-of-page ratios block for
+            # banking companies. Different banks may show a subset.
+            'ROA': 'return_on_assets',
+            'Return on Assets': 'return_on_assets',
+            'NIM': 'net_interest_margin',
+            'Net Interest Margin': 'net_interest_margin',
+            'Financing Margin': 'net_interest_margin',
+            'Financing Margin %': 'net_interest_margin',
+            'CASA': 'casa_ratio',
+            'CASA %': 'casa_ratio',
+            'Gross NPA': 'gross_npa',
+            'Gross NPA %': 'gross_npa',
+            'Net NPA': 'net_npa',
+            'Net NPA %': 'net_npa',
+            'Provision Coverage Ratio': 'provision_coverage',
+            'PCR': 'provision_coverage',
+            'Capital Adequacy Ratio': 'capital_adequacy',
+            'CAR': 'capital_adequacy',
+            'Cost to Income': 'cost_to_income',
+            'Cost / Income': 'cost_to_income',
+            'Credit / Deposit': 'credit_deposit',
+            'C/D Ratio': 'credit_deposit',
         }
         
         # Parse all <li> elements with class "flex flex-space-between"

@@ -31,6 +31,11 @@ class RedditSentimentAnalyzer:
         self.client = get_client()
         self.api_key = REDDIT_RAPIDAPI_KEY
         self.api_host = REDDIT_RAPIDAPI_HOST
+        # Tracks the reason for the LAST failed fetch so the caller's
+        # "unavailable" default can show a precise explanation in the UI
+        # (e.g. "Monthly quota exhausted" vs "No posts found"). Reset on
+        # each successful call.
+        self.last_fetch_error: Optional[str] = None
     
     def _normalize_sentiment_score(self, score: float) -> float:
         """
@@ -67,8 +72,12 @@ class RedditSentimentAnalyzer:
         Returns:
             List of Reddit posts with text and metadata
         """
+        # Reset failure reason each call — set again on any failure path.
+        self.last_fetch_error = None
+
         if not self.api_key or not self.api_host:
             print("⚠️ REDDIT_RAPIDAPI_KEY or REDDIT_RAPIDAPI_HOST not configured")
+            self.last_fetch_error = "Reddit API credentials not configured in .env"
             return []
         
         print(f"🔍 Searching ALL of Reddit for {stock_symbol} posts...")
@@ -139,20 +148,46 @@ class RedditSentimentAnalyzer:
                     print(f"   ⚠️ Invalid response format from Reddit API")
             
             elif response.status_code == 429:
-                print(f"   ⚠️ Reddit API rate limit exceeded (429)")
-                print("      This is normal for RapidAPI free tier")
+                # RapidAPI returns 429 for BOTH "requests per minute" rate
+                # limits AND "monthly quota exhausted". The body distinguishes
+                # them — monthly-quota messages contain the word "MONTHLY".
+                # Distinguishing the two lets us show the user a clearer
+                # message (quota vs transient rate-limit).
+                body_msg = ""
+                try:
+                    body_msg = response.json().get("message", "")
+                except Exception:
+                    body_msg = response.text[:200]
+                if "monthly" in body_msg.lower() or "quota" in body_msg.lower():
+                    self.last_fetch_error = (
+                        "Reddit API monthly quota exhausted on the RapidAPI BASIC plan. "
+                        "Upgrade your RapidAPI subscription or wait for the quota to "
+                        "reset to restore Reddit sentiment."
+                    )
+                    print(f"   ⚠️ Reddit API MONTHLY quota exhausted (429)")
+                    print(f"      Message: {body_msg}")
+                else:
+                    self.last_fetch_error = (
+                        "Reddit API rate limit hit (per-minute). Please try again shortly."
+                    )
+                    print(f"   ⚠️ Reddit API rate limit exceeded (429, transient)")
             else:
                 print(f"   ⚠️ Reddit API error: {response.status_code}")
+                _err_body = ""
                 try:
-                    error_data = response.json()
-                    print(f"      Error details: {error_data}")
-                except:
-                    print(f"      Response text: {response.text[:200]}")
-            
+                    _err_body = str(response.json())
+                except Exception:
+                    _err_body = response.text[:200]
+                print(f"      Details: {_err_body}")
+                self.last_fetch_error = (
+                    f"Reddit API returned HTTP {response.status_code}. {_err_body}"[:220]
+                )
+
         except Exception as e:
             print(f"   ❌ Error searching Reddit: {e}")
             import traceback
             traceback.print_exc()
+            self.last_fetch_error = f"Reddit API request failed: {e}"
         
         # Remove duplicates by ID
         seen_ids = set()
@@ -192,10 +227,12 @@ class RedditSentimentAnalyzer:
         
         # Search for posts
         posts = self.search_reddit_posts(stock_symbol, stock_name, max_posts=max_posts)
-        
+
         if not posts:
             print("⚠️ No Reddit posts found")
-            return self._get_default_reddit_sentiment()
+            return self._get_default_reddit_sentiment(
+                reason=self.last_fetch_error or "No Reddit posts found for this stock"
+            )
         
         # Combine all post texts for analysis
         combined_text = "\n\n".join([
@@ -228,11 +265,11 @@ class RedditSentimentAnalyzer:
         Returns:
             Dictionary with sentiment analysis results
         """
-        print(f"   🤖 Analyzing sentiment of {len(posts_data)} Reddit posts...")
+        print(f"   🤖 Analyzing sentiment of {len(posts_data)} Reddit posts with LLM classifier...")
 
-        # --- FinBERT scoring ---
+        # --- LLM classifier scoring ---
         try:
-            from .finbert_sentiment import FinBERTSentimentAnalyzer
+            from .llm_sentiment import LLMSentimentAnalyzer
             texts = [
                 f"{p['title']} {p['text']}"
                 for p in posts_data
@@ -241,12 +278,12 @@ class RedditSentimentAnalyzer:
             if not texts:
                 return self._get_default_reddit_sentiment()
 
-            finbert = FinBERTSentimentAnalyzer.get_instance()
-            fb_result = finbert.analyze_texts(texts)
+            classifier = LLMSentimentAnalyzer.get_instance()
+            llm_result = classifier.analyze_texts(texts)
 
-            finbert_score = fb_result["score"]
-            sentiment_label = fb_result["label"]
-            breakdown = fb_result["breakdown"]
+            llm_score = llm_result["score"]
+            sentiment_label = llm_result["label"]
+            breakdown = llm_result["breakdown"]
             positive_count = breakdown.get("positive", 0)
             negative_count = breakdown.get("negative", 0)
             neutral_count = breakdown.get("neutral", 0)
@@ -255,14 +292,14 @@ class RedditSentimentAnalyzer:
             negative_percentage = negative_count / n * 100 if n else 0
             neutral_percentage = neutral_count / n * 100 if n else 0
 
-            print(f"   ✅ FinBERT Analysis Complete:")
-            print(f"      Score: {finbert_score:.1f}/100  Label: {sentiment_label}")
+            print(f"   ✅ LLM Sentiment Analysis Complete:")
+            print(f"      Score: {llm_score:.1f}/100  Label: {sentiment_label}")
             print(f"      Positive: {positive_count}  Negative: {negative_count}  Neutral: {neutral_count}")
 
             # LLM for theme extraction only
             sentiment_prompt = f"""Analyze Reddit discussions about {stock_name} ({stock_symbol}).
 
-OBJECTIVE SENTIMENT SCORE (FinBERT): {finbert_score:.1f}/100
+OBJECTIVE SENTIMENT SCORE (LLM classifier): {llm_score:.1f}/100
 
 Sample Reddit Posts:
 {combined_text[:3000]}
@@ -293,7 +330,7 @@ Return ONLY valid JSON:
             except Exception as e:
                 print(f"   ⚠️ LLM theme extraction failed: {e}")
                 key_themes = ['Retail investor discussions', 'Stock performance', 'Market sentiment']
-                market_mood = f'Based on {n} Reddit posts, FinBERT sentiment is {sentiment_label.lower()}.'
+                market_mood = f'Based on {n} Reddit posts, LLM sentiment is {sentiment_label.lower()}.'
 
             subreddit_counts = {}
             for post in posts_data:
@@ -317,7 +354,7 @@ Return ONLY valid JSON:
             ]
 
             return {
-                'sentiment_score': round(finbert_score, 1),
+                'sentiment_score': round(llm_score, 1),
                 'sentiment_label': sentiment_label,
                 'total_posts': len(posts_data),
                 'total_items_analyzed': n,
@@ -331,21 +368,21 @@ Return ONLY valid JSON:
                 'market_mood': market_mood,
                 'key_insights': [
                     f"Analyzed {len(posts_data)} Reddit posts from {len(subreddit_counts)} subreddits",
-                    f"Overall sentiment (FinBERT): {sentiment_label}",
+                    f"Overall sentiment (LLM): {sentiment_label}",
                     market_mood
                 ],
                 'top_posts': top_posts,
                 'subreddit_distribution': subreddit_counts,
                 'confidence': 'High' if n >= 30 else 'Medium' if n >= 15 else 'Low',
-                'source': 'reddit_rapidapi_finbert',
-                'finbert_result': fb_result,
+                'source': 'reddit_rapidapi_llm',
+                'llm_result': llm_result,
             }
 
         except Exception as e:
-            print(f"   ⚠️ FinBERT Reddit scoring failed: {e}, falling back to LLM-only")
+            print(f"   ⚠️ LLM classifier batch failed for Reddit: {e}, falling back to single LLM re-ask")
 
-        # LLM-only fallback
-        print(f"   ⚠️ FinBERT unavailable, using LLM-only analysis")
+        # LLM re-ask fallback (single direct-score call if the batched classifier errored)
+        print(f"   ⚠️ LLM classifier unavailable, using LLM-only re-ask analysis")
         
         sentiment_prompt = f"""Analyze Reddit sentiment for {stock_name} ({stock_symbol}) based on these posts.
 
@@ -453,10 +490,19 @@ Return ONLY valid JSON:
             print(f"❌ Error analyzing Reddit sentiment: {e}")
             import traceback
             traceback.print_exc()
-            return self._get_default_reddit_sentiment()
-    
-    def _get_default_reddit_sentiment(self) -> Dict:
-        """Default Reddit sentiment when analysis fails (0-100 scale)"""
+            return self._get_default_reddit_sentiment(
+                reason=f"Sentiment analysis failed: {e}"
+            )
+
+    def _get_default_reddit_sentiment(self, reason: Optional[str] = None) -> Dict:
+        """Default Reddit sentiment when analysis fails (0-100 scale).
+
+        If `reason` is provided it's surfaced through `market_mood` and the
+        first line of `key_insights` so the UI can tell the user WHY Reddit
+        data is unavailable (quota exhausted, rate-limit, no posts, etc.)
+        instead of a generic 'Unavailable' label.
+        """
+        reason = reason or "Reddit data temporarily unavailable"
         return {
             'sentiment_score': 50,
             'sentiment_label': 'Unavailable',
@@ -469,17 +515,17 @@ Return ONLY valid JSON:
             'negative_percentage': 0,
             'neutral_percentage': 0,
             'key_themes': [],
-            'market_mood': 'Reddit data temporarily unavailable',
+            'market_mood': reason,
             'key_insights': [
-                'Reddit data temporarily unavailable',
-                'This could be due to API rate limits or the stock not being discussed',
-                'Sentiment analysis continues with News, Yahoo Finance, and Twitter sources'
+                reason,
+                'Sentiment analysis continues with News, Yahoo Finance, and Twitter sources',
             ],
             'top_posts': [],
             'subreddit_distribution': {},
             'confidence': 'None',
             'source': 'reddit',
-            'status': 'unavailable'
+            'status': 'unavailable',
+            'unavailable_reason': reason,
         }
 
 

@@ -2,9 +2,9 @@ import yfinance as yf
 import requests
 from typing import Dict, List, Optional
 from models import (
-    StockValidation, CompanyData, FinancialData, 
+    StockValidation, CompanyData, FinancialData,
     MarketData, CompanyReport, ScenarioAnalysis, Summary,
-    CompanySnapshot, BusinessOverview, SWOTAnalysis
+    CompanySnapshot, BusinessOverview, SWOTAnalysis, BankingMetrics
 )
 from datetime import datetime, timedelta
 import json
@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 import time
 from api_logger import api_logger, log_api_call, should_wait_for_rate_limit
 from utils.model_config import get_client, guarded_llm_call
+from utils.sector_helpers import normalize_exchange, is_banking_sector
 
 client = get_client()
 
@@ -42,7 +43,230 @@ else:
 
 class StockTools:
     """Collection of tools for stock analysis"""
-    
+
+    @staticmethod
+    def _generate_swot_with_llm(
+        company_name: str,
+        stock_symbol: str,
+        sector: Optional[str],
+        industry: Optional[str],
+        info: Dict,
+        news_titles: Optional[List[str]] = None,
+        fmt_inr=None,
+    ) -> SWOTAnalysis:
+        """LLM-generated SWOT with sector-specific context.
+
+        Replaces the earlier hardcoded heuristic template (which produced
+        identical boilerplate like "Market competition" for every stock).
+        Passes company financial snapshot + sector/industry so the model can
+        reason about stock-specific strengths/weaknesses/opportunities/threats.
+
+        Returns a SWOTAnalysis — falls back to a heuristic template on any
+        error (LLM unreachable, invalid JSON, etc.) so the analysis pipeline
+        never fails just because SWOT generation hit an issue.
+        """
+        import json as _json
+        import re as _re
+
+        if fmt_inr is None:
+            def fmt_inr(v):
+                return f"₹{v:,.0f}" if isinstance(v, (int, float)) else 'N/A'
+
+        # Compact financial context for the prompt.
+        mcap = info.get('marketCap')
+        pe = info.get('trailingPE')
+        pb = info.get('priceToBook')
+        de = info.get('debtToEquity')
+        pm = info.get('profitMargins')
+        om = info.get('operatingMargins')
+        roe = info.get('returnOnEquity')
+        fcf = info.get('freeCashflow')
+        rev = info.get('totalRevenue')
+        div_y = info.get('dividendYield')
+
+        def _pct(v):
+            if v is None:
+                return 'N/A'
+            return f"{v*100:.2f}%" if abs(v) < 1 else f"{v:.2f}%"
+
+        _context_lines = [
+            f"Company: {company_name} ({stock_symbol})",
+            f"Sector: {sector or 'N/A'}",
+            f"Industry: {industry or 'N/A'}",
+            f"Market Cap: {fmt_inr(mcap)}" if mcap else "Market Cap: N/A",
+            f"Revenue (TTM): {fmt_inr(rev)}" if rev else "Revenue: N/A",
+            f"P/E: {pe:.2f}" if pe else "P/E: N/A",
+            f"P/B: {pb:.2f}" if pb else "P/B: N/A",
+            f"Debt/Equity: {de:.2f}" if de else "Debt/Equity: N/A",
+            f"Profit Margin: {_pct(pm)}",
+            f"Operating Margin: {_pct(om)}",
+            f"ROE: {_pct(roe)}",
+            f"Free Cash Flow: {fmt_inr(fcf)}" if fcf else "Free Cash Flow: N/A",
+            f"Dividend Yield: {_pct(div_y)}",
+        ]
+        if news_titles:
+            _context_lines.append("")
+            _context_lines.append("Recent news headlines:")
+            for _t in news_titles[:5]:
+                if _t:
+                    _context_lines.append(f"- {_t}")
+
+        _context = "\n".join(_context_lines)
+
+        _system = (
+            "You are a sell-side equity analyst producing a SWOT for the "
+            "research dashboard. Each bullet must be specific to THIS "
+            "company — reference its sector, numbers, or business model. "
+            "No boilerplate like 'Market competition' or 'Regulatory "
+            "challenges' without explaining *why it matters for this stock*. "
+            "For banks, frame bullets around NIM, NPA, CASA, loan book "
+            "quality. For IT, frame around attrition, deal-TCV, margins, "
+            "geographic exposure. Output strict JSON only — no prose."
+        )
+        _user = (
+            f"Financial snapshot:\n{_context}\n\n"
+            "Produce a SWOT as JSON with this exact shape:\n"
+            "{\n"
+            '  "strengths":     ["...", "...", "..."],\n'
+            '  "weaknesses":    ["...", "...", "..."],\n'
+            '  "opportunities": ["...", "...", "..."],\n'
+            '  "threats":       ["...", "...", "..."]\n'
+            "}\n"
+            "Rules:\n"
+            "- 3 to 4 bullets per quadrant\n"
+            "- Each bullet: 10-25 words, stock-specific\n"
+            "- Cite numbers or sector dynamics where relevant\n"
+            "- No empty strings, no duplicates, no generic filler\n"
+            "- Return ONLY the JSON object"
+        )
+
+        try:
+            resp = guarded_llm_call(
+                messages=[
+                    {"role": "system", "content": _system},
+                    {"role": "user", "content": _user},
+                ],
+                temperature=0.4,
+                max_tokens=700,
+            )
+            content = safe_llm_content(resp).strip()
+            # Strip markdown code fences if the model wrapped the JSON.
+            m = _re.search(r'\{.*\}', content, _re.DOTALL)
+            if not m:
+                raise ValueError("No JSON object found in LLM output")
+            payload = _json.loads(m.group(0))
+
+            def _clean(lst) -> List[str]:
+                if not isinstance(lst, list):
+                    return []
+                out = []
+                for item in lst:
+                    if isinstance(item, str):
+                        s = item.strip()
+                        if s and s.lower() not in ('n/a', 'none', '-'):
+                            out.append(s)
+                return out[:4]
+
+            s = _clean(payload.get('strengths', []))
+            w = _clean(payload.get('weaknesses', []))
+            o = _clean(payload.get('opportunities', []))
+            t = _clean(payload.get('threats', []))
+
+            # Require at least one bullet per quadrant — otherwise the output
+            # is unusable and we fall back to the heuristic template.
+            if s and w and o and t:
+                print(f"✅ LLM SWOT generated for {company_name}: "
+                      f"{len(s)}S/{len(w)}W/{len(o)}O/{len(t)}T bullets")
+                return SWOTAnalysis(strengths=s, weaknesses=w, opportunities=o, threats=t)
+
+            print(f"⚠️ LLM SWOT had empty quadrants, falling back to heuristic")
+        except Exception as e:
+            print(f"⚠️ LLM SWOT generation failed ({type(e).__name__}: {e}) — falling back to heuristic")
+
+        # ── Heuristic fallback ──
+        # Keeps the pipeline alive when the LLM is unreachable. The heuristic
+        # is sector-aware (banks vs non-banks) to avoid the worst boilerplate.
+        _is_bank = is_banking_sector(sector, industry)
+        strengths_list = []
+        weaknesses_list = []
+        opportunities_list = [f"Sector tailwinds in {sector}" if sector and sector != 'N/A' else None]
+        threats_list = ["Market volatility and macro risks"]
+
+        if mcap:
+            strengths_list.append(f"Scale advantage — market cap of {fmt_inr(mcap)}")
+        if pm is not None and pm > 0.10:
+            strengths_list.append(f"Healthy profit margin of {_pct(pm)}")
+        if fcf and fcf > 0 and not _is_bank:
+            strengths_list.append(f"Positive free cash flow of {fmt_inr(fcf)}")
+        if roe is not None and roe > 0.15:
+            strengths_list.append(f"Strong ROE of {_pct(roe)}")
+
+        if de and de > 2 and not _is_bank:
+            weaknesses_list.append(f"Elevated debt-to-equity of {de:.2f}")
+        if pm is not None and pm < 0.05:
+            weaknesses_list.append(f"Thin profit margin of {_pct(pm)}")
+        if pe and pe > 40:
+            weaknesses_list.append(f"Rich valuation — P/E of {pe:.1f} vs. typical 15-25")
+        if _is_bank:
+            threats_list.append("NPA cycle risk — exposure to unsecured retail and MSME stress")
+            threats_list.append("NIM compression as deposit costs reprice")
+        else:
+            threats_list.append(f"Competitive pressure in {industry or 'sector'}")
+
+        if industry and industry != 'N/A':
+            opportunities_list.append(f"Consolidation opportunities in {industry}")
+
+        strengths_list = [x for x in strengths_list if x] or ["Established market presence"]
+        weaknesses_list = [x for x in weaknesses_list if x] or ["Execution risks in scaling operations"]
+        opportunities_list = [x for x in opportunities_list if x] or ["Product/market expansion"]
+        threats_list = [x for x in threats_list if x]
+
+        return SWOTAnalysis(
+            strengths=strengths_list[:4],
+            weaknesses=weaknesses_list[:4],
+            opportunities=opportunities_list[:4],
+            threats=threats_list[:4],
+        )
+
+    @staticmethod
+    def _build_banking_metrics(
+        screener_data: Optional[Dict],
+        sector: Optional[str],
+        industry: Optional[str],
+    ) -> Optional[BankingMetrics]:
+        """Construct a BankingMetrics object from screener.in output.
+
+        Returns None for non-banks (so the dashboard's conditional rendering
+        stays simple). Returns an empty BankingMetrics (all fields None) for
+        banks when screener didn't expose the ratios — the dashboard then
+        shows "—" rows instead of hiding the section entirely, making the
+        data gap visible to the user.
+        """
+        if not is_banking_sector(sector, industry):
+            return None
+        if not screener_data or not screener_data.get('success'):
+            return BankingMetrics()
+
+        def _g(key: str) -> Optional[float]:
+            v = screener_data.get(key)
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        return BankingMetrics(
+            net_interest_margin=_g('net_interest_margin'),
+            return_on_assets=_g('return_on_assets'),
+            return_on_equity=_g('roe'),
+            cost_to_income=_g('cost_to_income'),
+            gross_npa=_g('gross_npa'),
+            net_npa=_g('net_npa'),
+            provision_coverage=_g('provision_coverage'),
+            casa_ratio=_g('casa_ratio'),
+            capital_adequacy=_g('capital_adequacy'),
+            credit_deposit=_g('credit_deposit'),
+        )
+
     @staticmethod
     def _search_with_tavily(query: str, domain: Optional[List[str]] = None) -> tuple:
         """
@@ -1003,13 +1227,22 @@ Return ONLY valid JSON, no additional text."""
                     company_data.financials.total_debt = screener_data['total_debt']
                     print(f"  ✓ Total Debt: ₹{screener_data['total_debt']/10000000:.2f} Cr")
                 
+                # ROCE / ROE: not declared on FinancialData, so setattr raises under
+                # Pydantic v2. Try each separately and swallow the field-error so the
+                # rest of the screener override chain (book_value, high_52week,
+                # free_cash_flow, etc.) still runs.
                 if screener_data.get('roce'):
-                    company_data.financials.roce = screener_data['roce']
-                    print(f"  ✓ ROCE: {screener_data['roce']}%")
-                
+                    try:
+                        setattr(company_data.financials, 'roce', screener_data['roce'])
+                        print(f"  ✓ ROCE: {screener_data['roce']}%")
+                    except (AttributeError, ValueError):
+                        pass  # FinancialData has no roce field — skip silently
                 if screener_data.get('roe'):
-                    company_data.financials.roe = screener_data['roe']
-                    print(f"  ✓ ROE: {screener_data['roe']}%")
+                    try:
+                        setattr(company_data.financials, 'roe', screener_data['roe'])
+                        print(f"  ✓ ROE: {screener_data['roe']}%")
+                    except (AttributeError, ValueError):
+                        pass  # FinancialData has no roe field — skip silently
                 
                 if screener_data.get('peg_ratio'):
                     company_data.financials.peg_ratio = screener_data['peg_ratio']
@@ -1031,8 +1264,19 @@ Return ONLY valid JSON, no additional text."""
                     company_data.financials.free_cash_flow = screener_data['free_cash_flow']
                     print(f"  ✓ Free Cash Flow: ₹{screener_data['free_cash_flow']/10000000:.2f} Cr")
                 
+                # Refresh/populate BankingMetrics if this is a bank — screener
+                # just gave us a fresh pass so the banking-specific ratios
+                # (NIM, NPA, CASA, etc.) will be up-to-date.
+                _bm = StockTools._build_banking_metrics(
+                    screener_data,
+                    getattr(company_data.snapshot, 'sector', None),
+                    getattr(company_data.snapshot, 'industry', None),
+                )
+                if _bm is not None:
+                    company_data.banking_metrics = _bm
+
                 print(f"\n✅ Updated company data with accurate screener.in metrics!")
-                
+
         except Exception as e:
             print(f"⚠️ Failed to fetch from screener.in: {e}")
             print("   Falling back to Tavily search...")
@@ -1834,7 +2078,7 @@ OUTPUT FORMAT (JSON only):
         snapshot = CompanySnapshot(
             company_name=company_name,
             ticker_symbol=stock_symbol,
-            exchange=safe_get(info, 'exchange', 'N/A', str),
+            exchange=normalize_exchange(safe_get(info, 'exchange', None, str), stock_symbol),
             sector=safe_get(info, 'sector', 'N/A', str),
             industry=safe_get(info, 'industry', 'N/A', str),
             headquarters=headquarters,
@@ -2062,12 +2306,15 @@ OUTPUT FORMAT (JSON only):
             competitors=competitors_data
         )
         
-        # Step 10: Build SWOT Analysis (from web insights + financial analysis)
-        # Build lists first, filter None values, then create SWOTAnalysis
+        # Step 10: Build SWOT Analysis — LLM-generated with sector/company
+        # context so the weaknesses/threats reflect the actual stock instead
+        # of boilerplate like "Market competition". Falls back to a hardcoded
+        # heuristic template when the LLM is unreachable or returns garbage.
         sector = safe_get(info, 'sector', 'N/A', str)
-        
-        # Helper to format currency in Indian format (Cr/L) for SWOT
+        industry = safe_get(info, 'industry', 'N/A', str)
+
         def _fmt_inr(value):
+            """Format currency in Indian Cr/L notation for prompt context."""
             if value is None or not isinstance(value, (int, float)):
                 return 'N/A'
             abs_val = abs(value)
@@ -2078,40 +2325,14 @@ OUTPUT FORMAT (JSON only):
             else:
                 return f"₹{value:,.0f}"
 
-        strengths_list = [
-            f"Strong market cap of {_fmt_inr(info.get('marketCap', 0))}" if info.get('marketCap') else None,
-            f"Healthy profit margin of {info.get('profitMargins', 0)*100:.2f}%" if info.get('profitMargins') and info.get('profitMargins') > 0.1 else None,
-            f"Positive free cash flow of {_fmt_inr(info.get('freeCashflow', 0))}" if info.get('freeCashflow') and info.get('freeCashflow') > 0 else None,
-            "Established market presence" if info.get('marketCap', 0) > 1e9 else None
-        ]
-        weaknesses_list = [
-            f"High debt-to-equity ratio of {info.get('debtToEquity', 0):.2f}" if info.get('debtToEquity') and info.get('debtToEquity') > 2 else None,
-            f"Low profit margin of {info.get('profitMargins', 0)*100:.2f}%" if info.get('profitMargins') and info.get('profitMargins') < 0.05 else None,
-            "High PE ratio indicating overvaluation" if info.get('trailingPE') and info.get('trailingPE') > 30 else None
-        ]
-        opportunities_list = [
-            f"Growing sector: {sector}" if sector and sector != 'N/A' else None,
-            "Market expansion potential",
-            "Digital transformation opportunities"
-        ]
-        threats_list = [
-            "Market volatility and economic uncertainty",
-            "Competitive pressure from industry peers",
-            f"Regulatory challenges in {sector} sector" if sector and sector != 'N/A' else None
-        ]
-        
-        # Filter out None values and ensure non-empty lists BEFORE creating SWOTAnalysis
-        strengths_filtered = [s for s in strengths_list if s] or ["Established market presence"]
-        weaknesses_filtered = [w for w in weaknesses_list if w] or ["Market competition"]
-        opportunities_filtered = [o for o in opportunities_list if o] or ["Market expansion potential"]
-        threats_filtered = [t for t in threats_list if t] or ["Market volatility"]
-        
-        # Now create SWOTAnalysis with clean lists (no None values)
-        swot = SWOTAnalysis(
-            strengths=strengths_filtered,
-            weaknesses=weaknesses_filtered,
-            opportunities=opportunities_filtered,
-            threats=threats_filtered
+        swot = StockTools._generate_swot_with_llm(
+            company_name=company_name,
+            stock_symbol=stock_symbol,
+            sector=sector,
+            industry=industry,
+            info=info,
+            news_titles=None,  # News is fetched in Step 11 (after SWOT) — not available yet
+            fmt_inr=_fmt_inr,
         )
         
         # Step 11: Fetch LATEST NEWS from dedicated news domains
@@ -2206,6 +2427,14 @@ OUTPUT FORMAT (JSON only):
             announcements = web_insights['recent_developments'][:3]
         
         # Step 13: Create initial CompanyData object
+        # Banking-specific ratios (NIM, NPA, CASA, CAR, ...) are only
+        # populated for bank stocks — non-banks get None and the dashboard
+        # hides the banking section entirely.
+        banking_metrics = StockTools._build_banking_metrics(
+            _p1_screener_data if is_indian_stock else None,
+            snapshot.sector,
+            snapshot.industry,
+        )
         company_data = CompanyData(
             symbol=stock_symbol,
             name=company_name,
@@ -2215,7 +2444,8 @@ OUTPUT FORMAT (JSON only):
             market_data=market_data,
             swot=swot,
             news=news[:8],  # Limit to 8 most relevant news items
-            announcements=announcements
+            announcements=announcements,
+            banking_metrics=banking_metrics,
         )
         
         # Save news to database for API access
@@ -2411,9 +2641,18 @@ OUTPUT FORMAT (JSON only):
         def fmt_currency(value):
             if value is None or value == 'N/A' or not isinstance(value, (int, float)):
                 return 'N/A'
-            
+
             if is_indian_stock:
-                # Indian format: Lakhs and Crores
+                # Indian format. For mega-caps (>= 1 Trillion INR = 1 Lakh
+                # Crore) emit BOTH the trillion scale and the crore scale
+                # side-by-side. A reader (and any downstream LLM consuming
+                # this report) then never has to convert "1,010,060 Cr"
+                # into trillions by hand. The silent crore→trillion error
+                # (dividing by 1e6 instead of 1e5) is what produced the
+                # 'SBI ₹1.011T vs HDFC ₹1.212T' backwards claim — the raw
+                # values are actually ₹10.10T and ₹12.08T.
+                if value >= 1e12:  # >= 1 Trillion INR (= 1 Lakh Crore)
+                    return f"₹{value/1e12:.2f} T (₹{value/1e7:,.0f} Cr)"
                 if value >= 1e7:  # 1 Crore = 10 Million
                     return f"₹{value/1e7:.2f} Cr"
                 elif value >= 1e5:  # 1 Lakh = 100 Thousand
@@ -2513,10 +2752,14 @@ OUTPUT FORMAT (JSON only):
         
         # Income Statement
         income_items = []
+        # Every income-statement figure below is yfinance-sourced and therefore
+        # TTM (trailing-twelve-month). Tag them explicitly so a reader never
+        # has to guess the vintage — prevents the 'TTM ₹3.43T vs FY25 ₹3.70T'
+        # ambiguity when narrative sections cite FY-annual numbers elsewhere.
         if company_data.financials.revenue: income_items.append(f"- Revenue (TTM): {fmt_currency(company_data.financials.revenue)}")
         if company_data.financials.net_profit: income_items.append(f"- Net Profit (TTM): {fmt_currency(company_data.financials.net_profit)}")
-        if company_data.financials.ebitda: income_items.append(f"- EBITDA: {fmt_currency(company_data.financials.ebitda)}")
-        if company_data.financials.eps: income_items.append(f"- EPS: {eps_val}")
+        if company_data.financials.ebitda: income_items.append(f"- EBITDA (TTM): {fmt_currency(company_data.financials.ebitda)}")
+        if company_data.financials.eps: income_items.append(f"- EPS (TTM): {eps_val}")
         if company_data.financials.dividend_yield: income_items.append(f"- Dividend Yield: {div_yield}")
         if company_data.financials.payout_ratio: income_items.append(f"- Payout Ratio: {payout}")
         
@@ -2677,9 +2920,12 @@ OUTPUT FORMAT (JSON only):
             )
             
             if has_real_data:
-                # Clean table format without vertical lines
-                competitor_section += "**Peer Comparison (Sector Analysis)**\n\n"
-                
+                # Clean table format without vertical lines.
+                # All peer figures come from yfinance and are TTM by definition;
+                # call that out in the subheader so a reader never has to guess
+                # the vintage of each metric.
+                competitor_section += "**Peer Comparison (Sector Analysis)** — *all figures TTM, yfinance-sourced*\n\n"
+
                 # Show main company first
                 main_comp = next((comp for comp in company_data.market_data.competitors if comp.get('is_main_company')), None)
                 if main_comp:
@@ -2688,12 +2934,12 @@ OUTPUT FORMAT (JSON only):
                     mcap = fmt_currency(main_comp.get('market_cap')) if main_comp.get('market_cap') != 'N/A' else 'N/A'
                     pe = fmt_ratio(main_comp.get('pe_ratio'))
                     pm = fmt_pct(main_comp.get('profit_margin') * 100) if isinstance(main_comp.get('profit_margin'), (int, float)) else 'N/A'
-                    
+
                     competitor_section += f"**{name}** ({symbol})\n"
                     competitor_section += f"• Market Cap: {mcap}\n"
-                    competitor_section += f"• PE Ratio: {pe}\n"
-                    competitor_section += f"• Profit Margin: {pm}\n\n"
-                
+                    competitor_section += f"• PE Ratio (TTM): {pe}\n"
+                    competitor_section += f"• Profit Margin (TTM): {pm}\n\n"
+
                 # Show peer companies
                 competitor_section += "**Key Competitors:**\n"
                 peer_count = 0
@@ -2704,16 +2950,18 @@ OUTPUT FORMAT (JSON only):
                         mcap = fmt_currency(comp.get('market_cap')) if comp.get('market_cap') != 'N/A' else 'N/A'
                         pe = fmt_ratio(comp.get('pe_ratio'))
                         pm = fmt_pct(comp.get('profit_margin') * 100) if isinstance(comp.get('profit_margin'), (int, float)) else 'N/A'
-                        
+
                         competitor_section += f"\n**{name}** ({symbol})\n"
                         competitor_section += f"• Market Cap: {mcap}\n"
-                        competitor_section += f"• PE Ratio: {pe}\n"
-                        competitor_section += f"• Profit Margin: {pm}\n"
+                        competitor_section += f"• PE Ratio (TTM): {pe}\n"
+                        competitor_section += f"• Profit Margin (TTM): {pm}\n"
                         peer_count += 1
                 
             else:
-                # Simple comparison format for basic data
-                competitor_section += "**Financial Metrics Comparison**\n"
+                # Simple comparison format for basic data.
+                # Tag the whole block TTM — every per-peer figure below is
+                # yfinance-sourced trailing-twelve-month.
+                competitor_section += "**Financial Metrics Comparison** — *all figures TTM, yfinance-sourced*\n"
                 
                 # Get up to 4 competitors (including main company)
                 main_company = next((comp for comp in company_data.market_data.competitors if comp.get('is_main_company')), None)
@@ -2737,28 +2985,28 @@ OUTPUT FORMAT (JSON only):
                             revenue = fmt_currency(company_data.financials.revenue)
                         else:
                             revenue = fmt_currency(comp.get('revenue'))
-                        competitor_section += f"• Revenue: {revenue}\n"
-                        
+                        competitor_section += f"• Revenue (TTM): {revenue}\n"
+
                         # PE Ratio
                         if comp.get('is_main_company'):
                             pe = fmt_ratio(company_data.financials.pe_ratio)
                         else:
                             pe = fmt_ratio(comp.get('pe_ratio'))
-                        competitor_section += f"• PE Ratio: {pe}\n"
-                        
+                        competitor_section += f"• PE Ratio (TTM): {pe}\n"
+
                         # Market Cap
                         if comp.get('is_main_company'):
                             mcap = fmt_currency(company_data.market_data.market_cap)
                         else:
                             mcap = fmt_currency(comp.get('market_cap'))
                         competitor_section += f"• Market Cap: {mcap}\n"
-                        
+
                         # Profit Margin
                         if comp.get('is_main_company'):
                             pm = fmt_pct(company_data.financials.profit_margin * 100) if isinstance(company_data.financials.profit_margin, (int, float)) else 'N/A'
                         else:
                             pm = fmt_pct(comp.get('profit_margin') * 100) if isinstance(comp.get('profit_margin'), (int, float)) else 'N/A'
-                        competitor_section += f"• Profit Margin: {pm}\n\n"
+                        competitor_section += f"• Profit Margin (TTM): {pm}\n\n"
                 else:
                     competitor_section += "• No competitor data available for comparison\n"
         else:
@@ -2863,11 +3111,15 @@ OUTPUT FORMAT (JSON only):
             is_indian_stock = symbol.endswith('.NS') or symbol.endswith('.BO')
             currency_symbol = '₹' if is_indian_stock else '$'
             
-            # Format key metrics
+            # Format key metrics. For Indian mega-caps, emit the trillion
+            # scale side-by-side with crores to prevent downstream
+            # crore→trillion conversion errors (see fmt_currency at ~L2420).
             def fmt_currency(value):
                 if value is None or not isinstance(value, (int, float)):
                     return 'N/A'
                 if is_indian_stock:
+                    if value >= 1e12:
+                        return f"₹{value/1e12:.2f} T (₹{value/1e7:,.0f} Cr)"
                     if value >= 1e7:
                         return f"₹{value/1e7:.2f} Cr"
                     elif value >= 1e5:
@@ -2907,21 +3159,48 @@ OUTPUT FORMAT (JSON only):
             from utils.model_config import get_model
             model = get_model()
             
+            # Collect news items with their source URLs so the prompt can
+            # cite specific providers rather than lumping everything under a
+            # generic "News" label.
+            news_sources: list[str] = []
+            if search_results:
+                for result in search_results[:5]:
+                    src_url = (result.get("url") or "").strip()
+                    src_title = (result.get("title") or "").strip()
+                    if src_url:
+                        try:
+                            from urllib.parse import urlparse
+                            domain = urlparse(src_url).netloc or src_url
+                        except Exception:
+                            domain = src_url
+                        news_sources.append(f"{src_title} — {domain}" if src_title else domain)
+            sources_block = (
+                "\n".join(f"• {s}" for s in news_sources)
+                if news_sources else "• No source URLs available"
+            )
+
             # Create prompt for expert opinion
             prompt = f"""You are a seasoned financial analyst with expertise in stock market analysis. Generate a comprehensive expert opinion on {stock_name} ({symbol}) based on current data and latest news.
 
-CURRENT STOCK DATA:
+NAMING RULE: Introduce the company ONCE as "{stock_name} ({symbol})" and thereafter use the ticker "{symbol}" consistently. Do NOT alternate between the full name and the ticker across paragraphs.
+
+CURRENT STOCK DATA (all TTM unless noted; yfinance-sourced):
 - Current Price: {current_price}
 - Market Cap: {market_cap}
-- PE Ratio: {pe_ratio}
-- Revenue: {revenue}
-- Profit Margin: {profit_margin}
+- PE Ratio (TTM): {pe_ratio}
+- Revenue (TTM): {revenue}
+- Profit Margin (TTM): {profit_margin}
 - Day Change: {day_change}
 - Year Change: {year_change}
 - Sector: {company_data.market_data.sector or 'Not specified'}
 
+FISCAL-TAG RULE: When you quote any figure above, carry the "(TTM)" tag with it. If you cite an FY-annual number from the news block, tag it as "(FYxx annual)". Never quote the same metric twice with two different numbers unless each carries a distinct fiscal tag.
+
 LATEST NEWS & DEVELOPMENTS:
 {news_summary}
+
+NEWS SOURCES (cite these domains if you reference a headline):
+{sources_block}
 
 SWOT HIGHLIGHTS:
 Strengths: {', '.join(company_data.swot.strengths[:3]) if company_data.swot.strengths else 'Not available'}
@@ -2933,8 +3212,12 @@ Generate a detailed expert opinion (3-4 paragraphs) covering:
 3. Key considerations for investors (both bullish and bearish factors)
 4. Overall outlook and recommendation considerations
 
-Write in a professional, balanced tone. Be specific with data points. Do NOT use bullet points - write in flowing paragraphs.
-Do NOT start with "Expert Opinion:" or any heading - just provide the analysis directly."""
+STYLE RULES:
+- Any directional comparison ("larger than", "dwarfs", "trails") between two numeric values must be arithmetically correct — verify A vs. B before writing it.
+- For any forward-looking event more than 12 months away, use Indian fiscal quarters (e.g. "Q3 FY27 (Oct–Dec 2026)") rather than a single calendar month.
+- Close with a one-line "Data sources:" attribution naming Yahoo Finance for the market/TTM figures and the specific news domains used (from the NEWS SOURCES block).
+- Write in a professional, balanced tone. Be specific with data points. Do NOT use bullet points - write in flowing paragraphs.
+- Do NOT start with "Expert Opinion:" or any heading - just provide the analysis directly."""
 
             # Generate expert opinion using LLM
             completion = guarded_llm_call(

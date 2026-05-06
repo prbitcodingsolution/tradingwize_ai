@@ -1,17 +1,79 @@
 """
 PostgreSQL Database Integration for Stock Analysis
-Stores analyzed stock data with technical metrics and sentiment analysis
+Stores analyzed stock data with technical metrics and sentiment analysis.
+
+Schema ownership
+────────────────
+DDL (CREATE TABLE, ADD COLUMN, indexes, etc.) lives in Alembic
+migrations under ``alembic/versions/``. This module owns runtime DML
+only (INSERT / UPDATE / SELECT). Calling ``StockDatabase.create_table``
+now runs ``alembic upgrade head`` programmatically so callers don't
+need to know about the migration tool explicitly.
 """
 
-import psycopg2
-from psycopg2.extras import Json
-from typing import Optional, Dict, Any
 import os
+from typing import Any, Dict, Optional
+
+import psycopg2
 from dotenv import load_dotenv
-import json
-from datetime import datetime
+from psycopg2.extras import Json
 
 load_dotenv()
+
+
+# ─────────────────────────────────────────────────────────
+# Alembic migration runner
+# ─────────────────────────────────────────────────────────
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ALEMBIC_INI = os.path.join(_PROJECT_ROOT, "alembic.ini")
+
+# Process-wide guard so we don't re-run migrations on every DB connect.
+# Streamlit reruns the whole script on every interaction — if we didn't
+# memoise this, `alembic upgrade head` would fire several times per
+# user click (each time doing a `SELECT version_num FROM alembic_version`
+# round-trip). Once per process is enough.
+_MIGRATIONS_APPLIED = False
+
+
+def run_migrations() -> bool:
+    """Run ``alembic upgrade head`` against the configured database.
+
+    Safe to call repeatedly — memoised per process and Alembic itself
+    is idempotent (it skips revisions already in ``alembic_version``).
+    Returns True on success, False if Alembic isn't installed or the
+    upgrade raised. Errors are logged but never propagated so callers
+    can treat this as best-effort.
+    """
+    global _MIGRATIONS_APPLIED
+    if _MIGRATIONS_APPLIED:
+        return True
+    try:
+        from alembic import command
+        from alembic.config import Config
+    except ImportError:
+        print("⚠️ alembic not installed — skipping migrations. "
+              "Run `pip install alembic` to enable schema migrations.")
+        return False
+    try:
+        if not os.path.exists(_ALEMBIC_INI):
+            print(f"⚠️ alembic.ini not found at {_ALEMBIC_INI}")
+            return False
+        cfg = Config(_ALEMBIC_INI)
+        # Ensure the script location is absolute even when the caller's
+        # cwd isn't the project root (Streamlit can be launched from
+        # anywhere).
+        cfg.set_main_option(
+            "script_location",
+            os.path.join(_PROJECT_ROOT, "alembic"),
+        )
+        command.upgrade(cfg, "head")
+        _MIGRATIONS_APPLIED = True
+        print("✅ Alembic migrations applied (upgrade head)")
+        return True
+    except Exception as e:
+        print(f"❌ Alembic upgrade failed: {e}")
+        return False
 
 class StockDatabase:
     """Handle PostgreSQL database operations for stock analysis"""
@@ -48,37 +110,14 @@ class StockDatabase:
         print("🔌 Database disconnected")
     
     def create_table(self):
-        """Create the stock_analysis table if it doesn't exist"""
-        try:
-            create_table_query = """
-            CREATE TABLE IF NOT EXISTS stock_analysis (
-                id SERIAL PRIMARY KEY,
-                stock_name VARCHAR(255) NOT NULL,
-                stock_symbol VARCHAR(50) NOT NULL,
-                analyzed_response TEXT NOT NULL,
-                tech_analysis JSONB NOT NULL,
-                selection BOOLEAN NOT NULL,
-                market_senti TEXT,
-                current_market_senti_status VARCHAR(50),
-                future_senti TEXT,
-                future_senti_status VARCHAR(50),
-                analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(stock_symbol, analyzed_at)
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_stock_symbol ON stock_analysis(stock_symbol);
-            CREATE INDEX IF NOT EXISTS idx_selection ON stock_analysis(selection);
-            CREATE INDEX IF NOT EXISTS idx_analyzed_at ON stock_analysis(analyzed_at);
-            """
-            
-            self.cursor.execute(create_table_query)
-            self.conn.commit()
-            print("✅ Table created/verified successfully")
-            return True
-        except Exception as e:
-            print(f"❌ Table creation failed: {e}")
-            self.conn.rollback()
-            return False
+        """Ensure the stock_analysis schema is up to date.
+
+        Retained for backward compatibility with existing callers
+        (agent1.py, app_advanced.py, bulk utilities). Schema DDL now
+        lives entirely in Alembic migrations under ``alembic/versions/``
+        — this method just runs ``alembic upgrade head``.
+        """
+        return run_migrations()
     
     def save_analysis(
         self,
@@ -87,25 +126,25 @@ class StockDatabase:
         analyzed_response: str,
         tech_analysis: Dict[str, Any],
         selection: bool,
-        market_senti: Optional[str] = None,
+        fii_dii_analysis: Optional[str] = None,
         current_market_senti_status: Optional[str] = None,
         future_senti: Optional[str] = None,
         future_senti_status: Optional[str] = None
     ) -> bool:
         """
         Save stock analysis to database
-        
+
         Args:
             stock_name: Name of the stock
             stock_symbol: Stock ticker symbol
             analyzed_response: Complete formatted analysis report
             tech_analysis: Technical analysis metrics as dict
             selection: Boolean indicating if stock is selected (% change <= -25%)
-            market_senti: Current market sentiment content
+            fii_dii_analysis: FII/DII institutional shareholding analysis text
             current_market_senti_status: Status (positive/negative/neutral)
             future_senti: Future outlook sentiment content
             future_senti_status: Status (positive/negative/neutral)
-        
+
         Returns:
             bool: True if successful, False otherwise
         """
@@ -117,16 +156,16 @@ class StockDatabase:
                 analyzed_response,
                 tech_analysis,
                 selection,
-                market_senti,
+                fii_dii_analysis,
                 current_market_senti_status,
                 future_senti,
                 future_senti_status
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
-            
+
             # Convert tech_analysis dict to JSON
             tech_analysis_json = Json(tech_analysis)
-            
+
             self.cursor.execute(
                 insert_query,
                 (
@@ -135,7 +174,7 @@ class StockDatabase:
                     analyzed_response,
                     tech_analysis_json,
                     selection,
-                    market_senti,
+                    fii_dii_analysis,
                     current_market_senti_status,
                     future_senti,
                     future_senti_status
@@ -151,6 +190,184 @@ class StockDatabase:
             self.conn.rollback()
             return False
     
+    def update_sentiment_columns(
+        self,
+        stock_symbol: str,
+        current_market_senti_status: Optional[str] = None,
+        future_senti: Optional[str] = None,
+        future_senti_status: Optional[str] = None,
+    ) -> bool:
+        """Update the sentiment-related columns on the LATEST stock_analysis
+        row for a given symbol.
+
+        Called by the background-task pipeline after future-outlook
+        analysis completes. Only non-None arguments are written — the
+        others are left untouched — so concurrent updates from different
+        pipelines don't clobber each other's values.
+
+        Note: the FII/DII institutional analysis has its own dedicated
+        method (``update_fii_dii_analysis``) because its column was
+        repurposed from the old ``market_senti`` slot.
+
+        Returns True if a row was updated, False otherwise.
+        """
+        try:
+            if not stock_symbol:
+                print("⚠️ update_sentiment_columns: stock_symbol is required")
+                return False
+
+            # Build SET clause dynamically from only the non-None fields so
+            # repeated calls can update just one sub-set.
+            _sets: list[str] = []
+            _vals: list[Any] = []
+            if current_market_senti_status is not None:
+                _sets.append("current_market_senti_status = %s")
+                _vals.append(current_market_senti_status)
+            if future_senti is not None:
+                _sets.append("future_senti = %s")
+                _vals.append(future_senti)
+            if future_senti_status is not None:
+                _sets.append("future_senti_status = %s")
+                _vals.append(future_senti_status)
+
+            if not _sets:
+                print("⚠️ update_sentiment_columns: nothing to update")
+                return False
+
+            _vals.append(stock_symbol)  # for WHERE clause
+
+            query = f"""
+            UPDATE stock_analysis
+            SET {', '.join(_sets)}
+            WHERE id = (
+                SELECT id FROM stock_analysis
+                WHERE stock_symbol = %s
+                ORDER BY analyzed_at DESC
+                LIMIT 1
+            )
+            """
+            self.cursor.execute(query, tuple(_vals))
+            _affected = self.cursor.rowcount
+            self.conn.commit()
+            if _affected:
+                print(f"✅ Sentiment columns updated for {stock_symbol}")
+                return True
+            print(f"⚠️ No stock_analysis row found for {stock_symbol} — nothing updated")
+            return False
+        except Exception as e:
+            print(f"❌ update_sentiment_columns failed for {stock_symbol}: {e}")
+            self.conn.rollback()
+            return False
+
+    def update_fii_dii_analysis(
+        self,
+        stock_symbol: str,
+        fii_dii_analysis: str,
+    ) -> bool:
+        """Update the ``fii_dii_analysis`` column on the LATEST
+        stock_analysis row for a given symbol.
+
+        Called after the FII/DII institutional sentiment has been computed
+        on the Data Dashboard so the formatted analysis block is persisted
+        alongside the fundamental analysis. FinRobot then reads this
+        column to factor institutional flow into its reasoning memo.
+
+        Returns True if a row was updated, False otherwise.
+        """
+        try:
+            if not stock_symbol:
+                print("⚠️ update_fii_dii_analysis: stock_symbol is required")
+                return False
+            if fii_dii_analysis is None:
+                print("⚠️ update_fii_dii_analysis: fii_dii_analysis text is required")
+                return False
+
+            query = """
+            UPDATE stock_analysis
+            SET fii_dii_analysis = %s
+            WHERE id = (
+                SELECT id FROM stock_analysis
+                WHERE stock_symbol = %s
+                ORDER BY analyzed_at DESC
+                LIMIT 1
+            )
+            """
+            self.cursor.execute(query, (fii_dii_analysis, stock_symbol))
+            _affected = self.cursor.rowcount
+            self.conn.commit()
+            if _affected:
+                print(f"✅ FII/DII analysis updated for {stock_symbol}")
+                return True
+            print(f"⚠️ No stock_analysis row found for {stock_symbol} — FII/DII not persisted")
+            return False
+        except Exception as e:
+            print(f"❌ update_fii_dii_analysis failed for {stock_symbol}: {e}")
+            self.conn.rollback()
+            return False
+
+    def update_finrobot_columns(
+        self,
+        stock_symbol: str,
+        finrobot_response: Optional[str] = None,
+        finrobot_recommendation: Optional[str] = None,
+        finrobot_score: Optional[float] = None,
+    ) -> bool:
+        """Update the FinRobot columns on the LATEST stock_analysis row
+        for a given symbol. Called after a successful FinRobot deep
+        analysis run so the full markdown report + recommendation +
+        score are persisted alongside the fundamental analysis.
+
+        Only non-None arguments are written — this keeps the method
+        safe to call even when one of the three fields is unavailable.
+
+        Returns True if a row was updated, False otherwise.
+        """
+        try:
+            if not stock_symbol:
+                print("⚠️ update_finrobot_columns: stock_symbol is required")
+                return False
+
+            _sets: list[str] = []
+            _vals: list[Any] = []
+            if finrobot_response is not None:
+                _sets.append("finrobot_response = %s")
+                _vals.append(finrobot_response)
+            if finrobot_recommendation is not None:
+                _sets.append("finrobot_recommendation = %s")
+                _vals.append(finrobot_recommendation)
+            if finrobot_score is not None:
+                _sets.append("finrobot_score = %s")
+                _vals.append(finrobot_score)
+
+            if not _sets:
+                print("⚠️ update_finrobot_columns: nothing to update")
+                return False
+
+            _vals.append(stock_symbol)
+
+            query = f"""
+            UPDATE stock_analysis
+            SET {', '.join(_sets)}
+            WHERE id = (
+                SELECT id FROM stock_analysis
+                WHERE stock_symbol = %s
+                ORDER BY analyzed_at DESC
+                LIMIT 1
+            )
+            """
+            self.cursor.execute(query, tuple(_vals))
+            _affected = self.cursor.rowcount
+            self.conn.commit()
+            if _affected:
+                print(f"✅ FinRobot columns updated for {stock_symbol}")
+                return True
+            print(f"⚠️ No stock_analysis row found for {stock_symbol} — FinRobot not persisted")
+            return False
+        except Exception as e:
+            print(f"❌ update_finrobot_columns failed for {stock_symbol}: {e}")
+            self.conn.rollback()
+            return False
+
     def get_latest_analysis(self, stock_symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get the most recent analysis for a stock or overall latest"""
         try:
@@ -242,25 +459,16 @@ class StockDatabase:
 
 
     def create_news_table(self):
-        """Create the stock_news table if it doesn't exist"""
+        """Ensure the stock_news table exists.
+
+        Backward-compat shim: DDL now lives in Alembic migrations, so
+        this just delegates to ``run_migrations()`` to apply any pending
+        revisions. The ``try/except`` block below remains only so
+        legacy error paths that depended on the return value continue
+        to work identically.
+        """
         try:
-            self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS stock_news (
-                id SERIAL PRIMARY KEY,
-                stock_symbol VARCHAR(50) NOT NULL,
-                stock_name VARCHAR(255),
-                title TEXT NOT NULL,
-                publisher VARCHAR(255),
-                link TEXT,
-                summary TEXT,
-                source VARCHAR(50),
-                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE INDEX IF NOT EXISTS idx_news_symbol ON stock_news(stock_symbol);
-            CREATE INDEX IF NOT EXISTS idx_news_fetched ON stock_news(fetched_at);
-            """)
-            self.conn.commit()
-            return True
+            return run_migrations()
         except Exception as e:
             print(f"❌ News table creation failed: {e}")
             self.conn.rollback()

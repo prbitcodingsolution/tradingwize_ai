@@ -556,3 +556,92 @@ def get_fii_dii_sentiment(
         data_freshness=data_freshness,
         timestamp=datetime.utcnow(),
     )
+
+
+# ─────────────────────────────────────────────────────────
+# DB PERSISTENCE HELPERS
+# ─────────────────────────────────────────────────────────
+
+def _fmt_change(change: Optional[float]) -> str:
+    if change is None:
+        return "N/A"
+    sign = "+" if change >= 0 else ""
+    return f"{sign}{change:.2f}pp"
+
+
+def build_fii_dii_analysis_text(result: "FIIDIISentiment") -> str:
+    """Render a FIIDIISentiment into the plain-text block that gets
+    stored in ``stock_analysis.fii_dii_analysis`` and later fed to the
+    FinRobot reasoning agent. Structure mirrors what the UI renders so
+    the LLM sees the same numbers the user sees on the dashboard.
+    """
+    if result is None:
+        return ""
+
+    lines: List[str] = [
+        f"FII/DII Institutional Sentiment — {result.company_name or result.symbol}",
+        "",
+        f"Recommendation: {result.recommendation}",
+        f"Institutional Score: {result.institutional_sentiment_score:.1f}/100 ({result.sentiment_label})",
+        "",
+        "Current Holdings:",
+        f"  - FII:   {result.current_fii_pct:.2f}%   "
+        f"(1Q: {_fmt_change(result.fii_change_1q)}, "
+        f"4Q: {_fmt_change(result.fii_change_4q)}, trend: {result.fii_trend})",
+        f"  - DII:   {result.current_dii_pct:.2f}%   "
+        f"(1Q: {_fmt_change(result.dii_change_1q)}, "
+        f"4Q: {_fmt_change(result.dii_change_4q)}, trend: {result.dii_trend})",
+        f"  - Total Institutional: {result.current_total_institutional:.2f}%",
+    ]
+
+    if result.quarterly_history:
+        lines.append("")
+        lines.append("Quarterly History (oldest → newest):")
+        for h in result.quarterly_history[-8:]:
+            lines.append(
+                f"  - {h.quarter}: FII {h.fii_pct:.2f}% | DII {h.dii_pct:.2f}%"
+            )
+
+    if result.reasoning:
+        lines.append("")
+        lines.append("Analysis:")
+        for r in result.reasoning:
+            lines.append(f"  - {r}")
+
+    lines.append("")
+    lines.append(
+        f"Source: {result.data_source} | Freshness: {result.data_freshness} | "
+        f"Computed: {result.timestamp.strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+    return "\n".join(lines)
+
+
+def persist_fii_dii_analysis(stock_symbol: str, result: "FIIDIISentiment") -> bool:
+    """Format the FII/DII sentiment result and write it to the
+    ``stock_analysis.fii_dii_analysis`` column for the latest row of the
+    given symbol. Best-effort — failures are logged, not raised, so
+    the dashboard render never breaks because of a DB hiccup.
+
+    Returns True on success, False otherwise.
+    """
+    try:
+        if not stock_symbol or result is None:
+            return False
+        text = build_fii_dii_analysis_text(result)
+        if not text:
+            return False
+        from database_utility.database import StockDatabase
+        db = StockDatabase()
+        if not db.connect():
+            print(f"⚠️ [fii_dii] DB connect failed while persisting {stock_symbol}")
+            return False
+        try:
+            return db.update_fii_dii_analysis(
+                stock_symbol=stock_symbol,
+                fii_dii_analysis=text,
+            )
+        finally:
+            db.disconnect()
+    except Exception as e:
+        print(f"⚠️ [fii_dii] persist failed for {stock_symbol}: {e}")
+        return False

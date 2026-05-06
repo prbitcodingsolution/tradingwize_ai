@@ -16,8 +16,6 @@ import time
 
 load_dotenv()
 
-USE_FINBERT = os.getenv("FINBERT_ENABLED", "true").lower() == "true"
-
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 RAPID_API_KEY = os.getenv("RAPID_API_KEY")
 RAPID_API_HOST = os.getenv("RAPID_API_HOST")
@@ -144,7 +142,8 @@ class RapidAPISentimentAnalyzer:
         for source, count in news_count_by_source.items():
             print(f"   • {source}: {count}")
         
-        # Analyze sentiment using FinBERT (primary) or LLM fallback
+        # Analyze sentiment via the LLM classifier (primary) with an
+        # LLM-only re-ask as safety net if the classifier errors.
         if all_news:
             news_text = "\n\n".join([
                 f"Source: {item['source']}\nTitle: {item['title']}\nContent: {item['content'][:300]}"
@@ -153,36 +152,35 @@ class RapidAPISentimentAnalyzer:
 
             sentiment_data = None
 
-            # --- FinBERT path ---
-            if USE_FINBERT:
-                try:
-                    from .finbert_sentiment import FinBERTSentimentAnalyzer
-                    texts = [
-                        f"{a['title']} {a['content']}"
-                        for a in all_news
-                        if (a.get('title') or a.get('content', '')).strip()
-                    ]
-                    finbert = FinBERTSentimentAnalyzer.get_instance()
-                    fb_result = finbert.analyze_texts(texts)
-                    finbert_score = fb_result["score"]
-                    article_count = len(texts)
+            # --- LLM classifier path (batched, per-text labels + score) ---
+            try:
+                from .llm_sentiment import LLMSentimentAnalyzer
+                texts = [
+                    f"{a['title']} {a['content']}"
+                    for a in all_news
+                    if (a.get('title') or a.get('content', '')).strip()
+                ]
+                classifier = LLMSentimentAnalyzer.get_instance()
+                llm_result = classifier.analyze_texts(texts)
+                llm_score = llm_result["score"]
+                article_count = len(texts)
 
-                    if finbert_score >= 70:
-                        sentiment_label = "Strongly Bullish"
-                    elif finbert_score >= 60:
-                        sentiment_label = "Bullish"
-                    elif finbert_score >= 40:
-                        sentiment_label = "Neutral"
-                    elif finbert_score >= 30:
-                        sentiment_label = "Bearish"
-                    else:
-                        sentiment_label = "Strongly Bearish"
+                if llm_score >= 70:
+                    sentiment_label = "Strongly Bullish"
+                elif llm_score >= 60:
+                    sentiment_label = "Bullish"
+                elif llm_score >= 40:
+                    sentiment_label = "Neutral"
+                elif llm_score >= 30:
+                    sentiment_label = "Bearish"
+                else:
+                    sentiment_label = "Strongly Bearish"
 
-                    print(f"\n   FinBERT News Score: {finbert_score:.1f}/100  ({sentiment_label})")
+                print(f"\n   LLM News Score: {llm_score:.1f}/100  ({sentiment_label})")
 
-                    # LLM for key points only
-                    key_prompt = f"""Analyze these news articles about {stock_name} ({stock_symbol}).
-FinBERT sentiment score: {finbert_score:.1f}/100
+                # LLM for key points only
+                key_prompt = f"""Analyze these news articles about {stock_name} ({stock_symbol}).
+Sentiment score (LLM classifier): {llm_score:.1f}/100
 
 Articles:
 {news_text}
@@ -193,42 +191,42 @@ DO NOT change the score. Return ONLY valid JSON:
   "negative_points": ["point1", "point2"],
   "market_mood": "<2-3 sentence summary>"
 }}"""
-                    try:
-                        resp = self.client.chat.completions.create(
-                            model="openai/gpt-oss-120b",
-                            messages=[
-                                {"role": "system", "content": "Financial analyst extracting key points. Do not change the sentiment score."},
-                                {"role": "user", "content": key_prompt}
-                            ],
-                            temperature=0.1,
-                            max_tokens=800,
-                        )
-                        rt = resp.choices[0].message.content.strip()
-                        if "```json" in rt:
-                            rt = rt.split("```json")[1].split("```")[0].strip()
-                        elif "```" in rt:
-                            rt = rt.split("```")[1].split("```")[0].strip()
-                        llm_data = json.loads(rt)
-                    except Exception as e:
-                        print(f"   LLM key-points extraction failed: {e}")
-                        llm_data = {}
-
-                    sentiment_data = {
-                        'sentiment_score': round(finbert_score, 1),
-                        'sentiment_label': sentiment_label,
-                        'positive_points': llm_data.get('positive_points', ['Positive indicators noted']),
-                        'negative_points': llm_data.get('negative_points', ['Some concerns noted']),
-                        'market_mood': llm_data.get('market_mood', f'Market sentiment is {sentiment_label.lower()} based on news analysis.'),
-                        'confidence': 'High' if article_count >= 20 else 'Medium' if article_count >= 10 else 'Low',
-                        'news_count': len(all_news),
-                        'finbert_result': fb_result,
-                    }
-
+                try:
+                    resp = self.client.chat.completions.create(
+                        model="openai/gpt-oss-120b",
+                        messages=[
+                            {"role": "system", "content": "Financial analyst extracting key points. Do not change the sentiment score."},
+                            {"role": "user", "content": key_prompt}
+                        ],
+                        temperature=0.1,
+                        max_tokens=800,
+                    )
+                    rt = resp.choices[0].message.content.strip()
+                    if "```json" in rt:
+                        rt = rt.split("```json")[1].split("```")[0].strip()
+                    elif "```" in rt:
+                        rt = rt.split("```")[1].split("```")[0].strip()
+                    llm_data = json.loads(rt)
                 except Exception as e:
-                    print(f"   FinBERT news scoring failed: {e} — falling back to LLM")
-                    sentiment_data = None
+                    print(f"   LLM key-points extraction failed: {e}")
+                    llm_data = {}
 
-            # --- LLM-only fallback ---
+                sentiment_data = {
+                    'sentiment_score': round(llm_score, 1),
+                    'sentiment_label': sentiment_label,
+                    'positive_points': llm_data.get('positive_points', ['Positive indicators noted']),
+                    'negative_points': llm_data.get('negative_points', ['Some concerns noted']),
+                    'market_mood': llm_data.get('market_mood', f'Market sentiment is {sentiment_label.lower()} based on news analysis.'),
+                    'confidence': 'High' if article_count >= 20 else 'Medium' if article_count >= 10 else 'Low',
+                    'news_count': len(all_news),
+                    'llm_result': llm_result,
+                }
+
+            except Exception as e:
+                print(f"   LLM classifier batch failed: {e} — falling back to single LLM re-ask")
+                sentiment_data = None
+
+            # --- LLM-only re-ask fallback ---
             if sentiment_data is None:
                 print(f"   Using LLM-only analysis for news sentiment")
                 sentiment_prompt = f"""Analyze the sentiment of these news articles about {stock_name} ({stock_symbol}).
@@ -309,7 +307,7 @@ BE OBJECTIVE. Return ONLY valid JSON:
     
     def analyze_yahoo_finance_sentiment(self, stock_symbol: str, stock_name: str) -> Dict:
         """
-        Analyze Yahoo Finance sentiment using FinBERT on Yahoo-sourced text.
+        Analyze Yahoo Finance sentiment using the LLM classifier on Yahoo-sourced text.
 
         Pipeline (unified with News / Twitter / Reddit):
           1. Collect textual content about the stock from Yahoo Finance:
@@ -317,15 +315,16 @@ BE OBJECTIVE. Return ONLY valid JSON:
              - Tavily search restricted to finance.yahoo.com (for
                augmentation when yfinance returns few items or for stocks
                that lack yfinance news coverage)
-          2. Score the collected texts with FinBERT — same engine as the
-             other three sources. The FinBERT score IS the Yahoo score.
+          2. Score the collected texts with the LLM classifier — same
+             engine as the other three sources. The LLM score IS the
+             Yahoo score.
           3. Fetch analyst recommendation counts + target price from
              yfinance as SUPPLEMENTARY METADATA for display only. They do
              NOT influence the score, but they are surfaced in
              `key_insights` / `buy_recommendations` / etc. so the UI still
              shows analyst context.
         """
-        print(f"📊 Analyzing Yahoo Finance sentiment for {stock_symbol} (FinBERT)...")
+        print(f"📊 Analyzing Yahoo Finance sentiment for {stock_symbol} (LLM classifier)...")
 
         # --- Metadata containers (for UI display only, not used for scoring) ---
         buy_count = 0
@@ -334,7 +333,7 @@ BE OBJECTIVE. Return ONLY valid JSON:
         target_price = None
         current_price = None
 
-        # --- Text collection for FinBERT ---
+        # --- Text collection for the LLM classifier ---
         texts: List[str] = []
         seen_texts: set = set()  # dedup across all sources
 
@@ -396,7 +395,7 @@ BE OBJECTIVE. Return ONLY valid JSON:
             except Exception as e:
                 print(f"   ⚠️ Could not fetch analyst recommendations: {e}")
 
-            # Yahoo Finance news items — this is what FinBERT will score.
+            # Yahoo Finance news items — this is what the LLM classifier will score.
             # yfinance news schema has changed across versions; handle both
             # the legacy flat shape and the newer nested {content: {...}} shape.
             try:
@@ -460,31 +459,27 @@ BE OBJECTIVE. Return ONLY valid JSON:
                 print(f"   ⚠️ Tavily {domain} failed: {e}")
         print(f"   ✅ After Tavily augmentation: {len(texts)} unique texts")
 
-        # Step 3: FinBERT scoring — the ONLY scoring path
+        # Step 3: LLM classifier scoring — the ONLY scoring path
         if not texts:
             print(f"   ⚠️ No Yahoo Finance text available — returning default neutral")
             return self._get_default_yahoo_sentiment()
 
-        if not USE_FINBERT:
-            print(f"   ⚠️ FINBERT_ENABLED is false — returning default neutral")
-            return self._get_default_yahoo_sentiment()
-
         try:
-            from .finbert_sentiment import FinBERTSentimentAnalyzer
-            finbert = FinBERTSentimentAnalyzer.get_instance()
-            fb_result = finbert.analyze_texts(texts)
-            yahoo_score = fb_result['score']
-            breakdown = fb_result.get('breakdown', {})
-            print(f"   ✅ Yahoo FinBERT score: {yahoo_score:.1f}/100  "
+            from .llm_sentiment import LLMSentimentAnalyzer
+            classifier = LLMSentimentAnalyzer.get_instance()
+            llm_result = classifier.analyze_texts(texts)
+            yahoo_score = llm_result['score']
+            breakdown = llm_result.get('breakdown', {})
+            print(f"   ✅ Yahoo LLM score: {yahoo_score:.1f}/100  "
                   f"(positive={breakdown.get('positive', 0)}, "
                   f"negative={breakdown.get('negative', 0)}, "
                   f"neutral={breakdown.get('neutral', 0)})")
         except Exception as e:
-            print(f"   ❌ FinBERT Yahoo scoring failed: {e}")
+            print(f"   ❌ LLM Yahoo scoring failed: {e}")
             return self._get_default_yahoo_sentiment()
 
         # Step 4: derive rating label + institutional sentiment from the
-        # FinBERT score. Same threshold band used elsewhere: ≥60 Buy /
+        # LLM score. Same threshold band used elsewhere: ≥60 Buy /
         # ≤40 Sell / otherwise Hold.
         if yahoo_score >= 60:
             analyst_rating = "Buy"
@@ -510,7 +505,7 @@ BE OBJECTIVE. Return ONLY valid JSON:
         if current_price:
             key_insights.append(f"Current price: ₹{current_price:.2f}")
         key_insights.append(
-            f"FinBERT sentiment over {len(texts)} Yahoo Finance news items: {analyst_rating}"
+            f"LLM sentiment over {len(texts)} Yahoo Finance news items: {analyst_rating}"
         )
 
         return {
@@ -522,9 +517,9 @@ BE OBJECTIVE. Return ONLY valid JSON:
             'average_price_target': target_price,
             'institutional_sentiment': institutional,
             'key_insights': key_insights,
-            'data_source': 'yfinance_news_finbert',
+            'data_source': 'yfinance_news_llm',
             'news_count': len(texts),
-            'finbert_result': fb_result,
+            'llm_result': llm_result,
         }
     
     def analyze_twitter_sentiment_rapidapi(self, stock_symbol: str, stock_name: str) -> Dict:
@@ -647,84 +642,35 @@ BE OBJECTIVE. Return ONLY valid JSON:
     def _analyze_tweets_sentiment(self, combined_text: str, stock_symbol: str,
                                   stock_name: str, tweets_data: List[Dict]) -> Dict:
         """
-        Analyze sentiment of tweet texts using FinBERT (primary) + LLM for theme extraction.
-        FinBERT is domain-specific to finance and more accurate than VADER for stock tweets.
+        Analyze sentiment of tweet texts using the LLM classifier (scoring)
+        plus a second LLM call for theme extraction.
         """
-        print(f"   🤖 Analyzing sentiment of {len(tweets_data)} tweets with FinBERT...")
+        print(f"   🤖 Analyzing sentiment of {len(tweets_data)} tweets with LLM classifier...")
 
         tweet_texts = [t.get('text', '') for t in tweets_data if t.get('text', '').strip()]
         if not tweet_texts:
             print(f"   ⚠️ No valid tweet texts to analyze")
             return self._get_default_social_sentiment("twitter")
 
-        # --- FinBERT scoring (primary) ---
-        finbert_score = 50.0
+        # --- LLM classifier scoring (sole path) ---
+        # The classifier has a graceful internal fallback that returns
+        # neutral defaults on failure, so no outer fallback is needed.
+        llm_score = 50.0
         breakdown = {'positive': 0, 'negative': 0, 'neutral': 0}
-        finbert_ok = False
+        llm_result = None
 
-        if USE_FINBERT:
-            try:
-                from .finbert_sentiment import FinBERTSentimentAnalyzer
-                finbert = FinBERTSentimentAnalyzer.get_instance()
-                fb_result = finbert.analyze_texts(tweet_texts)
-                finbert_score = fb_result['score']
-                breakdown = fb_result['breakdown']
-                finbert_ok = True
-                print(f"   ✅ FinBERT Twitter Score: {finbert_score:.1f}/100")
-                print(f"      Positive: {breakdown.get('positive', 0)} | "
-                      f"Negative: {breakdown.get('negative', 0)} | "
-                      f"Neutral: {breakdown.get('neutral', 0)}")
-            except Exception as e:
-                print(f"   ⚠️ FinBERT failed for Twitter: {e}")
-
-        # Fallback to VADER if FinBERT unavailable
-        if not finbert_ok:
-            try:
-                from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-                vader = SentimentIntensityAnalyzer()
-                compounds = [vader.polarity_scores(t)['compound'] for t in tweet_texts]
-                avg_compound = sum(compounds) / len(compounds)
-                finbert_score = (avg_compound + 1) * 50
-                breakdown = {
-                    'positive': sum(1 for c in compounds if c > 0.05),
-                    'negative': sum(1 for c in compounds if c < -0.05),
-                    'neutral': sum(1 for c in compounds if -0.05 <= c <= 0.05),
-                }
-                print(f"   ✅ VADER fallback Twitter Score: {finbert_score:.1f}/100")
-            except Exception as e:
-                print(f"   ⚠️ VADER fallback also failed: {e} — using LLM scoring")
-                # Final fallback: LLM for scoring
-                try:
-                    resp = self.client.chat.completions.create(
-                        model="openai/gpt-oss-120b",
-                        messages=[
-                            {"role": "system", "content": "You are an objective financial tweet sentiment analyst. Return ONLY valid JSON."},
-                            {"role": "user", "content": (
-                                f"Score Twitter sentiment for {stock_name} ({stock_symbol}) "
-                                f"from these tweets (0=bearish, 50=neutral, 100=bullish).\n\n"
-                                f"TWEETS:\n{combined_text[:3000]}\n\n"
-                                f'Return: {{"sentiment_score": <0-100>, "positive_pct": <0-100>, '
-                                f'"negative_pct": <0-100>, "neutral_pct": <0-100>}}'
-                            )},
-                        ],
-                        temperature=0.1,
-                        max_tokens=200,
-                    )
-                    raw = resp.choices[0].message.content.strip()
-                    if "```" in raw:
-                        raw = raw.split("```")[1].split("```")[0].strip()
-                        if raw.startswith("json"):
-                            raw = raw[4:].strip()
-                    llm_scores = json.loads(raw)
-                    finbert_score = float(llm_scores.get('sentiment_score', 50))
-                    n = len(tweet_texts)
-                    breakdown = {
-                        'positive': int(llm_scores.get('positive_pct', 33) * n / 100),
-                        'negative': int(llm_scores.get('negative_pct', 33) * n / 100),
-                        'neutral': int(llm_scores.get('neutral_pct', 34) * n / 100),
-                    }
-                except Exception:
-                    pass  # keep defaults
+        try:
+            from .llm_sentiment import LLMSentimentAnalyzer
+            classifier = LLMSentimentAnalyzer.get_instance()
+            llm_result = classifier.analyze_texts(tweet_texts)
+            llm_score = llm_result['score']
+            breakdown = llm_result['breakdown']
+            print(f"   ✅ LLM Twitter Score: {llm_score:.1f}/100")
+            print(f"      Positive: {breakdown.get('positive', 0)} | "
+                  f"Negative: {breakdown.get('negative', 0)} | "
+                  f"Neutral: {breakdown.get('neutral', 0)}")
+        except Exception as e:
+            print(f"   ⚠️ LLM Twitter scoring failed: {e} — returning neutral defaults")
 
         # Determine label from score
         n_total = len(tweet_texts)
@@ -735,13 +681,13 @@ BE OBJECTIVE. Return ONLY valid JSON:
         negative_pct = (neg / n_total * 100) if n_total else 0
         neutral_pct  = (neu / n_total * 100) if n_total else 0
 
-        if finbert_score >= 70:
+        if llm_score >= 70:
             sentiment_label = "Strongly Bullish"
-        elif finbert_score >= 60:
+        elif llm_score >= 60:
             sentiment_label = "Bullish"
-        elif finbert_score >= 40:
+        elif llm_score >= 40:
             sentiment_label = "Neutral"
-        elif finbert_score >= 30:
+        elif llm_score >= 30:
             sentiment_label = "Bearish"
         else:
             sentiment_label = "Strongly Bearish"
@@ -749,7 +695,7 @@ BE OBJECTIVE. Return ONLY valid JSON:
         # --- LLM for theme/mood extraction only (not scoring) ---
         theme_prompt = f"""Analyze Twitter/X discussions about {stock_name} ({stock_symbol}).
 
-FinBERT Sentiment Score: {finbert_score:.1f}/100 ({sentiment_label})
+Sentiment Score (LLM classifier): {llm_score:.1f}/100 ({sentiment_label})
 
 Sample Tweets:
 {combined_text[:3000]}
@@ -795,7 +741,7 @@ Return ONLY valid JSON:
         sorted_tweets = sorted(tweets_data, key=lambda x: x.get('favorites', 0) + x.get('retweets', 0), reverse=True)[:5]
 
         return {
-            'sentiment_score': round(finbert_score, 1),
+            'sentiment_score': round(llm_score, 1),
             'sentiment_label': sentiment_label,
             'tweet_count': n_total,
             'positive_percentage': round(positive_pct, 1),
@@ -813,8 +759,8 @@ Return ONLY valid JSON:
                 for t in sorted_tweets
             ],
             'confidence': 'High' if n_total >= 30 else 'Medium' if n_total >= 15 else 'Low',
-            'source': 'rapidapi_twitter_finbert' if finbert_ok else 'rapidapi_twitter_vader_fallback',
-            'finbert_result': fb_result if finbert_ok else None,
+            'source': 'rapidapi_twitter_llm',
+            'llm_result': llm_result,
         }
     
     def analyze_reddit_sentiment_adanos(self, ticker: str) -> Dict:

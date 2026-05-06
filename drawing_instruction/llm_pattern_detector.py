@@ -173,12 +173,19 @@ class LLMPatternDetector:
                 analysis['smc_data'] = fallback_analysis.get('smc_data', {})
                 analysis['liquidity_sweeps_data'] = fallback_analysis.get('liquidity_sweeps_data', {})
                 analysis['macd_data'] = fallback_analysis.get('macd_data', {})
-                
+                analysis['market_structure_data'] = fallback_analysis.get('market_structure_data', {})
+                analysis['price_action_data'] = fallback_analysis.get('price_action_data', {})
+                analysis['ob_finder_data'] = fallback_analysis.get('ob_finder_data', {})
+                analysis['liquidity_data'] = fallback_analysis.get('liquidity_data', {})
+                analysis['fvg_ob_data'] = fallback_analysis.get('fvg_ob_data', {})
+
                 logger.info(f"✅ Enhanced analysis with fallback indicators:")
                 logger.info(f"   Total zones after enhancement: {len(analysis.get('zones', []))}")
                 logger.info(f"   SMC data available: {bool(analysis.get('smc_data'))}")
                 logger.info(f"   Liquidity sweeps available: {bool(analysis.get('liquidity_sweeps_data'))}")
                 logger.info(f"   MACD data available: {bool(analysis.get('macd_data'))}")
+                logger.info(f"   Market Structure events: {len(analysis.get('market_structure_data', {}).get('events', []))}")
+                logger.info(f"   FVG-OB blocks: bull={len(analysis.get('fvg_ob_data', {}).get('bull_blocks', []))} / bear={len(analysis.get('fvg_ob_data', {}).get('bear_blocks', []))}")
             
             return analysis
         
@@ -1006,7 +1013,151 @@ Return ONLY valid JSON. No markdown. No code blocks. Start with {{ end with }}.
                     'momentum': 'neutral',
                     'df_index': recent_data.index
                 }
-            
+
+            # Market Structure (MSB + OB/BB) Analysis
+            market_structure_data = {'events': [], 'df_index': recent_data.index}
+            try:
+                try:
+                    from market_structure_indicator import MarketStructureIndicator
+                except ImportError:
+                    from .market_structure_indicator import MarketStructureIndicator
+
+                logger.info("🏛️  Running Market Structure (MSB-OB) analysis...")
+                msi = MarketStructureIndicator(recent_data, zigzag_len=9, fib_factor=0.33)
+                msi.run()
+                market_structure_data = msi.get_data()
+                logger.info(
+                    f"✅ Market Structure: {len(market_structure_data.get('events', []))} MSB events, "
+                    f"{len(market_structure_data.get('high_pivots', []))} highs / "
+                    f"{len(market_structure_data.get('low_pivots', []))} lows"
+                )
+            except Exception as ms_error:
+                logger.warning(f"⚠️  Market Structure analysis failed: {ms_error}")
+                market_structure_data = {
+                    'events': [],
+                    'high_pivots': [],
+                    'low_pivots': [],
+                    'zigzag_lines': [],
+                    'df_index': recent_data.index,
+                }
+
+            # Liquidity Swings (LuxAlgo Pine port) — pivot highs/lows with
+            # per-zone touch count + accumulated volume. Cheap, deterministic.
+            liquidity_data = {
+                'high_zones': [], 'low_zones': [], 'df_index': df.index,
+            }
+            try:
+                try:
+                    from liquidity_swings_indicator import LiquiditySwingsIndicator
+                except ImportError:
+                    from .liquidity_swings_indicator import LiquiditySwingsIndicator
+
+                logger.info(f"💧 Running Liquidity Swings (LuxAlgo) on {len(df)} bars...")
+                liq = LiquiditySwingsIndicator(df, length=14, area='Wick Extremity')
+                liq.run()
+                liquidity_data = liq.get_data()
+                logger.info(
+                    f"✅ Liquidity Swings: highs={len(liquidity_data.get('high_zones', []))} "
+                    f"/ lows={len(liquidity_data.get('low_zones', []))}"
+                )
+            except Exception as liq_error:
+                logger.warning(f"⚠️  Liquidity Swings analysis failed: {liq_error}")
+                liquidity_data = {
+                    'high_zones': [], 'low_zones': [], 'df_index': df.index,
+                }
+
+            # Order Block Finder (wugamlo Pine port) — detects the last
+            # opposite-direction candle before N consecutive trending
+            # candles. Cheap/deterministic so we always run it.
+            ob_finder_data = {
+                'bull_obs': [], 'bear_obs': [], 'df_index': df.index,
+            }
+            try:
+                try:
+                    from order_block_finder_indicator import OrderBlockFinderIndicator
+                except ImportError:
+                    from .order_block_finder_indicator import OrderBlockFinderIndicator
+
+                logger.info(f"🧱 Running Order Block Finder on {len(df)} bars...")
+                obf = OrderBlockFinderIndicator(df, periods=5, threshold=0.0, max_obs=6)
+                obf.run()
+                ob_finder_data = obf.get_data()
+                logger.info(
+                    f"✅ OB-Finder: bull={len(ob_finder_data.get('bull_obs', []))} "
+                    f"/ bear={len(ob_finder_data.get('bear_obs', []))}"
+                )
+            except Exception as obf_error:
+                logger.warning(f"⚠️  OB-Finder analysis failed: {obf_error}")
+                ob_finder_data = {
+                    'bull_obs': [], 'bear_obs': [], 'df_index': df.index,
+                }
+
+            # Price-Action / Smart Money Concepts (BigBeluga Pine port).
+            # Pass full `df` for the same reason as the other indicators:
+            # warmup + more coverage.
+            price_action_data = {
+                'events': [], 'order_blocks': [],
+                'pivot_highs': [], 'pivot_lows': [],
+                'df_index': df.index,
+            }
+            try:
+                try:
+                    from price_action_smc_indicator import PriceActionSMCIndicator
+                except ImportError:
+                    from .price_action_smc_indicator import PriceActionSMCIndicator
+
+                logger.info(
+                    f"🎯 Running Price-Action SMC (BigBeluga) on {len(df)} bars..."
+                )
+                pa = PriceActionSMCIndicator(
+                    df, mslen=5, atr_length=200, ob_length=5, ob_last=5
+                )
+                pa.run()
+                price_action_data = pa.get_data()
+                logger.info(
+                    f"✅ Price-Action SMC: events={len(price_action_data.get('events', []))} "
+                    f"OBs={len(price_action_data.get('order_blocks', []))}"
+                )
+            except Exception as pa_error:
+                logger.warning(f"⚠️  Price-Action SMC analysis failed: {pa_error}")
+                price_action_data = {
+                    'events': [], 'order_blocks': [],
+                    'pivot_highs': [], 'pivot_lows': [],
+                    'df_index': df.index,
+                }
+
+            # FVG Order Blocks (BigBeluga Pine port).
+            # We pass the FULL df (not the 100-bar tail) — the ATR needs
+            # warmup and the Pine indicator is designed to scan the whole
+            # chart. Tail-slicing was producing zero detections in the
+            # fallback path.
+            fvg_ob_data = {
+                'bull_blocks': [], 'bear_blocks': [], 'df_index': df.index
+            }
+            try:
+                try:
+                    from fvg_order_blocks_indicator import FVGOrderBlocksIndicator
+                except ImportError:
+                    from .fvg_order_blocks_indicator import FVGOrderBlocksIndicator
+
+                logger.info(
+                    f"🟩 Running FVG Order Blocks (BigBeluga) on {len(df)} bars..."
+                )
+                fvg_ob = FVGOrderBlocksIndicator(
+                    df, filter_pct=0.5, box_amount=6, atr_length=50
+                )
+                fvg_ob.run()
+                fvg_ob_data = fvg_ob.get_data()
+                logger.info(
+                    f"✅ FVG-OB: bull={len(fvg_ob_data.get('bull_blocks', []))} "
+                    f"/ bear={len(fvg_ob_data.get('bear_blocks', []))}"
+                )
+            except Exception as fvg_ob_error:
+                logger.warning(f"⚠️  FVG-OB analysis failed: {fvg_ob_error}")
+                fvg_ob_data = {
+                    'bull_blocks': [], 'bear_blocks': [], 'df_index': df.index,
+                }
+
             return {
                 'patterns': patterns,
                 'zones': zones,  # Return zones from new indicator
@@ -1014,12 +1165,17 @@ Return ONLY valid JSON. No markdown. No code blocks. Start with {{ end with }}.
                 'smc_data': smc_data,  # Return SMC analysis
                 'liquidity_sweeps_data': liquidity_sweeps_data,  # Return Liquidity Sweeps analysis
                 'macd_data': macd_data,  # Return MACD analysis
+                'market_structure_data': market_structure_data,  # Return Market Structure analysis
+                'price_action_data': price_action_data,  # Return Price-Action SMC (BigBeluga) analysis
+                'ob_finder_data': ob_finder_data,  # Return Order Block Finder (wugamlo) analysis
+                'liquidity_data': liquidity_data,  # Return Liquidity Swings (LuxAlgo) analysis
+                'fvg_ob_data': fvg_ob_data,  # Return FVG Order Blocks (BigBeluga) analysis
                 'indicators': {
                     'rsi': {'current_value': 50, 'overbought_signals': [], 'oversold_signals': []},
                     'macd': {'bullish_crossovers': [], 'bearish_crossovers': []},
                     'key_levels': []
                 },
-                'summary': f'Volume-based zone analysis found {len(zones)} supply/demand zones, {len(fvg_zones)} FVG opportunities, comprehensive SMC analysis, {len(liquidity_sweeps_data.get("sweeps", []))} liquidity sweeps, and MACD analysis ({macd_data.get("trend", "neutral")} trend)'
+                'summary': f'Volume-based zone analysis found {len(zones)} supply/demand zones, {len(fvg_zones)} FVG opportunities, comprehensive SMC analysis, {len(liquidity_sweeps_data.get("sweeps", []))} liquidity sweeps, MACD analysis ({macd_data.get("trend", "neutral")} trend), and {len(market_structure_data.get("events", []))} market-structure breaks'
             }
             
         except Exception as e:

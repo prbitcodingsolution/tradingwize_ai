@@ -89,13 +89,18 @@ def generate_drawings_with_llm(symbol, timeframe="1d", use_api=True, api_config=
                 start_date = api_config.get('from_date', '2025-01-01')
                 end_date = api_config.get('to_date', datetime.now().strftime('%Y-%m-%d'))
 
-                # Convert symbol to yfinance format for non-stock markets
-                # Strip any =X suffix first to get the clean symbol
+                # Convert symbol to yfinance format for non-stock markets.
+                # Yahoo expects compact symbols (XAUUSD=X, EURUSD=X) — never
+                # slashed (XAU/USD=X is invalid and returns 404). Normalize
+                # by stripping separators before any lookup.
                 yf_symbol = symbol
-                if yf_symbol.endswith('=X'):
+                if yf_symbol.endswith('=X') or yf_symbol.endswith('=F'):
                     yf_symbol = yf_symbol[:-2]
-                if yf_symbol.endswith('=F'):
-                    yf_symbol = yf_symbol[:-2]
+                # Strip separators a user (or upstream API) might include:
+                # "XAU/USD" → "XAUUSD", "BTC-USD" → "BTCUSD", "EUR USD" → "EURUSD".
+                # We rebuild the suffix below based on market type.
+                for sep in ("/", " ", ":", "-"):
+                    yf_symbol = yf_symbol.replace(sep, "")
 
                 yf_market = api_config.get('market', 'stocks').lower()
                 if yf_market == 'forex':
@@ -111,13 +116,16 @@ def generate_drawings_with_llm(symbol, timeframe="1d", use_api=True, api_config=
                     }
                     if yf_symbol.upper() in _FOREX_YF_MAP:
                         yf_symbol = _FOREX_YF_MAP[yf_symbol.upper()]
-                    elif not yf_symbol.endswith('=X'):
+                    else:
                         # Regular forex pairs use =X (e.g. EURUSD=X)
-                        yf_symbol = f"{yf_symbol}=X"
+                        yf_symbol = f"{yf_symbol.upper()}=X"
                 elif yf_market == 'crypto':
-                    # yfinance uses -USD suffix for crypto (e.g. BTC-USD, ETH-USD)
-                    if not yf_symbol.endswith('-USD') and 'USD' not in yf_symbol:
-                        yf_symbol = f"{yf_symbol}-USD"
+                    # yfinance uses -USD suffix for crypto (e.g. BTC-USD, ETH-USD).
+                    # Symbol was already de-separated above, so re-insert the dash
+                    # before "USD" if the pair ends in USD.
+                    sym = yf_symbol.upper()
+                    if sym.endswith("USD") and not sym.endswith("-USD"):
+                        yf_symbol = f"{sym[:-3]}-USD"
 
                 logger.info(f"Downloading {yf_symbol} data from yfinance ({start_date} to {end_date})...")
                 ticker = yf.Ticker(yf_symbol)
@@ -238,7 +246,17 @@ def generate_drawings_with_llm(symbol, timeframe="1d", use_api=True, api_config=
                 analysis['liquidity_sweeps_data'] = fallback_analysis.get('liquidity_sweeps_data', {})
             if not analysis.get('macd_data'):
                 analysis['macd_data'] = fallback_analysis.get('macd_data', {})
-            
+            if not analysis.get('market_structure_data'):
+                analysis['market_structure_data'] = fallback_analysis.get('market_structure_data', {})
+            if not analysis.get('fvg_ob_data'):
+                analysis['fvg_ob_data'] = fallback_analysis.get('fvg_ob_data', {})
+            if not analysis.get('price_action_data'):
+                analysis['price_action_data'] = fallback_analysis.get('price_action_data', {})
+            if not analysis.get('ob_finder_data'):
+                analysis['ob_finder_data'] = fallback_analysis.get('ob_finder_data', {})
+            if not analysis.get('liquidity_data'):
+                analysis['liquidity_data'] = fallback_analysis.get('liquidity_data', {})
+
             logger.info(f"✅ Enhanced LLM analysis with fallback zones and indicators")
         
         # If LLM didn't detect any zones or patterns at all, replace entire analysis
@@ -284,7 +302,164 @@ def generate_drawings_with_llm(symbol, timeframe="1d", use_api=True, api_config=
                 logger.info(f"   Internal order blocks: {len(fallback_smc_data.get('internal_obs', []))}")
             else:
                 logger.info("ℹ️  No SMC data found in fallback analysis")
-        
+
+        # Ensure Market Structure (MSB + OB/BB) data is always available.
+        # LLM path doesn't produce it — we run the indicator directly when missing.
+        if not analysis.get('market_structure_data', {}).get('events'):
+            logger.info("🏛️  Market Structure data missing — computing from indicator")
+            try:
+                try:
+                    from market_structure_indicator import MarketStructureIndicator
+                except ImportError:
+                    from .market_structure_indicator import MarketStructureIndicator
+                msi = MarketStructureIndicator(df, zigzag_len=9, fib_factor=0.33)
+                msi.run()
+                analysis['market_structure_data'] = msi.get_data()
+                logger.info(
+                    f"✅ Market Structure: {len(analysis['market_structure_data'].get('events', []))} MSB events"
+                )
+            except Exception as ms_err:
+                logger.warning(f"⚠️  Market Structure computation failed: {ms_err}")
+                analysis['market_structure_data'] = {
+                    'events': [], 'high_pivots': [], 'low_pivots': [],
+                    'zigzag_lines': [], 'df_index': df.index,
+                }
+
+        # Ensure Liquidity Swings (LuxAlgo) data is always available —
+        # same pattern as the other indicator products.
+        _liq = analysis.get('liquidity_data', {})
+        if not (_liq.get('high_zones') or _liq.get('low_zones')):
+            logger.info(f"💧 Liquidity Swings data missing — computing on {len(df)} bars")
+            try:
+                try:
+                    from liquidity_swings_indicator import LiquiditySwingsIndicator
+                except ImportError:
+                    from .liquidity_swings_indicator import LiquiditySwingsIndicator
+                liq = LiquiditySwingsIndicator(df, length=14, area='Wick Extremity')
+                liq.run()
+                analysis['liquidity_data'] = liq.get_data()
+                logger.info(
+                    f"✅ Liquidity Swings: highs={len(analysis['liquidity_data'].get('high_zones', []))} "
+                    f"/ lows={len(analysis['liquidity_data'].get('low_zones', []))}"
+                )
+            except Exception as liq_err:
+                logger.warning(f"⚠️  Liquidity Swings computation failed: {liq_err}")
+                analysis['liquidity_data'] = {
+                    'high_zones': [], 'low_zones': [], 'df_index': df.index,
+                }
+
+        # Ensure Order Block Finder (wugamlo) data is always available —
+        # same pattern as market_structure / FVG-OB / price_action.
+        _obf = analysis.get('ob_finder_data', {})
+        if not (_obf.get('bull_obs') or _obf.get('bear_obs')):
+            logger.info(f"🧱 OB-Finder data missing — computing on {len(df)} bars")
+            try:
+                try:
+                    from order_block_finder_indicator import OrderBlockFinderIndicator
+                except ImportError:
+                    from .order_block_finder_indicator import OrderBlockFinderIndicator
+                obf = OrderBlockFinderIndicator(df, periods=5, threshold=0.0, max_obs=6)
+                obf.run()
+                analysis['ob_finder_data'] = obf.get_data()
+                logger.info(
+                    f"✅ OB-Finder: bull={len(analysis['ob_finder_data'].get('bull_obs', []))} "
+                    f"/ bear={len(analysis['ob_finder_data'].get('bear_obs', []))}"
+                )
+            except Exception as obf_err:
+                logger.warning(f"⚠️  OB-Finder computation failed: {obf_err}")
+                analysis['ob_finder_data'] = {
+                    'bull_obs': [], 'bear_obs': [], 'df_index': df.index,
+                }
+
+        # Ensure Price-Action / SMC (BigBeluga) data is always available.
+        # Same pattern as market_structure / FVG-OB — deterministic,
+        # fast, so we always run it when absent.
+        _pa = analysis.get('price_action_data', {})
+        if not (_pa.get('events') or _pa.get('order_blocks')):
+            logger.info(f"🎯 Price-Action SMC data missing — computing on {len(df)} bars")
+            try:
+                try:
+                    from price_action_smc_indicator import PriceActionSMCIndicator
+                except ImportError:
+                    from .price_action_smc_indicator import PriceActionSMCIndicator
+                pa = PriceActionSMCIndicator(df, mslen=5, atr_length=200, ob_length=5, ob_last=5)
+                pa.run()
+                analysis['price_action_data'] = pa.get_data()
+                logger.info(
+                    f"✅ Price-Action SMC: events={len(analysis['price_action_data'].get('events', []))} "
+                    f"OBs={len(analysis['price_action_data'].get('order_blocks', []))}"
+                )
+            except Exception as pa_err:
+                logger.warning(f"⚠️  Price-Action SMC computation failed: {pa_err}")
+                analysis['price_action_data'] = {
+                    'events': [], 'order_blocks': [],
+                    'pivot_highs': [], 'pivot_lows': [],
+                    'df_index': df.index,
+                }
+
+        # Ensure Supply / Demand Zones (BigBeluga) data is always available.
+        # Same deterministic-indicator pattern as MSB / FVG-OB / Price-Action —
+        # we always run it when missing so the bucket can render even when the
+        # LLM path doesn't produce one.
+        _sdz = analysis.get('supply_demand_zones_data', {})
+        if not (_sdz.get('supply_zones') or _sdz.get('demand_zones')):
+            logger.info(f"🟧 Supply/Demand Zones data missing — computing on {len(df)} bars")
+            try:
+                try:
+                    from supply_demand_zones_indicator import SupplyDemandZonesIndicator
+                except ImportError:
+                    from .supply_demand_zones_indicator import SupplyDemandZonesIndicator
+                # Use atr_length=50 as a pragmatic default (Pine's 200 needs
+                # 200 bars of warmup; on ~300-bar daily windows that wipes out
+                # most detection). Bump back to 200 for longer histories.
+                _atr_len = 200 if len(df) >= 400 else 50
+                sdz = SupplyDemandZonesIndicator(
+                    df,
+                    atr_length=_atr_len,
+                    atr_mult=2.0,
+                    vol_window=1000,
+                    look_back=5,
+                    cooldown=15,
+                    max_boxes=5,
+                )
+                sdz.run()
+                analysis['supply_demand_zones_data'] = sdz.get_data()
+                logger.info(
+                    f"✅ Supply/Demand Zones: supply={len(analysis['supply_demand_zones_data'].get('supply_zones', []))} "
+                    f"/ demand={len(analysis['supply_demand_zones_data'].get('demand_zones', []))}"
+                )
+            except Exception as sdz_err:
+                logger.warning(f"⚠️  Supply/Demand Zones computation failed: {sdz_err}")
+                analysis['supply_demand_zones_data'] = {
+                    'supply_zones': [], 'demand_zones': [], 'df_index': df.index,
+                }
+
+        # Ensure FVG Order Blocks (BigBeluga) data is always available.
+        # Same idea as above — the Pine-style FVG detection is deterministic
+        # and cheap, so we always run it when missing. We use atr_length=50
+        # (not Pine's 200) so detection still fires on ~300-bar daily windows
+        # where the 200-bar ATR warmup would otherwise eat most of the data.
+        _fvg_ob = analysis.get('fvg_ob_data', {})
+        if not (_fvg_ob.get('bull_blocks') or _fvg_ob.get('bear_blocks')):
+            logger.info(f"🟩 FVG-OB data missing — computing on {len(df)} bars")
+            try:
+                try:
+                    from fvg_order_blocks_indicator import FVGOrderBlocksIndicator
+                except ImportError:
+                    from .fvg_order_blocks_indicator import FVGOrderBlocksIndicator
+                fvg_ob = FVGOrderBlocksIndicator(df, filter_pct=0.5, box_amount=6, atr_length=50)
+                fvg_ob.run()
+                analysis['fvg_ob_data'] = fvg_ob.get_data()
+                logger.info(
+                    f"✅ FVG-OB: bull={len(analysis['fvg_ob_data'].get('bull_blocks', []))} "
+                    f"/ bear={len(analysis['fvg_ob_data'].get('bear_blocks', []))}"
+                )
+            except Exception as fvg_err:
+                logger.warning(f"⚠️  FVG-OB computation failed: {fvg_err}")
+                analysis['fvg_ob_data'] = {
+                    'bull_blocks': [], 'bear_blocks': [], 'df_index': df.index,
+                }
+
         # Step 3: Build drawing JSON from LLM analysis
         logger.info("Step 3: Building drawing instructions from LLM analysis...")
         

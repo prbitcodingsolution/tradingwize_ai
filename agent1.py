@@ -15,6 +15,7 @@ from models import (
 from utils.model_config import get_model, get_client, guarded_llm_call
 from utils.fii_dii_analyzer import get_fii_dii_sentiment as _get_fii_dii_data
 from utils.option_chain_analyzer import get_option_chain_analysis as _fetch_option_chain
+from utils.sector_helpers import normalize_exchange
 import asyncio
 import os
 import re
@@ -1289,6 +1290,172 @@ def optimize_response_for_display(response: str) -> str:
 
 
 # -------------------------
+#   UNIFIED-INSIGHT HELPER
+# -------------------------
+def generate_unified_insight(
+    company_name: str,
+    ticker: str,
+    expert_opinion: str,
+    screener_summary: str,
+    company_data,
+) -> str:
+    """Merge expert market opinion + Screener.in quarterly PDF summary into
+    a single, actionable investment insight.
+
+    Called from `analyze_stock_request` AFTER both parallel tasks finish,
+    so this adds one extra LLM round-trip (≈3-6s) rather than a re-fetch
+    of either source. Handles all four (expert × screener) availability
+    combinations:
+      • both present → synthesise
+      • only expert → synthesise (LLM sees only expert block)
+      • only screener → synthesise (LLM sees only screener block)
+      • neither → return "" so caller can skip the section entirely
+
+    If the LLM call itself errors, falls back to the raw expert opinion
+    alone (better than showing nothing).
+    """
+    # If both are empty, return nothing.
+    if not expert_opinion and not screener_summary:
+        print("⚠️ Both expert opinion and screener summary are empty, skipping unified insight")
+        return ""
+
+    has_expert = bool(expert_opinion and expert_opinion.strip())
+    has_screener = bool(screener_summary and screener_summary.strip())
+
+    print(
+        f"🔀 Generating unified insight "
+        f"(expert={'✅' if has_expert else '❌'}, "
+        f"screener={'✅' if has_screener else '❌'})"
+    )
+
+    # Build the input context for the LLM — only include sources that exist
+    # so the LLM isn't asked to synthesise from empty blocks.
+    input_sections: list[str] = []
+
+    if has_expert:
+        input_sections.append(
+            "=== EXPERT MARKET OPINION ===\n"
+            "(Source: Analyst reports, news, market commentary)\n"
+            f"{expert_opinion.strip()}"
+        )
+
+    if has_screener:
+        input_sections.append(
+            "=== SCREENER.IN QUARTERLY REPORTS SUMMARY ===\n"
+            "(Source: Official quarterly PDF reports from screener.in)\n"
+            f"{screener_summary.strip()}"
+        )
+
+    combined_input = "\n\n".join(input_sections)
+
+    # Basic financial context to ground the LLM with real numbers.
+    is_indian = ticker.endswith(".NS") or ticker.endswith(".BO")
+    currency = "₹" if is_indian else "$"
+
+    def _fmt(val):
+        if val is None or val == 0:
+            return "N/A"
+        try:
+            val = float(val)
+        except (TypeError, ValueError):
+            return "N/A"
+        if is_indian:
+            if abs(val) >= 1e7:
+                return f"{currency}{val / 1e7:.2f} Cr"
+            if abs(val) >= 1e5:
+                return f"{currency}{val / 1e5:.2f} L"
+            return f"{currency}{val:,.0f}"
+        if abs(val) >= 1e9:
+            return f"{currency}{val / 1e9:.2f}B"
+        if abs(val) >= 1e6:
+            return f"{currency}{val / 1e6:.2f}M"
+        return f"{currency}{val:,.0f}"
+
+    _cp = getattr(company_data.market_data, "current_price", None)
+    _mcap = getattr(company_data.market_data, "market_cap", None)
+    _rev = getattr(company_data.financials, "revenue", None)
+    _np = getattr(company_data.financials, "net_profit", None)
+    _pe = getattr(company_data.financials, "pe_ratio", None)
+    _pm = getattr(company_data.financials, "profit_margin", None)
+
+    financial_snapshot = (
+        f"Company: {company_name} ({ticker})\n"
+        f"Current Price: {_fmt(_cp)}\n"
+        f"Market Cap: {_fmt(_mcap)}\n"
+        f"Revenue: {_fmt(_rev)}\n"
+        f"Net Profit: {_fmt(_np)}\n"
+        f"PE Ratio: {f'{_pe:.2f}' if isinstance(_pe, (int, float)) else 'N/A'}\n"
+        f"Profit Margin: "
+        f"{f'{_pm * 100:.2f}%' if isinstance(_pm, (int, float)) else 'N/A'}"
+    )
+
+    system_prompt = (
+        "You are a senior equity research analyst at a top-tier investment bank.\n\n"
+        f"You have been given two intelligence sources about {company_name} ({ticker}):\n"
+        "1. Expert market opinion from analyst commentary and news\n"
+        "2. Quarterly financial reports summary from official screener.in PDFs\n\n"
+        "Your job is to synthesize BOTH sources into ONE unified, authoritative investment insight.\n\n"
+        "RULES:\n"
+        "- Do NOT just paste one after the other. Genuinely synthesize them.\n"
+        "- Find where they AGREE — this is a strong signal, highlight it.\n"
+        "- Find where they CONTRADICT — this is important nuance, address it honestly.\n"
+        "- Lead with the most important insight for an investor.\n"
+        "- Be specific — use numbers, quarters, percentages from the data.\n"
+        "- End with a clear, balanced assessment (not a buy/sell recommendation).\n"
+        "- Write in confident, professional analyst voice.\n"
+        "- Length: 250–400 words.\n"
+        "- No bullet points — flowing paragraphs only.\n"
+        "- Do NOT use section headers like \"Expert Opinion:\" or \"Screener Summary:\" — "
+        "write as one unified piece.\n\n"
+        "FINANCIAL CONTEXT:\n"
+        f"{financial_snapshot}"
+    )
+
+    user_prompt = (
+        f"Here are the intelligence sources for {company_name}:\n\n"
+        f"{combined_input}\n\n"
+        "Now write the unified investment insight. Synthesize the sources into one "
+        "cohesive analysis. Be specific, use data, and address any contradictions "
+        "between the sources if both are present."
+    )
+
+    try:
+        response = guarded_llm_call(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.4,
+            max_tokens=900,
+        )
+
+        content = response.choices[0].message.content if response and response.choices else ""
+        if not content or not content.strip():
+            print("⚠️ Unified insight LLM returned empty content")
+            # Graceful fallback: show expert opinion alone if available.
+            if has_expert:
+                return f"👨‍💼 **EXPERT OPINION**\n\n{expert_opinion.strip()}"
+            return ""
+
+        unified_text = content.strip()
+        print(f"✅ Unified insight generated: {len(unified_text.split())} words")
+
+        # Emit as a single section with a marker the parser can recognise.
+        return (
+            "🧠 **UNIFIED INVESTMENT INSIGHT**\n"
+            "*Synthesized from expert market analysis and official quarterly reports*\n\n"
+            f"{unified_text}"
+        )
+
+    except Exception as e:
+        print(f"❌ Unified insight generation failed: {e}")
+        # Graceful fallback: show expert opinion alone (better than nothing).
+        if has_expert:
+            return f"👨‍💼 **EXPERT OPINION**\n\n{expert_opinion.strip()}"
+        return ""
+
+
+# -------------------------
 #   AGENT TOOLS
 # -------------------------
 @agent.tool
@@ -1296,7 +1463,7 @@ def optimize_response_for_display(response: str) -> str:
 def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str) -> ToolResponse:
     """
     Primary stock analysis tool that performs analysis on a validated ticker symbol.
-    
+
     This tool expects to receive a PRE-VALIDATED ticker symbol (e.g., "RELIANCE.NS").
     It can also handle number selections (e.g., "1", "2", "3") if there are pending variants.
 
@@ -1413,7 +1580,16 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
         # Add .NS as default for Indian stocks if no suffix provided
         if len(ticker_symbol) <= 10:  # Likely Indian stock
             ticker_symbol = f"{ticker_symbol}.NS"
-    
+
+    # ──── Phase-1 timing: Dashboard Analysis ────
+    # Started here (after the cheap early bail-outs above) so the
+    # recorded duration reflects the real analysis pipeline, not
+    # microseconds of validation short-circuits.
+    from utils.timing import phase_timer as _phase_timer
+    _timing_symbol = str(ticker_symbol).strip().upper()
+    _timing_cm = _phase_timer("Dashboard Analysis", symbol=_timing_symbol)
+    _timing_cm.__enter__()
+
     try:
         # ── DB CACHE CHECK: Return instantly if this stock was recently analyzed ──
         # When 10 users are active, if User 2 asks for the same stock User 1 just analyzed,
@@ -1429,9 +1605,13 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
                     cached_report = cached_row['analyzed_response']
                     _cached_name = cached_row.get('stock_name', ticker_symbol)
 
-                    # Build a basic CompanyData from quick yfinance fetch so
-                    # downstream features (sentiment, trade ideas, dashboard) work
+                    # Build a CompanyData object that's rich enough for the
+                    # dashboard: pull fresh numbers from yfinance AND parse
+                    # the cached text to recover values that yfinance doesn't
+                    # carry for Indian stocks (Promoter / FII / DII holdings).
                     try:
+                        import math as _math
+                        import re as _re
                         import yfinance as yf
                         _yf = yf.Ticker(ticker_symbol)
                         _info = _yf.info or {}
@@ -1445,6 +1625,55 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
                             _52h = float(_hist['High'].max())
                             _52l = float(_hist['Low'].min())
 
+                        def _clean(v):
+                            """Strip None / NaN / non-numeric values from yfinance."""
+                            if v is None:
+                                return None
+                            try:
+                                f = float(v)
+                            except (TypeError, ValueError):
+                                return None
+                            if _math.isnan(f) or _math.isinf(f):
+                                return None
+                            return f
+
+                        # --- Parse Indian holdings out of the cached text ---
+                        # The original analysis wrote them under a "Holdings:"
+                        # block with lines like "• Promoter Holding: 71.77%".
+                        # Recovering from the text is free; no API call needed.
+                        # The trailing `:?\*?\*?` tolerates bold-wrapped labels
+                        # if the formatter ever emits `**Promoter Holding:**`.
+                        def _parse_holding(label: str) -> float | None:
+                            m = _re.search(
+                                rf"\*?\*?{label}:?\*?\*?\s*([\d.]+)\s*%",
+                                cached_report,
+                                _re.IGNORECASE,
+                            )
+                            if not m:
+                                return None
+                            try:
+                                return float(m.group(1))
+                            except ValueError:
+                                return None
+
+                        _promoter = _parse_holding("Promoter Holding")
+                        _fii = _parse_holding("FII Holding")
+                        _dii = _parse_holding("DII Holding")
+
+                        # --- Price history dict for charts ---
+                        _price_history: dict = {}
+                        if not _hist.empty:
+                            _price_history = {
+                                str(dt.date()): float(row["Close"])
+                                for dt, row in _hist.iterrows()
+                            }
+                        _overall_high = float(_hist['High'].max()) if not _hist.empty else None
+                        _overall_low = float(_hist['Low'].min()) if not _hist.empty else None
+                        _pct_from_high = (
+                            round(((_price - _overall_high) / _overall_high) * 100, 2)
+                            if _overall_high and _price else None
+                        )
+
                         from models import (
                             CompanyData, CompanySnapshot, BusinessOverview,
                             FinancialData, MarketData, SWOTAnalysis
@@ -1455,7 +1684,7 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
                             snapshot=CompanySnapshot(
                                 company_name=_cached_name,
                                 ticker_symbol=ticker_symbol,
-                                exchange=_info.get('exchange', 'NSE'),
+                                exchange=normalize_exchange(_info.get('exchange'), ticker_symbol),
                                 sector=_info.get('sector', 'N/A'),
                                 industry=_info.get('industry', 'N/A'),
                                 headquarters=_info.get('city', 'N/A'),
@@ -1467,28 +1696,51 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
                                 description=_info.get('longBusinessSummary', 'N/A'),
                             ),
                             financials=FinancialData(
-                                revenue=_info.get('totalRevenue'),
-                                net_profit=_info.get('netIncomeToCommon'),
-                                pe_ratio=_info.get('trailingPE'),
-                                pb_ratio=_info.get('priceToBook'),
-                                profit_margin=_info.get('profitMargins'),
-                                operating_margin=_info.get('operatingMargins'),
-                                dividend_yield=_info.get('dividendYield'),
-                                debt_to_equity=_info.get('debtToEquity'),
+                                revenue=_clean(_info.get('totalRevenue')),
+                                net_profit=_clean(_info.get('netIncomeToCommon')),
+                                ebitda=_clean(_info.get('ebitda')),
+                                eps=_clean(_info.get('trailingEps')),
+                                pe_ratio=_clean(_info.get('trailingPE')),
+                                pb_ratio=_clean(_info.get('priceToBook')),
+                                peg_ratio=_clean(_info.get('pegRatio')),
+                                profit_margin=_clean(_info.get('profitMargins')),
+                                operating_margin=_clean(_info.get('operatingMargins')),
+                                gross_margin=_clean(_info.get('grossMargins')),
+                                dividend_yield=_clean(_info.get('dividendYield')),
+                                debt_to_equity=_clean(_info.get('debtToEquity')),
+                                total_debt=_clean(_info.get('totalDebt')),
+                                cash_balance=_clean(_info.get('totalCash')),
+                                operating_cash_flow=_clean(_info.get('operatingCashflow')),
+                                free_cash_flow=_clean(_info.get('freeCashflow')),
+                                enterprise_value=_clean(_info.get('enterpriseValue')),
+                                ev_ebitda=_clean(_info.get('enterpriseToEbitda')),
                             ),
                             market_data=MarketData(
                                 current_price=_price,
-                                market_cap=_info.get('marketCap'),
+                                market_cap=_clean(_info.get('marketCap')),
                                 week_52_high=_52h,
                                 week_52_low=_52l,
-                                promoter_holding=None,
-                                fii_holding=None,
-                                dii_holding=None,
+                                overall_high=_overall_high,
+                                overall_low=_overall_low,
+                                percentage_change_from_high=_pct_from_high,
+                                volume=int(_clean(_info.get('volume')) or 0) or None,
+                                avg_volume=int(_clean(_info.get('averageVolume')) or 0) or None,
+                                beta=_clean(_info.get('beta')),
+                                price_history=_price_history,
+                                # Indian promoter/FII/DII don't exist in yfinance
+                                # — we parse them from the cached text instead.
+                                promoter_holding=_promoter,
+                                fii_holding=_fii,
+                                dii_holding=_dii,
                             ),
                             swot=SWOTAnalysis(),
                         )
                         ctx.deps.company_data = _cd
-                        print(f"✅ Built quick CompanyData for cache hit (price={_price})")
+                        print(
+                            f"✅ Built quick CompanyData for cache hit "
+                            f"(price={_price}, promoter={_promoter}, fii={_fii}, dii={_dii}, "
+                            f"volume={_cd.market_data.volume}, beta={_cd.market_data.beta})"
+                        )
                     except Exception as _cd_err:
                         print(f"⚠️ Quick CompanyData build failed: {_cd_err}")
 
@@ -1551,27 +1803,38 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
             fut_expert = pool.submit(_task_expert_opinion)
             fut_pdf = pool.submit(_task_pdf_summary)
 
-        # Collect expert opinion result
-        expert_opinion_text = fut_expert.result(timeout=120)
-        if expert_opinion_text:
-            formatted_report += f"\n\n👨‍💼 **EXPERT OPINION**\n{expert_opinion_text}\n"
+        # Collect both parallel results FIRST (no appending yet — we merge below)
+        expert_opinion_text = fut_expert.result(timeout=120) or ""
 
-        # Collect PDF summary result
         pdf_result = fut_pdf.result(timeout=300)
-        screener_pdf_summary = ""
+        screener_main_summary = ""
         if pdf_result.get("success") and pdf_result.get("main_summary"):
-            screener_pdf_summary = f"""
-
-**📊 Screener.in Quarterly Reports Summary**
-
-{pdf_result['main_summary']}
-
-**Based on analysis of latest {len(pdf_result.get('individual_summaries', []))} quarterly reports from screener.in**
-
-"""
-            print(f"✅ PDF summary generated: {len(pdf_result['main_summary'].split())} words")
+            screener_main_summary = pdf_result["main_summary"]
+            print(f"✅ PDF summary generated: {len(screener_main_summary.split())} words")
         else:
             print(f"⚠️ PDF summary: {pdf_result.get('error', 'No summary generated')}")
+
+        # ── Merge expert opinion + Screener.in summary into ONE unified insight ──
+        # A single LLM call reads both sources together and produces a cohesive,
+        # 250-400-word analyst synthesis (rather than appending two independent
+        # blocks). `generate_unified_insight` handles all four availability
+        # combinations (both / expert-only / screener-only / neither) and falls
+        # back to the raw expert opinion if the merge call itself fails.
+        unified_insight = generate_unified_insight(
+            company_name=company_data.name,
+            ticker=ticker_symbol,
+            expert_opinion=expert_opinion_text,
+            screener_summary=screener_main_summary,
+            company_data=company_data,
+        )
+        if unified_insight:
+            formatted_report += f"\n\n{unified_insight}\n"
+
+        # Preserve `screener_pdf_summary` as an empty string so downstream code
+        # (database save, final_response assembly below) that still references
+        # it keeps working without modification. The unified insight replaces
+        # its content in the report itself.
+        screener_pdf_summary = ""
         
         # Note: Shark Tank pitch generation is available via separate tool
         # Not included in main analysis to keep response focused
@@ -1607,7 +1870,7 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
                     analyzed_response=analyzed_response_text,
                     tech_analysis=tech_analysis_json,
                     selection=is_selected,
-                    market_senti=None,  # Will be updated when sentiment is analyzed
+                    fii_dii_analysis=None,  # Populated after the Dashboard runs FII/DII
                     current_market_senti_status=None,
                     future_senti=None,
                     future_senti_status=None
@@ -1643,15 +1906,22 @@ def analyze_stock_request(ctx: RunContext[ConversationState], ticker_symbol: str
         
     except Exception as e:
         print(f"❌ Analysis error: {str(e)}")
-        
+
         # Provide a better error message
         error_msg = str(e)
         if "No such file or directory" in error_msg:
             error_response = f"❌ **Analysis Error for {ticker_symbol}**\n\nThere was a technical issue processing the stock data. This is usually temporary.\n\n**What you can do:**\n• Try the analysis again in a moment\n• The system is working on resolving data access issues\n• All core functionality remains available\n\n*Technical details: {error_msg}*"
         else:
             error_response = f"❌ **Error analyzing {ticker_symbol}**\n\n{error_msg}\n\n**Please try again** - this is usually a temporary issue."
-        
+
         return create_tool_response(error_response, "analyze_stock_request")
+    finally:
+        # Close the Phase-1 timing context regardless of success/exception
+        # so the summary records a clean duration on every exit path.
+        try:
+            _timing_cm.__exit__(None, None, None)
+        except Exception:
+            pass
 
 @agent.tool
 @traceable(name="validate_and_get_stock")
@@ -1755,7 +2025,7 @@ def validate_and_get_stock(ctx: RunContext[ConversationState], stock_name: str) 
                 ctx.deps.pending_variants = [{
                     'symbol': resolved_symbol,
                     'name': actual_name,
-                    'exchange': info.get('exchange', 'NSE'),
+                    'exchange': normalize_exchange(info.get('exchange'), resolved_symbol),
                 }]
                 # Single match — auto-analyze directly
                 ctx.deps.validation_done_this_turn = False
@@ -1944,7 +2214,7 @@ Return ALL matching companies with VERIFIED ticker symbols. Be comprehensive - f
                         fallback_companies.append({
                             'name': actual_name,
                             'symbol': info.get('symbol', sym),
-                            'exchange': info.get('exchange', 'NSE')
+                            'exchange': normalize_exchange(info.get('exchange'), info.get('symbol', sym))
                         })
                         print(f"   ✅ Direct lookup found: {actual_name} ({sym})")
                         break  # Success, stop retrying this symbol
@@ -2054,7 +2324,7 @@ Return ALL matching companies with VERIFIED ticker symbols. Be comprehensive - f
                             validated_variants.append({
                                 'symbol': resolved_symbol,
                                 'name': actual_name,
-                                'exchange': info.get('exchange', c.get('exchange', 'NSE'))
+                                'exchange': normalize_exchange(info.get('exchange', c.get('exchange')), resolved_symbol)
                             })
                             print(f"   ✅ {try_symbol} verified: {actual_name}")
                             verified = True
@@ -2094,7 +2364,7 @@ Return ALL matching companies with VERIFIED ticker symbols. Be comprehensive - f
                         validated_variants.append({
                             'symbol': info.get('symbol', sym),
                             'name': actual_name,
-                            'exchange': info.get('exchange', 'NSE')
+                            'exchange': normalize_exchange(info.get('exchange'), info.get('symbol', sym))
                         })
                         print(f"   ✅ Direct fallback found: {actual_name} ({sym})")
                         break

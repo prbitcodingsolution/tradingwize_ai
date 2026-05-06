@@ -217,6 +217,15 @@ def scrape_trade_ideas(symbol: str, exchange: str = "NSE", max_ideas: int = 9) -
             cwd=os.path.dirname(os.path.dirname(__file__))
         )
 
+        # Always surface any worker stderr — the worker prints
+        # diagnostics (article count, consent banners, region blocks)
+        # when it couldn't extract any cards. Without this the parent
+        # only sees "Found 0 trade ideas" and has no idea why.
+        if result.stderr and result.stderr.strip():
+            _err_head = result.stderr.strip().splitlines()[-5:]
+            for _line in _err_head:
+                print(f"[worker] {_line}")
+
         if result.returncode == 0 and result.stdout.strip():
             ideas = json.loads(result.stdout.strip())
         else:

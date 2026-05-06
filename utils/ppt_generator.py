@@ -145,22 +145,35 @@ KEEP in English: stock tickers, EBITDA/CAGR/EPS/PE/ROE/ROCE, ₹/$/Cr, numbers, 
                 print(f"❌ No data found for {stock_symbol}")
                 return None
             
-            # Structure the data for LLM
+            # Structure the data for LLM.
+            # The client disabled the market-sentiment pipeline, so we
+            # intentionally do NOT pull `market_senti` — the PPT now builds
+            # from three DB columns: analyzed_response (fundamentals),
+            # future_senti (future outlook block), and finrobot_response
+            # (FinRobot deep-analysis memo). market_senti is still exposed
+            # as "Not used — pipeline disabled" so any legacy prompt that
+            # referenced the key fails loudly instead of silently reading
+            # empty values.
             structured_data = {
                 "stock_name": data['stock_name'],
                 "stock_symbol": data['stock_symbol'],
                 "fundamentals": data['analyzed_response'],
                 "sentiment": {
-                    "current_market_sentiment": data.get('market_senti', 'Not available'),
-                    "current_sentiment_status": data.get('current_market_senti_status', 'neutral'),
+                    "current_market_sentiment": "Not used — pipeline disabled",
+                    "current_sentiment_status": "disabled",
                     "future_outlook": data.get('future_senti', 'Not available'),
-                    "future_sentiment_status": data.get('future_senti_status', 'neutral')
+                    "future_sentiment_status": data.get('future_senti_status', 'neutral'),
+                },
+                "finrobot": {
+                    "response": data.get('finrobot_response', '') or '',
+                    "recommendation": data.get('finrobot_recommendation', '') or '',
+                    "score": data.get('finrobot_score'),
                 },
                 "tech_analysis": data.get('tech_analysis', {}),
                 "selection": data.get('selection', False),
-                "analyzed_at": str(data.get('analyzed_at', ''))
+                "analyzed_at": str(data.get('analyzed_at', '')),
             }
-            
+
             self.db.disconnect()
             return structured_data
             
@@ -184,23 +197,41 @@ KEEP in English: stock tickers, EBITDA/CAGR/EPS/PE/ROE/ROCE, ₹/$/Cr, numbers, 
         try:
             print("🤖 Generating comprehensive slide structure using LLM (English)...")
             
-            # Safely extract sentiment data with None handling
-            current_sentiment = stock_data['sentiment'].get('current_market_sentiment')
+            # Safely extract the three content sources the PPT is built
+            # from now that market-sentiment is disabled:
+            #   1. fundamentals (analyzed_response)
+            #   2. future_senti (future outlook block)
+            #   3. finrobot_response (FinRobot deep-analysis memo)
             future_outlook = stock_data['sentiment'].get('future_outlook')
-            current_sentiment_status = stock_data['sentiment'].get('current_sentiment_status', 'neutral')
             future_sentiment_status = stock_data['sentiment'].get('future_sentiment_status', 'neutral')
-            
-            # Format sentiment data safely
-            if current_sentiment and current_sentiment != 'Not available':
-                market_sentiment_text = current_sentiment[:2000]
+
+            if future_outlook and future_outlook not in ("Not available", ""):
+                future_outlook_text = future_outlook[:3000]
             else:
-                market_sentiment_text = 'Sentiment data not available - stock needs to be analyzed in Analytics section'
-            
-            if future_outlook and future_outlook != 'Not available':
-                future_outlook_text = future_outlook[:2000]
+                future_outlook_text = (
+                    'Future outlook not available — re-run the main analysis on '
+                    'the Data Dashboard so the future_senti column is populated.'
+                )
+
+            finrobot_block = stock_data.get('finrobot', {}) or {}
+            finrobot_text_raw = (finrobot_block.get('response') or '').strip()
+            finrobot_rec = finrobot_block.get('recommendation') or 'Not yet available'
+            finrobot_score = finrobot_block.get('score')
+            finrobot_score_str = (
+                f"{float(finrobot_score):.1f}/100"
+                if finrobot_score is not None else "N/A"
+            )
+            if finrobot_text_raw:
+                # Keep plenty of room — this is the single richest narrative
+                # source and carries the reasoning chain + bull/bear case +
+                # catalysts the recommendation slide should anchor on.
+                finrobot_text = finrobot_text_raw[:5000]
             else:
-                future_outlook_text = 'Future outlook not available - stock needs to be analyzed in Analytics section'
-            
+                finrobot_text = (
+                    'FinRobot deep analysis not saved yet — click "🚀 Run Deep '
+                    'Analysis" on the Deep Analysis → FinRobot Agent tab.'
+                )
+
             # Create enhanced prompt for LLM (ENGLISH ONLY - we'll translate after)
             prompt = f"""You are a senior financial analyst creating a comprehensive, professional stock analysis presentation for investors.
 
@@ -210,17 +241,17 @@ Stock Data:
 Stock Name: {stock_data['stock_name']}
 Stock Symbol: {stock_data['stock_symbol']}
 Selection Status: {'SELECTED' if stock_data['selection'] else 'NOT SELECTED'}
-Current Sentiment: {current_sentiment_status}
 Future Outlook: {future_sentiment_status}
+FinRobot Recommendation: {finrobot_rec} (Score: {finrobot_score_str})
 
-Fundamental Analysis:
+Fundamental Analysis (analyzed_response):
 {stock_data['fundamentals'][:3000]}
 
-Market Sentiment:
-{market_sentiment_text}
-
-Future Outlook:
+Future Outlook (future_senti):
 {future_outlook_text}
+
+FinRobot Deep-Analysis Memo (finrobot_response):
+{finrobot_text}
 
 Technical Metrics:
 {json.dumps(stock_data['tech_analysis'], indent=2)}
@@ -242,17 +273,17 @@ CRITICAL REQUIREMENTS:
 
 1. Create 10-12 comprehensive slides:
    - Slide 1: Title slide (bullets) - Company name, symbol, date
-   - Slide 2: Executive Summary (paragraph) - 150-200 word overview of the company and investment thesis
-   - Slide 3: Company Overview (mixed) - 2-3 bullets + 100-word paragraph about business model
-   - Slide 4: Financial Performance (bullets) - 6-8 detailed financial metrics with actual numbers
-   - Slide 5: Financial Analysis (paragraph) - 150-200 word analysis of financial health and trends
+   - Slide 2: Executive Summary (paragraph) - 150-200 word overview of the company and investment thesis, leaning on the FinRobot memo's executive-summary + investment-thesis sections
+   - Slide 3: Company Overview (mixed) - 2-3 bullets + 100-word paragraph about business model (from analyzed_response)
+   - Slide 4: Financial Performance (bullets) - 6-8 detailed financial metrics with actual numbers (from analyzed_response + Technical Metrics JSON)
+   - Slide 5: Financial Analysis (paragraph) - 150-200 word analysis of financial health and trends, incorporating the FinRobot valuation/financial-health/growth commentary
    - Slide 6: Technical Analysis (bullets) - 5-7 key technical indicators with values
-   - Slide 7: Market Position & Competitive Landscape (mixed) - 3-4 bullets + 100-word paragraph
-   - Slide 8: Current Market Sentiment (bullets) - 5-6 sentiment indicators and insights
-   - Slide 9: Future Outlook & Growth Drivers (paragraph) - 150-200 word analysis of future prospects
-   - Slide 10: Investment Recommendation (mixed) - 3-4 key points + 100-word recommendation
-   - Slide 11: Risk Factors (bullets) - 6-8 specific risks with details
-   - Slide 12: Conclusion & Next Steps (paragraph) - 100-150 word summary and action items
+   - Slide 7: Market Position & Competitive Landscape (mixed) - 3-4 bullets + 100-word paragraph; pull peer-comparison + moat from the FinRobot memo when present
+   - Slide 8: Future Outlook & Growth Drivers (paragraph) - 150-200 word analysis of future prospects (from future_senti block)
+   - Slide 9: FinRobot Deep Analysis (mixed) - show recommendation + score, a 120-word extract of the chain-of-thought / investment thesis, and 3-4 bullet catalysts from the FinRobot memo
+   - Slide 10: Bull Case vs Bear Case (mixed) - 3-4 bullets for each side; if the FinRobot memo has bull_case/bear_case lists, USE them; otherwise synthesise from fundamentals + future_senti
+   - Slide 11: Risk Factors (bullets) - 6-8 specific risks with details (merge fundamentals key_risks + future_senti risk_factors + FinRobot bear_case)
+   - Slide 12: Investment Recommendation & Next Steps (paragraph) - 120-180 words concluding with the FinRobot recommendation, confidence, time horizon, and price-level guidance when available
 
 2. Content Guidelines:
    - For BULLET slides: 5-8 detailed points (not just 3-5)
@@ -285,21 +316,25 @@ CRITICAL REQUIREMENTS:
 
 Return ONLY the JSON structure, no additional text or markdown."""
 
-            # Call LLM with higher token limit for comprehensive content
+            # Call LLM with a big-enough token budget for 12 detailed
+            # slides. The old 4000-token cap was truncating the JSON
+            # response mid-way, which triggered JSONDecodeError and
+            # dropped callers into the 4-slide fallback — exactly the
+            # bug the client reported.
             response = self.client.chat.completions.create(
                 model="openai/gpt-oss-120b",
                 messages=[
-                    {"role": "system", "content": "You are a senior financial analyst expert at creating comprehensive, professional stock analysis presentations with rich content. Generate detailed slides with both bullet points and paragraph-style content. Return only valid JSON."},
+                    {"role": "system", "content": "You are a senior financial analyst expert at creating comprehensive, professional stock analysis presentations with rich content. Generate detailed slides with both bullet points and paragraph-style content. Return only valid JSON — never truncate mid-object."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.7,
-                max_tokens=4000,  # Increased for more comprehensive content
-                timeout=45.0
+                temperature=0.6,
+                max_tokens=12000,
+                timeout=90.0,
             )
-            
+
             # Extract and parse response
             llm_output = response.choices[0].message.content.strip()
-            
+
             # Remove markdown code blocks if present
             if llm_output.startswith("```json"):
                 llm_output = llm_output[7:]
@@ -307,13 +342,22 @@ Return ONLY the JSON structure, no additional text or markdown."""
                 llm_output = llm_output[3:]
             if llm_output.endswith("```"):
                 llm_output = llm_output[:-3]
-            
+
             llm_output = llm_output.strip()
-            
-            # Parse JSON
-            slide_structure = json.loads(llm_output)
-            
-            print(f"✅ Generated {len(slide_structure.get('slides', []))} comprehensive slides (English)")
+
+            # Parse JSON with a recovery pass for truncated responses.
+            slide_structure = self._parse_slide_json(llm_output)
+
+            _slide_count = len(slide_structure.get('slides', []))
+            print(f"✅ Generated {_slide_count} comprehensive slides (English)")
+            if _slide_count < 10:
+                # Enough slides were lost to the token cap or JSON recovery
+                # pass to be worth reporting — the final PPT will still
+                # render but may come in short of the 12-slide target.
+                print(
+                    f"⚠️ Only {_slide_count} slides generated; expected 10-12. "
+                    "Consider increasing max_tokens or trimming the prompt context."
+                )
             
             # NOW TRANSLATE TO HINDI
             print("🌐 Translating content to Hindi...")
@@ -441,90 +485,207 @@ Return ONLY the JSON structure, no additional text or markdown."""
             traceback.print_exc()
             return self._get_fallback_structure(stock_data)
     
+    def _parse_slide_json(self, raw: str) -> Dict[str, Any]:
+        """Parse an LLM JSON response into {slides: [...]}. Tolerates
+        common truncation failures from hitting the token cap mid-array
+        by recovering up to the last complete slide object.
+        """
+        # Fast path: fully-formed JSON.
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and "slides" in data:
+                return data
+            if isinstance(data, list):
+                return {"slides": data}
+        except json.JSONDecodeError:
+            pass
+
+        # Recovery path — find the `"slides": [` array and parse slide
+        # objects one at a time, stopping at the first object that fails
+        # to parse. This rescues responses that got truncated halfway
+        # through a later slide.
+        import re as _re
+
+        # Trim anything before the first `[` after "slides"
+        _match = _re.search(r'"slides"\s*:\s*\[', raw)
+        if not _match:
+            raise json.JSONDecodeError("no 'slides' array found in LLM output", raw, 0)
+
+        _cursor = _match.end()
+        slides: list[Dict[str, Any]] = []
+        while _cursor < len(raw):
+            # Skip whitespace and commas
+            while _cursor < len(raw) and raw[_cursor] in " \t\r\n,":
+                _cursor += 1
+            if _cursor >= len(raw) or raw[_cursor] == "]":
+                break
+            if raw[_cursor] != "{":
+                break
+
+            # Scan to the matching closing brace, respecting strings.
+            _depth = 0
+            _in_string = False
+            _escape = False
+            _start = _cursor
+            while _cursor < len(raw):
+                _ch = raw[_cursor]
+                if _escape:
+                    _escape = False
+                elif _ch == "\\":
+                    _escape = True
+                elif _ch == '"':
+                    _in_string = not _in_string
+                elif not _in_string:
+                    if _ch == "{":
+                        _depth += 1
+                    elif _ch == "}":
+                        _depth -= 1
+                        if _depth == 0:
+                            _cursor += 1
+                            break
+                _cursor += 1
+            else:
+                # Hit EOF before matching brace — truncated slide, drop it.
+                break
+
+            _obj_raw = raw[_start:_cursor]
+            try:
+                slides.append(json.loads(_obj_raw))
+            except json.JSONDecodeError:
+                # Single malformed slide — stop here, keep what we have.
+                break
+
+        if not slides:
+            raise json.JSONDecodeError("could not recover any complete slides", raw, 0)
+
+        print(
+            f"⚠️ LLM JSON was truncated; recovered {len(slides)} complete slides "
+            "via parser fallback."
+        )
+        return {"slides": slides}
+
     def _get_fallback_structure(self, stock_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Fallback slide structure if LLM fails - with bilingual support"""
-        # Safely get sentiment status
-        current_status = stock_data['sentiment'].get('current_sentiment_status', 'neutral')
-        future_status = stock_data['sentiment'].get('future_sentiment_status', 'neutral')
-        
+        """Fallback slide structure when the LLM call fails.
+
+        Produces 12 slides with a mix of bullets / paragraph / mixed
+        types, built from the actual DB data (analyzed_response,
+        future_senti, finrobot_response) so even the fallback path gives
+        the user the presentation shape they asked for instead of the
+        old 4-slide bullet-only stub.
+        """
+        name = stock_data.get('stock_name', 'Stock')
+        symbol = stock_data.get('stock_symbol', 'N/A')
+        selection = bool(stock_data.get('selection', False))
+        analyzed_at = str(stock_data.get('analyzed_at', 'N/A'))
+
+        fundamentals = (stock_data.get('fundamentals') or '').strip()
+        sentiment_block = stock_data.get('sentiment') or {}
+        future_outlook = (sentiment_block.get('future_outlook') or '').strip()
+        future_status = sentiment_block.get('future_sentiment_status') or 'neutral'
+
+        finrobot = stock_data.get('finrobot') or {}
+        fr_text = (finrobot.get('response') or '').strip()
+        fr_rec = finrobot.get('recommendation') or 'Under review'
+        fr_score = finrobot.get('score')
+        fr_score_str = f"{float(fr_score):.1f}/100" if fr_score is not None else "N/A"
+
+        tech = stock_data.get('tech_analysis') or {}
+
+        def _excerpt(text: str, limit: int = 900) -> str:
+            """Condense a potentially long text block into a single
+            paragraph-sized extract for a paragraph slide."""
+            if not text:
+                return "Data not yet available."
+            _single = " ".join(text.split())
+            return _single[:limit] + ("..." if len(_single) > limit else "")
+
+        def _first_bullets(text: str, n: int = 6, min_len: int = 20) -> list[str]:
+            """Pull the first `n` meaningful lines from a long text block
+            (e.g. analyzed_response) to seed a bullet slide. Skips
+            headers and short/empty lines."""
+            if not text:
+                return [f"Data not yet available for {name}."]
+            out: list[str] = []
+            for line in text.splitlines():
+                _l = line.strip().lstrip("-•*·#").strip()
+                if len(_l) < min_len:
+                    continue
+                # Skip lines that look like section headers only.
+                if _l.endswith(":") and len(_l) < 60:
+                    continue
+                out.append(_l[:180])
+                if len(out) >= n:
+                    break
+            if not out:
+                out = [f"Full analysis available in the {name} report."]
+            return out
+
+        tech_bullets = [f"{k}: {v}" for k, v in tech.items() if v not in (None, '', 'N/A')]
+        if not tech_bullets:
+            tech_bullets = ["Technical metrics not yet populated — re-run main analysis."]
+
+        def _s(type_: str, title: str, *, content: list[str] | None = None,
+               paragraph: str | None = None) -> Dict[str, Any]:
+            """Assemble a slide dict, mirroring `content`/`paragraph`
+            into the `*_eng` / `*_hindi` slots so the PPT renderer and
+            language switcher both work. Hindi falls back to English
+            text (translation happens only when the LLM path succeeds)."""
+            slide: Dict[str, Any] = {"title": title, "type": type_}
+            if content is not None:
+                slide["content"] = content
+                slide["content_eng"] = content
+                slide["content_hindi"] = content
+            if paragraph is not None:
+                slide["paragraph"] = paragraph
+                slide["paragraph_eng"] = paragraph
+                slide["paragraph_hindi"] = paragraph
+            return slide
+
         return {
             "slides": [
-                {
-                    "title": f"{stock_data['stock_name']} Stock Analysis",
-                    "type": "bullets",
-                    "content": [
-                        f"Symbol: {stock_data['stock_symbol']}",
-                        f"Analysis Date: {stock_data.get('analyzed_at', 'N/A')}",
-                        "Comprehensive Investment Analysis"
-                    ],
-                    "content_eng": [
-                        f"Symbol: {stock_data['stock_symbol']}",
-                        f"Analysis Date: {stock_data.get('analyzed_at', 'N/A')}",
-                        "Comprehensive Investment Analysis"
-                    ],
-                    "content_hindi": [
-                        f"Symbol: {stock_data['stock_symbol']}",
-                        f"विश्लेषण तिथि: {stock_data.get('analyzed_at', 'N/A')}",
-                        "व्यापक निवेश विश्लेषण"
-                    ]
-                },
-                {
-                    "title": "Company Overview",
-                    "type": "bullets",
-                    "content": [
-                        f"Company: {stock_data['stock_name']}",
-                        f"Ticker: {stock_data['stock_symbol']}",
-                        "Detailed fundamental analysis available"
-                    ],
-                    "content_eng": [
-                        f"Company: {stock_data['stock_name']}",
-                        f"Ticker: {stock_data['stock_symbol']}",
-                        "Detailed fundamental analysis available"
-                    ],
-                    "content_hindi": [
-                        f"कंपनी: {stock_data['stock_name']}",
-                        f"Ticker: {stock_data['stock_symbol']}",
-                        "विस्तृत मौलिक विश्लेषण उपलब्ध है"
-                    ]
-                },
-                {
-                    "title": "Market Sentiment",
-                    "type": "bullets",
-                    "content": [
-                        f"Current Sentiment: {current_status.upper() if current_status else 'NEUTRAL'}",
-                        f"Future Outlook: {future_status.upper() if future_status else 'NEUTRAL'}",
-                        "Based on comprehensive market analysis"
-                    ],
-                    "content_eng": [
-                        f"Current Sentiment: {current_status.upper() if current_status else 'NEUTRAL'}",
-                        f"Future Outlook: {future_status.upper() if future_status else 'NEUTRAL'}",
-                        "Based on comprehensive market analysis"
-                    ],
-                    "content_hindi": [
-                        f"वर्तमान भावना: {current_status.upper() if current_status else 'NEUTRAL'}",
-                        f"भविष्य का दृष्टिकोण: {future_status.upper() if future_status else 'NEUTRAL'}",
-                        "व्यापक बाजार विश्लेषण पर आधारित"
-                    ]
-                },
-                {
-                    "title": "Investment Recommendation",
-                    "type": "bullets",
-                    "content": [
-                        f"Selection Status: {'SELECTED' if stock_data['selection'] else 'NOT SELECTED'}",
-                        "Review detailed analysis for complete insights",
-                        "Consult with financial advisor before investing"
-                    ],
-                    "content_eng": [
-                        f"Selection Status: {'SELECTED' if stock_data['selection'] else 'NOT SELECTED'}",
-                        "Review detailed analysis for complete insights",
-                        "Consult with financial advisor before investing"
-                    ],
-                    "content_hindi": [
-                        f"चयन स्थिति: {'चयनित' if stock_data['selection'] else 'चयनित नहीं'}",
-                        "पूर्ण जानकारी के लिए विस्तृत विश्लेषण देखें",
-                        "निवेश से पहले वित्तीय सलाहकार से परामर्श करें"
-                    ]
-                }
+                _s("bullets", f"{name} — Stock Analysis", content=[
+                    f"Symbol: {symbol}",
+                    f"Analysis Date: {analyzed_at}",
+                    f"FinRobot Recommendation: {fr_rec} (Score: {fr_score_str})",
+                    f"Selection Status: {'SELECTED' if selection else 'NOT SELECTED'}",
+                    "Comprehensive Investment Analysis",
+                ]),
+                _s("paragraph", "Executive Summary",
+                   paragraph=_excerpt(fr_text or fundamentals, 1200)),
+                _s("mixed", "Company Overview",
+                   content=[
+                       f"Company: {name}",
+                       f"Ticker: {symbol}",
+                       f"Analysed on: {analyzed_at}",
+                   ],
+                   paragraph=_excerpt(fundamentals, 800)),
+                _s("bullets", "Financial Performance",
+                   content=_first_bullets(fundamentals, n=8)),
+                _s("paragraph", "Financial Analysis",
+                   paragraph=_excerpt(fundamentals, 1000)),
+                _s("bullets", "Technical Metrics", content=tech_bullets[:8]),
+                _s("mixed", "Market Position & Competitive Landscape",
+                   content=_first_bullets(fr_text or fundamentals, n=4),
+                   paragraph=_excerpt(fr_text or fundamentals, 700)),
+                _s("paragraph", "Future Outlook & Growth Drivers",
+                   paragraph=_excerpt(future_outlook, 1100)),
+                _s("mixed", "FinRobot Deep Analysis",
+                   content=[
+                       f"Recommendation: {fr_rec}",
+                       f"Score: {fr_score_str}",
+                       f"Future sentiment status: {future_status}",
+                   ],
+                   paragraph=_excerpt(fr_text, 1000)),
+                _s("bullets", "Bull Case vs Bear Case",
+                   content=_first_bullets(fr_text, n=6)),
+                _s("bullets", "Risk Factors",
+                   content=_first_bullets(fundamentals + "\n" + future_outlook, n=8)),
+                _s("paragraph", "Investment Recommendation & Next Steps",
+                   paragraph=_excerpt(
+                       f"Recommendation: {fr_rec} (Score: {fr_score_str}). "
+                       + (fr_text or fundamentals),
+                       1000,
+                   )),
             ]
         }
     

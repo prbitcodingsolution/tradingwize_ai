@@ -117,6 +117,31 @@ class SWOTAnalysis(BaseModel):
     threats: List[str] = Field(default_factory=list)
 
 
+class BankingMetrics(BaseModel):
+    """Banking-specific financial metrics.
+
+    Populated only for stocks classified as banks (via
+    `utils.sector_helpers.is_banking_sector`). For non-banks this is None on
+    CompanyData. All fields optional because screener.in exposes different
+    subsets depending on the bank.
+    """
+    # Profitability
+    net_interest_margin: Optional[float] = Field(None, description="NIM % — spread between interest earned and paid")
+    return_on_assets: Optional[float] = Field(None, description="ROA % — net profit / total assets")
+    return_on_equity: Optional[float] = Field(None, description="ROE % — net profit / shareholder equity")
+    cost_to_income: Optional[float] = Field(None, description="Operating costs / operating income %")
+
+    # Asset quality
+    gross_npa: Optional[float] = Field(None, description="Gross NPA % — non-performing loans / total loans")
+    net_npa: Optional[float] = Field(None, description="Net NPA % — gross NPA minus provisions")
+    provision_coverage: Optional[float] = Field(None, description="PCR % — provisions / gross NPAs")
+
+    # Funding & capital
+    casa_ratio: Optional[float] = Field(None, description="CASA % — current + savings deposits / total deposits")
+    capital_adequacy: Optional[float] = Field(None, description="CAR % — regulatory capital / risk-weighted assets")
+    credit_deposit: Optional[float] = Field(None, description="C/D % — advances / deposits")
+
+
 class CompanyData(BaseModel):
     """Comprehensive company data model"""
     symbol: str
@@ -130,6 +155,7 @@ class CompanyData(BaseModel):
     announcements: List[str] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.now)
     finrobot_report: Optional[Any] = Field(default=None, description="FinRobotReport from the three-agent pipeline")
+    banking_metrics: Optional[BankingMetrics] = Field(default=None, description="Banking-specific ratios (None for non-banks)")
 
 
 class CompanyReport(BaseModel):

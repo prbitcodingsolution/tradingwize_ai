@@ -16,6 +16,11 @@ import time
 import json
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart, SystemPromptPart
 from utils.option_chain_analyzer import get_option_chain_analysis as fetch_option_chain, _clean_symbol_for_nse
+from utils.sector_helpers import (
+    is_banking_sector,
+    is_financial_sector,
+    sector_inapplicability_note,
+)
 
 def fix_response_formatting(response: str) -> str:
     """
@@ -188,6 +193,68 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Load Boxicons (https://boxicons.com) for professional UI icons
+st.markdown("""
+<link href='https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css' rel='stylesheet'>
+<style>
+    /* Boxicon sizing + vertical alignment for use inside headings */
+    .bx-h { font-size: 1.1em; vertical-align: -2px; margin-right: 0.45rem; color: #74e504; }
+    h1 .bx, h2 .bx, h3 .bx, h4 .bx, h5 .bx { vertical-align: -2px; margin-right: 0.45rem; color: #74e504; }
+    .bx-accent { color: #74e504; }
+    .bx-danger { color: #e53935; }
+    .bx-warn { color: #f59e0b; }
+</style>
+""", unsafe_allow_html=True)
+
+
+def _company_logo_html(website: str | None, symbol: str, size: int = 36) -> str:
+    """Return an <img> of the company logo (Clearbit), with a Boxicon fallback.
+
+    Clearbit's Logo API (https://logo.clearbit.com/{domain}) is free for
+    public use and returns a square PNG. If the image fails to load (unknown
+    or blocked domain) the onerror handler hides it and reveals a sibling
+    Boxicon so the heading still looks reasonable.
+    """
+    import re as _re
+    _fallback = (
+        f"<i class='bx bx-bar-chart-alt-2' "
+        f"style='color:#74e504;font-size:{size}px;display:none;'></i>"
+    )
+    if not website:
+        return (
+            f"<i class='bx bx-bar-chart-alt-2' "
+            f"style='color:#74e504;font-size:{size}px;'></i>"
+        )
+    _m = _re.search(r'https?://(?:www\.)?([^/\s]+)', website.strip())
+    _domain = _m.group(1) if _m else website.strip().lstrip('www.')
+    _img = (
+        f"<img src='https://logo.clearbit.com/{_domain}' alt='{symbol}' "
+        f"style='width:{size}px;height:{size}px;border-radius:6px;"
+        f"background:#fff;padding:2px;object-fit:contain;' "
+        f"onerror=\"this.style.display='none';"
+        f"this.nextElementSibling.style.display='inline-block';\" />"
+    )
+    return f"{_img}{_fallback}"
+
+
+def bx_header(text: str, icon: str, level: int = 3, color: str = "#74e504") -> None:
+    """Render a Streamlit-styled heading prefixed with a Boxicon.
+
+    Args:
+        text:  heading text.
+        icon:  Boxicon class, e.g. "bx-bar-chart-alt-2" or "bxs-bank".
+        level: 1..5 -> <h1>..<h5> (matches st.header / st.subheader / ###).
+        color: icon color.
+    """
+    tag = f"h{max(1, min(5, level))}"
+    st.markdown(
+        f"<{tag} style='margin:0 0 0.5rem 0;'>"
+        f"<i class='bx {icon}' style='color:{color};margin-right:0.45rem;vertical-align:-2px;'></i>"
+        f"{text}</{tag}>",
+        unsafe_allow_html=True,
+    )
+
 
 # Advanced CSS with animations
 st.markdown("""
@@ -680,22 +747,8 @@ st.markdown("""
         box-shadow: 0 6px 20px rgba(116, 229, 4, 0.4);
     }
     
-    /* Hide AUTO_ADVANCE_HIDDEN button globally */
-    button[kind="primary"]:has-text("AUTO_ADVANCE_HIDDEN"),
-    button:has-text("AUTO_ADVANCE_HIDDEN"),
-    form:has(button:has-text("AUTO_ADVANCE_HIDDEN")),
-    div:has(> form > button:has-text("AUTO_ADVANCE_HIDDEN")) {
-        display: none !important;
-        visibility: hidden !important;
-        height: 0 !important;
-        width: 0 !important;
-        padding: 0 !important;
-        margin: 0 !important;
-        opacity: 0 !important;
-        position: absolute !important;
-        left: -9999px !important;
-        top: -9999px !important;
-    }
+    /* (AUTO_ADVANCE_HIDDEN button CSS removed — video autoplay panel
+       was taken out of the Presentation Viewer per client request.) */
 </style>
 """, unsafe_allow_html=True)
 
@@ -765,7 +818,7 @@ with st.sidebar:
     st.markdown("---")
     
     # Current Analysis
-    st.subheader("📊 Current Analysis")
+    bx_header("Current Analysis", "bx-bar-chart-alt-2")
     if st.session_state.current_stock:
         st.success(f"**{st.session_state.current_stock}**")
         
@@ -774,84 +827,98 @@ with st.sidebar:
         if st.button("📄 Generate Presentation", use_container_width=True, type="primary", key="generate_ppt_current"):
             # Get the stock symbol from deps (more reliable than current_stock name)
             stock_symbol = st.session_state.deps.stock_symbol if hasattr(st.session_state.deps, 'stock_symbol') and st.session_state.deps.stock_symbol else None
-            
+
             if stock_symbol:
-                # Check if sentiment analysis has been completed
+                # Gate check — the PPT now builds from three DB columns:
+                #   • analyzed_response   (fundamentals, always NOT NULL)
+                #   • future_senti        (future-outlook block — populated on every main analysis)
+                #   • finrobot_response   (FinRobot deep-analysis memo — populated when
+                #                          the user clicks "Run Deep Analysis")
+                # The legacy market_senti requirement was removed because the
+                # client disabled the Sentiment Analysis pipeline. We still
+                # verify the row exists so we fail fast with a clear message.
                 try:
                     from database_utility.database import StockDatabase
-                    
+
                     db = StockDatabase()
-                    sentiment_missing = False
-                    
+                    _analysis_row = None
                     if db.connect():
-                        # Get the latest analysis for this stock
-                        latest = db.get_latest_analysis(stock_symbol)
-                        
-                        if latest:
-                            # Check if sentiment data exists
-                            market_senti = latest.get('market_senti')
-                            future_senti = latest.get('future_senti')
-                            
-                            if not market_senti or not future_senti or market_senti.strip() == '' or future_senti.strip() == '':
-                                sentiment_missing = True
-                        else:
-                            sentiment_missing = True
-                        
+                        _analysis_row = db.get_latest_analysis(stock_symbol)
                         db.disconnect()
+
+                    if not _analysis_row or not _analysis_row.get('analyzed_response'):
+                        st.warning("⚠️ Main Analysis Required")
+                        st.error(
+                            "**No fundamental analysis found for this stock yet.**\n\n"
+                            "Run the main search on the Data Dashboard first so the "
+                            "`analyzed_response` and `future_senti` rows exist, then "
+                            "click **Generate Presentation** again."
+                        )
                     else:
-                        sentiment_missing = True
-                    
-                    # If sentiment analysis is missing, show warning
-                    if sentiment_missing:
-                        st.warning("⚠️ Sentiment Analysis Required")
-                        st.error("""
-                        📊 **Sentiment analysis data is missing!**
-                        
-                        To generate a complete presentation, you need to:
-                        1. Click on **"📈 Current Market Sentiment"** section above
-                        2. Wait for the sentiment analysis to complete
-                        3. Return here and click **"Generate Presentation"** again
-                        
-                        This ensures your presentation includes:
-                        - Current market sentiment from News, Yahoo Finance, Twitter, and Reddit
-                        - Future outlook and growth drivers
-                        - Complete market analysis
-                        """)
-                        st.info("💡 Tip: Sentiment analysis takes 30-60 seconds to complete. Please be patient!")
-                    else:
-                        # Sentiment data exists, proceed with BILINGUAL PPT generation
+                        # Heads-up hints (non-blocking) about the richer content
+                        # sources — the PPT still generates without them, just
+                        # with less depth in the relevant slides.
+                        _hint_msgs: list[str] = []
+                        if not (_analysis_row.get('future_senti') or "").strip():
+                            _hint_msgs.append(
+                                "Future outlook block is empty — the Future Outlook slide will be lighter. "
+                                "Run the main analysis again to populate it."
+                            )
+                        if not (_analysis_row.get('finrobot_response') or "").strip():
+                            _hint_msgs.append(
+                                "TradingWize deep analysis not saved yet — click **🚀 Run Deep Analysis** "
+                                "on the Deep Analysis → TradingWize Agent tab for a richer Recommendation slide."
+                            )
+                        for _m in _hint_msgs:
+                            st.info(_m)
+
                         with st.spinner(f"🚀 Generating bilingual PPT (English + Hindi) for {st.session_state.current_stock}..."):
                             try:
                                 from utils.ppt_generator import StockPPTGenerator
-                                
+                                # ── Phase-5 timing: PPT Generation ──
+                                from utils.timing import (
+                                    phase_timer as _phase_timer,
+                                    print_summary as _timing_summary,
+                                )
+
+                                _ppt_timing_sym = str(stock_symbol).strip().upper()
                                 generator = StockPPTGenerator()
-                                result = generator.generate_ppt(stock_symbol)
-                                
+                                with _phase_timer("PPT Generation", symbol=_ppt_timing_sym):
+                                    result = generator.generate_ppt(stock_symbol)
+
+                                # PPT is the final phase in the usual pipeline,
+                                # so emit the per-phase breakdown + grand total
+                                # for this symbol once generation finishes.
+                                try:
+                                    _timing_summary(symbol=_ppt_timing_sym)
+                                except Exception as _t_err:
+                                    print(f"⚠️ Timing summary failed: {_t_err}")
+
                                 if result:
                                     st.success(f"✅ Bilingual PPT generated successfully!")
-                                    
+
                                     # Store paths in session state (new bilingual structure)
                                     st.session_state.ppt_path_en = result['ppt_path_en']
                                     st.session_state.ppt_path_hi = result['ppt_path_hi']
                                     st.session_state.pdf_path_en = result.get('pdf_path_en')
                                     st.session_state.pdf_path_hi = result.get('pdf_path_hi')
-                                    
+
                                     # Backward compatibility - point to English version
                                     st.session_state.ppt_path = result['ppt_path_en']
                                     st.session_state.pdf_path = result.get('pdf_path_en')
-                                    
+
                                     if not result.get('pdf_path_en') and not result.get('pdf_path_hi'):
                                         st.warning("⚠️ PDF conversion not available on this system")
                                 else:
                                     st.error("❌ Failed to generate PPT. Please analyze the stock first to save data to database.")
-                                    
+
                             except Exception as e:
                                 st.error(f"❌ Error: {str(e)}")
                                 import traceback
                                 traceback.print_exc()
                                 
                 except Exception as e:
-                    st.error(f"❌ Error checking sentiment data: {str(e)}")
+                    st.error(f"❌ Error checking analysis data: {str(e)}")
                     import traceback
                     traceback.print_exc()
             else:
@@ -861,7 +928,7 @@ with st.sidebar:
         if hasattr(st.session_state, 'ppt_path_en') and st.session_state.ppt_path_en:
             # Language selector
             st.markdown("---")
-            st.subheader("🌐 Language")
+            bx_header("Language", "bx-globe")
             
             selected_language = st.radio(
                 "Select presentation language:",
@@ -905,7 +972,7 @@ with st.sidebar:
             # Open PPT button (shows PDF viewer)
             with col2:
                 # Check if viewer is currently active
-                current_view = st.session_state.get("view_selector", "🏦 Fundamental Analysis")
+                current_view = st.session_state.get("view_selector", "🔬 Deep Analysis")
                 is_viewer_active = current_view == "📖 Presentation Viewer"
                 
                 if is_viewer_active:
@@ -1065,12 +1132,13 @@ with st.sidebar:
         }
     </style>
     """, unsafe_allow_html=True)
-    st.subheader("🧭 Navigate")
+    bx_header("Navigate", "bx-compass")
 
     # Build view options with distinctive emojis
+    # Data Dashboard is the primary landing view — search is embedded on the dashboard.
     view_options = [
-        "🏦 Fundamental Analysis",
-        "📈 Data Dashboard"
+        "📈 Data Dashboard",
+        "🔬 Deep Analysis",
     ]
 
     # Add Presentation Viewer if PPT was generated
@@ -1096,7 +1164,7 @@ with st.sidebar:
     st.markdown("---")
 
     # Session Stats
-    st.subheader("📈 Session Statistics")
+    bx_header("Session Statistics", "bx-line-chart")
     col1, col2 = st.columns(2)
     col1.metric("Messages", len(st.session_state.messages))
     col2.metric("Exchanges", len(st.session_state.messages)//2)
@@ -1126,7 +1194,7 @@ with st.sidebar:
     st.markdown("---")
     
     # Quick Actions
-    st.subheader("⚡ Quick Actions")
+    bx_header("Quick Actions", "bx-bolt-circle")
     if st.button("🔄 New Analysis", use_container_width=True):
         st.session_state.deps = ConversationState()
         st.session_state.message_history = []  # reset; system prompt managed by agent internally
@@ -1135,25 +1203,10 @@ with st.sidebar:
         st.session_state.company_data = None
         st.rerun()
     
-    st.markdown("---")
-    
-    # Tools
-    st.subheader("🔧 AI Tools")
-    tools = [
-        ("🔍", "Stock Validation & Fetch", "Web-powered symbol search (Tavily) and web insights (yfinance + Tavily)"),
-        ("💬", "Q&A Handler", "Answers your questions"),
-        ("🔮", "Scenario Analysis", "What-if projections/questionner"),
-        ("📋", "Summary Report", "Investment insights")
-    ]
-    
-    for icon, name, desc in tools:
-        with st.expander(f"{icon} {name}"):
-            st.caption(desc)
-
 # Main content area - render based on sidebar selection
-view_option = st.session_state.get("view_selector", "🏦 Fundamental Analysis")
+view_option = st.session_state.get("view_selector", "📈 Data Dashboard")
 
-if view_option == "🏦 Fundamental Analysis":
+if view_option == "🔬 Deep Analysis":
     # ── Clean CSS: hide the border on st.container(height=...) so chat looks seamless ──
     st.markdown("""
     <style>
@@ -1166,10 +1219,20 @@ if view_option == "🏦 Fundamental Analysis":
     </style>
     """, unsafe_allow_html=True)
 
-    # Fundamental Analysis - tabs for Chat, Sentiment, and Trade Ideas
-    fund_tab1, fund_tab2, fund_tab3, fund_tab4, fund_tab5 = st.tabs(["💬 Chat", "📈 Sentiment Analysis", "📊 Trade Ideas", "🤖 FinRobot Agent", "📊 Option Chain"])
+    # Fundamental Analysis - tabs for Trade Ideas and FinRobot.
+    # The "💬 Chat", "📈 Sentiment Analysis", and "📊 Option Chain" tabs are
+    # preserved in-code behind disable flags so git history stays clean and
+    # they can be restored by flipping the corresponding flag.
+    fund_tab3, fund_tab4 = st.tabs(["📊 Trade Ideas", "🤖 TradingWize Agent"])
+    fund_tab1 = None  # placeholder so the disabled chat block still parses
+    fund_tab2 = None  # placeholder so the disabled sentiment block still parses
+    fund_tab5 = None  # placeholder so the disabled option chain block still parses
+    _CHAT_TAB_DISABLED = True
+    _SENTIMENT_TAB_DISABLED = True
+    _OPTION_CHAIN_TAB_DISABLED = True
 
-    with fund_tab1:
+    if not _CHAT_TAB_DISABLED:
+     with fund_tab1:
         # Initial state: show hero + welcome, no fixed-height container
         # After chat starts: use height=650 scrollable container
         has_messages = len(st.session_state.messages) > 0
@@ -1911,7 +1974,8 @@ The system couldn't display the analysis properly. Please try your request again
             st.rerun()
 
 
-    with fund_tab2:
+    if not _SENTIMENT_TAB_DISABLED:
+     with fund_tab2:
         # Analytics - Sentiment Analysis
         if st.session_state.company_data:
             data = st.session_state.company_data
@@ -1919,29 +1983,86 @@ The system couldn't display the analysis properly. Please try your request again
             stock_symbol = data.symbol
         
             # ===== FIRST: Current Market Sentiment Section =====
-            st.subheader("📈 Current Market Sentiment")
+            bx_header("Current Market Sentiment", "bx-line-chart")
             st.caption("Real-time sentiment from News, Yahoo Finance, Twitter/X, and Reddit")
         
-            # Check if sentiment analysis is already cached
-            if 'sentiment_data' not in st.session_state or st.session_state.get('sentiment_stock') != stock_symbol:
+            # Check if sentiment analysis is already cached.
+            # Sentiment is normally kicked off in the background from the
+            # Data Dashboard as soon as the stock loads, so by the time the
+            # user clicks into this tab the result is usually cached. If the
+            # background task is still running, show a live-refreshing
+            # progress banner. Only fall back to inline analysis if nothing
+            # was ever started (e.g. user opened Fundamental Analysis first
+            # without visiting the Dashboard).
+            from utils.background_tasks import bg_status
+            _sent_cached = (
+                "sentiment_data" in st.session_state
+                and st.session_state.get("sentiment_stock") == stock_symbol
+                and st.session_state.sentiment_data is not None
+            )
+            _sent_bg_status = bg_status("sentiment", stock_symbol)
+
+            if _sent_cached:
+                sentiment_data = st.session_state.sentiment_data
+            elif _sent_bg_status == "running":
+                # Background thread is still working. Poll every 3s until done.
+                from streamlit_autorefresh import st_autorefresh
+                st_autorefresh(interval=3000, key=f"_sent_poll_{stock_symbol}")
+                st.info(
+                    "🔄 **Market sentiment analysis is running in the background.**  \n"
+                    "It started automatically when you loaded the stock on the Data "
+                    "Dashboard. This page will refresh itself every 3 seconds until "
+                    "the result is ready (usually 30-90 seconds total)."
+                )
+                sentiment_data = None
+            elif _sent_bg_status == "error":
+                _err = st.session_state.get(f"_bg_sentiment_error_{stock_symbol}", "unknown error")
+                st.error(f"❌ Background sentiment analysis failed: {_err}")
+                if st.button("🔄 Retry sentiment analysis", key="retry_sentiment_from_error"):
+                    from utils.background_tasks import reset_bg_status_for_symbol
+                    reset_bg_status_for_symbol(stock_symbol)
+                    st.rerun()
+                sentiment_data = None
+            else:
+                # Legacy inline path: bg task was never started (e.g. user
+                # opened Fundamental Analysis directly without visiting the
+                # Dashboard first). Run inline like before — and persist the
+                # result to the stock_analysis.market_senti column so the DB
+                # row doesn't stay NULL. The background path already does
+                # this via persist_market_sentiment; we call the same helper
+                # here so both paths end up writing the same rows.
                 with st.spinner("🔍 Analyzing market sentiment from multiple sources (News, Yahoo Finance, Reddit, Twitter)..."):
                     from utils.sentiment_analyzer_adanos import analyze_stock_sentiment
-                
+                    from utils.background_tasks import persist_market_sentiment
                     try:
-                        # Extract base ticker for Adanos API (remove .NS, .BO, etc.)
                         ticker = stock_symbol.split('.')[0]
                         sentiment_data = analyze_stock_sentiment(stock_name, stock_symbol, ticker)
                         st.session_state.sentiment_data = sentiment_data
                         st.session_state.sentiment_stock = stock_symbol
+                        # Persist to DB (best-effort; failures are logged but
+                        # never block the UI).
+                        persist_market_sentiment(stock_symbol, stock_name, sentiment_data)
                     except Exception as e:
                         st.error(f"❌ Error analyzing sentiment: {e}")
                         sentiment_data = None
-            else:
-                sentiment_data = st.session_state.sentiment_data
         
             if sentiment_data:
+                # Backfill DB once per (session, symbol). This catches the
+                # case where sentiment was produced before this save-on-inline
+                # change shipped, or where the bg thread's DB write failed
+                # silently. persist_market_sentiment is idempotent — it will
+                # overwrite with the same value if called twice, no harm done.
+                _ms_flag = f"_market_senti_persisted_{stock_symbol}"
+                if not st.session_state.get(_ms_flag):
+                    try:
+                        from utils.background_tasks import persist_market_sentiment
+                        persist_market_sentiment(stock_symbol, stock_name, sentiment_data)
+                        st.session_state[_ms_flag] = True
+                    except Exception as _ms_e:
+                        print(f"⚠️ market_senti backfill failed for {stock_symbol}: {_ms_e}")
+
                 # Overall Sentiment Score
-                st.markdown("### 🎯 Overall Market Sentiment")
+                bx_header("Overall Market Sentiment", "bx-target-lock", level=3)
             
                 # Determine number of columns based on available data
                 has_twitter = 'twitter_sentiment' in sentiment_data
@@ -1979,39 +2100,71 @@ The system couldn't display the analysis properly. Please try your request again
                     </div>
                     """, unsafe_allow_html=True)
             
+                def _bx_metric_label(icon: str, text: str, color: str = "#74e504") -> None:
+                    """Render a Boxicon + text label above a collapsed-label st.metric."""
+                    st.markdown(
+                        f"<div style='font-size:0.85rem;color:#808495;font-weight:500;margin-bottom:-8px;'>"
+                        f"<i class='bx {icon}' style='color:{color};margin-right:5px;vertical-align:-2px;'></i>{text}"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                def _bx_details(title: str, icon: str, icon_color: str, inner_html: str) -> None:
+                    """Render a <details>/<summary> disclosure with a Boxicon in the header."""
+                    st.markdown(
+                        f"""
+                        <details style='background:#1a1a1a;border:1px solid #2a2a2a;
+                                        border-radius:6px;margin:6px 0 10px 0;'>
+                          <summary style='cursor:pointer;padding:10px 14px;font-weight:500;
+                                          font-size:14px;color:#e5e7eb;list-style:none;'>
+                            <i class='bx {icon}' style='color:{icon_color};margin-right:8px;
+                                                        vertical-align:-2px;font-size:1.05em;'></i>{title}
+                          </summary>
+                          <div style='padding:6px 14px 12px 14px;'>{inner_html}</div>
+                        </details>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
                 with col2:
                     news_score = sentiment_data['news_sentiment']['sentiment_score']
                     news_label = sentiment_data['news_sentiment']['sentiment_label']
-                    st.metric("📰 News Sentiment", f"{news_score}/100", news_label)
-            
+                    _bx_metric_label("bxs-news", "News Sentiment")
+                    st.metric("News Sentiment", f"{news_score}/100", news_label, label_visibility="collapsed")
+
                 with col3:
                     yahoo_score = sentiment_data['yahoo_sentiment']['sentiment_score']
                     yahoo_rating = sentiment_data['yahoo_sentiment']['analyst_rating']
-                    st.metric("📊 Yahoo Finance", f"{yahoo_score}/100", yahoo_rating)
-            
+                    _bx_metric_label("bx-line-chart", "Yahoo Finance", color="#7E1FFF")
+                    st.metric("Yahoo Finance", f"{yahoo_score}/100", yahoo_rating, label_visibility="collapsed")
+
                 # Twitter column (if available)
                 if has_twitter and has_reddit:
                     with col4:
                         twitter_score = sentiment_data['twitter_sentiment']['sentiment_score']
                         twitter_label = sentiment_data['twitter_sentiment']['sentiment_label']
-                        st.metric("🐦 Twitter/X", f"{twitter_score}/100", twitter_label)
+                        _bx_metric_label("bxl-twitter", "Twitter/X", color="#1DA1F2")
+                        st.metric("Twitter/X", f"{twitter_score}/100", twitter_label, label_visibility="collapsed")
                 elif has_twitter:
                     with col4:
                         twitter_score = sentiment_data['twitter_sentiment']['sentiment_score']
                         twitter_label = sentiment_data['twitter_sentiment']['sentiment_label']
-                        st.metric("🐦 Twitter/X", f"{twitter_score}/100", twitter_label)
-            
+                        _bx_metric_label("bxl-twitter", "Twitter/X", color="#1DA1F2")
+                        st.metric("Twitter/X", f"{twitter_score}/100", twitter_label, label_visibility="collapsed")
+
                 # Reddit column (if available)
                 if has_twitter and has_reddit:
                     with col5:
                         reddit_score = sentiment_data['reddit_sentiment']['sentiment_score']
                         reddit_label = sentiment_data['reddit_sentiment']['sentiment_label']
-                        st.metric("🔴 Reddit", f"{reddit_score}/100", reddit_label)
+                        _bx_metric_label("bxl-reddit", "Reddit", color="#FF4500")
+                        st.metric("Reddit", f"{reddit_score}/100", reddit_label, label_visibility="collapsed")
                 elif has_reddit:
                     with col4:
                         reddit_score = sentiment_data['reddit_sentiment']['sentiment_score']
                         reddit_label = sentiment_data['reddit_sentiment']['sentiment_label']
-                        st.metric("🔴 Reddit", f"{reddit_score}/100", reddit_label)
+                        _bx_metric_label("bxl-reddit", "Reddit", color="#FF4500")
+                        st.metric("Reddit", f"{reddit_score}/100", reddit_label, label_visibility="collapsed")
             
                 # Twitter/X and Reddit Sentiment - Side by side in two columns
                 st.markdown("---")
@@ -2022,7 +2175,7 @@ The system couldn't display the analysis properly. Please try your request again
                 # LEFT COLUMN: Twitter/X Sentiment
                 with social_col1:
                     if 'twitter_sentiment' in sentiment_data:
-                        st.markdown("### 🐦 Twitter/X Sentiment")
+                        bx_header("Twitter/X Sentiment", "bxl-twitter", level=3, color="#1DA1F2")
                     
                         twitter_data = sentiment_data['twitter_sentiment']
                     
@@ -2048,13 +2201,14 @@ The system couldn't display the analysis properly. Please try your request again
                     
                         # Show source information as caption below score
                         source = twitter_data.get('source', 'unknown')
+                        _cap_style = "color:#808495;font-size:0.875rem;margin:0.25rem 0;"
                         if source == 'rapidapi_twitter':
                             tweet_count = twitter_data.get('tweet_count', 0)
-                            st.caption(f"📊 Based on {tweet_count} recent tweets")
+                            st.markdown(f"<div style='{_cap_style}'><i class='bx bx-stats' style='vertical-align:-2px;margin-right:5px;'></i>Based on {tweet_count} recent tweets</div>", unsafe_allow_html=True)
                         elif source == 'news_based_twitter':
-                            st.caption(f"📰 Based on news articles")
+                            st.markdown(f"<div style='{_cap_style}'><i class='bx bxs-news' style='vertical-align:-2px;margin-right:5px;'></i>Based on news articles</div>", unsafe_allow_html=True)
                         else:
-                            st.caption("📊 Twitter sentiment data")
+                            st.markdown(f"<div style='{_cap_style}'><i class='bx bx-bar-chart-alt-2' style='vertical-align:-2px;margin-right:5px;'></i>Twitter sentiment data</div>", unsafe_allow_html=True)
                     
                         # Fixed spacing before sentiment breakdown
                         st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
@@ -2064,35 +2218,57 @@ The system couldn't display the analysis properly. Please try your request again
                     
                         with tw_col1:
                             positive_pct = twitter_data.get('positive_percentage', 0)
-                            st.metric("👍 Positive", f"{positive_pct}%")
-                    
+                            _bx_metric_label("bxs-like", "Positive", color="#16a34a")
+                            st.metric("Positive", f"{positive_pct}%", label_visibility="collapsed")
+
                         with tw_col2:
                             negative_pct = twitter_data.get('negative_percentage', 0)
-                            st.metric("👎 Negative", f"{negative_pct}%")
-                    
+                            _bx_metric_label("bxs-dislike", "Negative", color="#e53935")
+                            st.metric("Negative", f"{negative_pct}%", label_visibility="collapsed")
+
                         with tw_col3:
                             neutral_pct = twitter_data.get('neutral_percentage', 0)
-                            st.metric("😐 Neutral", f"{neutral_pct}%")
+                            _bx_metric_label("bxs-meh", "Neutral", color="#9ca3af")
+                            st.metric("Neutral", f"{neutral_pct}%", label_visibility="collapsed")
                     
                         # Show top engaging tweets if available
                         if twitter_data.get('top_tweets'):
                             st.markdown("<br>", unsafe_allow_html=True)
-                            with st.expander("🔥 Top Engaging Tweets"):
-                                for i, tweet in enumerate(twitter_data['top_tweets'][:5], 1):
-                                    sentiment_emoji = "✅" if tweet.get('sentiment_label') == 'Positive' else "⚠️" if tweet.get('sentiment_label') == 'Negative' else "➖"
-                                    tweet_text = tweet.get('text', 'N/A')
-                                    st.markdown(f"{sentiment_emoji} **Tweet {i}:** {tweet_text[:200]}...")
-                                    st.caption(f"❤️ {tweet.get('favorites', 0)} | 🔄 {tweet.get('retweets', 0)} | 💬 {tweet.get('replies', 0)}")
-                                    if i < 5:
-                                        st.markdown("---")
+                            import html as _html_tw
+                            _tweets = twitter_data['top_tweets'][:5]
+                            _tweet_blocks = []
+                            for i, tweet in enumerate(_tweets, 1):
+                                _tw_label = tweet.get('sentiment_label')
+                                if _tw_label == 'Positive':
+                                    _sicon = "<i class='bx bxs-check-circle' style='color:#16a34a;margin-right:6px;vertical-align:-2px;'></i>"
+                                elif _tw_label == 'Negative':
+                                    _sicon = "<i class='bx bxs-error' style='color:#e53935;margin-right:6px;vertical-align:-2px;'></i>"
+                                else:
+                                    _sicon = "<i class='bx bx-minus-circle' style='color:#9ca3af;margin-right:6px;vertical-align:-2px;'></i>"
+                                _safe_text = _html_tw.escape((tweet.get('text') or 'N/A')[:200]) + "..."
+                                _block = (
+                                    f"<div style='padding:6px 0;'>"
+                                    f"<div style='color:#e5e7eb;'>{_sicon}<strong>Tweet {i}:</strong> {_safe_text}</div>"
+                                    f"<div style='color:#9ca3af;font-size:12px;margin-top:4px;'>"
+                                    f"<i class='bx bxs-heart' style='color:#ef4444;margin-right:4px;vertical-align:-2px;'></i>{tweet.get('favorites', 0)}"
+                                    f"&nbsp;&nbsp;|&nbsp;&nbsp;"
+                                    f"<i class='bx bx-repost' style='color:#10b981;margin-right:4px;vertical-align:-2px;'></i>{tweet.get('retweets', 0)}"
+                                    f"&nbsp;&nbsp;|&nbsp;&nbsp;"
+                                    f"<i class='bx bxs-message-rounded' style='color:#6366f1;margin-right:4px;vertical-align:-2px;'></i>{tweet.get('replies', 0)}"
+                                    f"</div></div>"
+                                )
+                                if i < len(_tweets):
+                                    _block += "<hr style='border:0;border-top:1px solid #2a2a2a;margin:8px 0;'>"
+                                _tweet_blocks.append(_block)
+                            _bx_details("Top Engaging Tweets", "bx-fire", "#f97316", "".join(_tweet_blocks))
                     else:
-                        st.markdown("### 🐦 Twitter/X Sentiment")
+                        bx_header("Twitter/X Sentiment", "bxl-twitter", level=3, color="#1DA1F2")
                         st.info("No Twitter data available")
             
                 # RIGHT COLUMN: Reddit Sentiment
                 with social_col2:
                     if 'reddit_sentiment' in sentiment_data:
-                        st.markdown("### 🔴 Reddit Sentiment")
+                        bx_header("Reddit Sentiment", "bxl-reddit", level=3, color="#FF4500")
                     
                         reddit_data = sentiment_data['reddit_sentiment']
                     
@@ -2119,7 +2295,27 @@ The system couldn't display the analysis properly. Please try your request again
                         # Show source information as caption below score
                         total_posts = reddit_data.get('total_posts', 0)
                         total_items = reddit_data.get('total_items_analyzed', 0)
-                        st.caption(f"📊 Based on {total_posts} posts & {total_items} items")
+                        st.markdown(f"<div style='color:#808495;font-size:0.875rem;margin:0.25rem 0;'><i class='bx bx-stats' style='vertical-align:-2px;margin-right:5px;'></i>Based on {total_posts} posts & {total_items} items</div>", unsafe_allow_html=True)
+
+                        # If Reddit data is unavailable, surface the reason
+                        # directly under the score so users understand why
+                        # (e.g. RapidAPI monthly quota exhausted, transient
+                        # rate-limit, or credentials missing) instead of just
+                        # seeing a "50/100 Unavailable" pill with no context.
+                        if reddit_data.get('status') == 'unavailable':
+                            _reason = (
+                                reddit_data.get('unavailable_reason')
+                                or reddit_data.get('market_mood')
+                                or 'Reddit data temporarily unavailable'
+                            )
+                            if 'quota' in _reason.lower():
+                                st.warning(f"⚠️ **Reddit API quota exhausted.** {_reason}")
+                            elif 'rate limit' in _reason.lower():
+                                st.info(f"⏱️ {_reason}")
+                            elif 'credentials' in _reason.lower():
+                                st.error(f"🔑 {_reason}")
+                            else:
+                                st.info(f"ℹ️ {_reason}")
                     
                         # Fixed spacing before sentiment breakdown (same as Twitter)
                         st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
@@ -2129,48 +2325,88 @@ The system couldn't display the analysis properly. Please try your request again
                     
                         with rd_col1:
                             positive_pct = reddit_data.get('positive_percentage', 0)
-                            st.metric("👍 Positive", f"{positive_pct}%")
-                    
+                            _bx_metric_label("bxs-like", "Positive", color="#16a34a")
+                            st.metric("Positive", f"{positive_pct}%", label_visibility="collapsed")
+
                         with rd_col2:
                             negative_pct = reddit_data.get('negative_percentage', 0)
-                            st.metric("👎 Negative", f"{negative_pct}%")
-                    
+                            _bx_metric_label("bxs-dislike", "Negative", color="#e53935")
+                            st.metric("Negative", f"{negative_pct}%", label_visibility="collapsed")
+
                         with rd_col3:
                             neutral_pct = reddit_data.get('neutral_percentage', 0)
-                            st.metric("😐 Neutral", f"{neutral_pct}%")
+                            _bx_metric_label("bxs-meh", "Neutral", color="#9ca3af")
+                            st.metric("Neutral", f"{neutral_pct}%", label_visibility="collapsed")
                     
                         # Show subreddit distribution in expander (like top posts)
                         subreddit_dist = reddit_data.get('subreddit_distribution')
                         if subreddit_dist and isinstance(subreddit_dist, dict):
                             st.markdown("<br>", unsafe_allow_html=True)
-                            with st.expander("📊 Active Subreddits"):
-                                subreddit_list = list(subreddit_dist.items())
-                                # Display in rows of 2
-                                for i in range(0, len(subreddit_list), 2):
-                                    sub_cols = st.columns(2)
-                                    for j, (subreddit, count) in enumerate(subreddit_list[i:i+2]):
-                                        with sub_cols[j]:
-                                            st.metric(f"r/{subreddit}", f"{count} posts")
+                            _sub_cells = []
+                            for _sub, _cnt in subreddit_dist.items():
+                                _sub_cells.append(
+                                    f"<div style='background:#111827;border:1px solid #2a2a2a;"
+                                    f"border-radius:6px;padding:10px 12px;'>"
+                                    f"<div style='color:#9ca3af;font-size:12px;font-weight:500;'>"
+                                    f"<i class='bx bxl-reddit' style='color:#FF4500;margin-right:4px;vertical-align:-2px;'></i>"
+                                    f"r/{_sub}</div>"
+                                    f"<div style='color:#fff;font-size:18px;font-weight:700;margin-top:2px;'>"
+                                    f"{_cnt} posts</div></div>"
+                                )
+                            _grid = (
+                                "<div style='display:grid;grid-template-columns:1fr 1fr;"
+                                "gap:8px;'>" + "".join(_sub_cells) + "</div>"
+                            )
+                            _bx_details("Active Subreddits", "bx-list-ul", "#3b82f6", _grid)
                     
                         # Show top Reddit posts if available
                         if reddit_data.get('top_posts'):
-                            with st.expander("🔥 Top Reddit Posts"):
-                                for i, post in enumerate(reddit_data['top_posts'][:5], 1):
-                                    st.markdown(f"**{i}. {post['title']}**")
-                                    st.caption(f"r/{post['subreddit']} | ⬆️ {post['score']} | 💬 {post['num_comments']} comments")
-                                    # Only show link if URL is available
-                                    if post.get('url'):
-                                        st.markdown(f"[View on Reddit]({post['url']})")
-                                    if i < 5:
-                                        st.markdown("---")
+                            import html as _html_rd
+                            _posts = reddit_data['top_posts'][:5]
+                            _post_blocks = []
+                            for i, post in enumerate(_posts, 1):
+                                _safe_title = _html_rd.escape(post.get('title', ''))
+                                _url = post.get('url', '')
+                                _link_html = (
+                                    f"<a href='{_html_rd.escape(_url)}' target='_blank' "
+                                    f"style='color:#74e504;font-size:12px;text-decoration:none;'>"
+                                    f"<i class='bx bx-link-external' style='vertical-align:-2px;"
+                                    f"margin-right:3px;'></i>View on Reddit</a>"
+                                ) if _url else ""
+                                _block = (
+                                    f"<div style='padding:6px 0;'>"
+                                    f"<div style='color:#e5e7eb;font-weight:600;'>{i}. {_safe_title}</div>"
+                                    f"<div style='color:#9ca3af;font-size:12px;margin-top:4px;'>"
+                                    f"<i class='bx bxl-reddit' style='color:#FF4500;margin-right:4px;vertical-align:-2px;'></i>"
+                                    f"r/{_html_rd.escape(post.get('subreddit', ''))}"
+                                    f"&nbsp;&nbsp;|&nbsp;&nbsp;"
+                                    f"<i class='bx bxs-upvote' style='color:#ff7a45;margin-right:4px;vertical-align:-2px;'></i>{post.get('score', 0)}"
+                                    f"&nbsp;&nbsp;|&nbsp;&nbsp;"
+                                    f"<i class='bx bxs-message-rounded' style='color:#6366f1;margin-right:4px;vertical-align:-2px;'></i>{post.get('num_comments', 0)} comments"
+                                    f"{'&nbsp;&nbsp;|&nbsp;&nbsp;' + _link_html if _link_html else ''}"
+                                    f"</div></div>"
+                                )
+                                if i < len(_posts):
+                                    _block += "<hr style='border:0;border-top:1px solid #2a2a2a;margin:8px 0;'>"
+                                _post_blocks.append(_block)
+                            _bx_details("Top Reddit Posts", "bx-fire", "#f97316", "".join(_post_blocks))
                     
                         # Show Reddit insights in expander
                         if reddit_data.get('key_insights'):
-                            with st.expander("💡 Key Insights"):
-                                for insight in reddit_data['key_insights']:
-                                    st.markdown(f"• {insight}")
+                            import html as _html_ki
+                            _insight_items = "".join(
+                                f"<li style='color:#e5e7eb;margin:4px 0;'>"
+                                f"<i class='bx bxs-bulb' style='color:#eab308;margin-right:6px;vertical-align:-2px;'></i>"
+                                f"{_html_ki.escape(str(_ins))}</li>"
+                                for _ins in reddit_data['key_insights']
+                            )
+                            _insights_html = (
+                                f"<ul style='list-style:none;padding-left:0;margin:0;'>"
+                                f"{_insight_items}</ul>"
+                            )
+                            _bx_details("Key Insights", "bxs-bulb", "#eab308", _insights_html)
                     else:
-                        st.markdown("### 🔴 Reddit Sentiment")
+                        bx_header("Reddit Sentiment", "bxl-reddit", level=3, color="#FF4500")
                         st.info("No Reddit data available")
             
                 st.markdown("---")
@@ -2179,20 +2415,26 @@ The system couldn't display the analysis properly. Please try your request again
                 col1, col2 = st.columns(2)
             
                 with col1:
-                    st.markdown("### 📈 Positive Factors")
+                    bx_header("Positive Factors", "bx-trending-up", level=3, color="#16a34a")
                     positive_points = sentiment_data['news_sentiment'].get('positive_points', [])
                     if positive_points and positive_points != ['Insufficient data']:
                         for point in positive_points:
-                            st.markdown(f"✅ {point}")
+                            st.markdown(
+                                f"<div style='margin:4px 0;'><i class='bx bxs-check-circle' style='color:#16a34a;margin-right:8px;vertical-align:-2px;'></i>{point}</div>",
+                                unsafe_allow_html=True,
+                            )
                     else:
                         st.info("No significant positive factors identified")
-            
+
                 with col2:
-                    st.markdown("### 📉 Negative Factors")
+                    bx_header("Negative Factors", "bx-trending-down", level=3, color="#e53935")
                     negative_points = sentiment_data['news_sentiment'].get('negative_points', [])
                     if negative_points and negative_points != ['Insufficient data']:
                         for point in negative_points:
-                            st.markdown(f"⚠️ {point}")
+                            st.markdown(
+                                f"<div style='margin:4px 0;'><i class='bx bxs-error' style='color:#e53935;margin-right:8px;vertical-align:-2px;'></i>{point}</div>",
+                                unsafe_allow_html=True,
+                            )
                     else:
                         st.info("No significant negative factors identified")
             
@@ -2210,240 +2452,29 @@ The system couldn't display the analysis properly. Please try your request again
                         del st.session_state.sentiment_data
                     if 'sentiment_stock' in st.session_state:
                         del st.session_state.sentiment_stock
+                    # Also clear the bg task status so the next render
+                    # re-runs the analysis (either via bg or inline).
+                    from utils.background_tasks import reset_bg_status_for_symbol
+                    reset_bg_status_for_symbol(stock_symbol)
                     st.rerun()
         
-            else:
-                st.error("Unable to perform sentiment analysis. Please try again.")
-        
-            # ===== SECOND: Future Outlook & News Analysis Section =====
-            st.markdown("---")
-            st.subheader("🔮 Future Outlook & News Analysis")
-            st.caption("AI-powered analysis of future expectations from top financial sources")
+            # Note: the legacy "🔮 Future Outlook & News Analysis" section and
+            # its companion DB-update block used to live here. They were removed
+            # because the Future Outlook is now rendered on the Data Dashboard
+            # (below the Expert Opinion card), and duplicating it here caused
+            # a cascade of repeated Tavily+LLM calls every 3 seconds whenever
+            # the background-sentiment autorefresh fired. The false "Unable
+            # to perform sentiment analysis" error that showed up alongside
+            # the "running in background" banner was removed for the same
+            # reason — the bg-status branches above already surface loading
+            # and error states correctly, so a catch-all else here was
+            # redundant noise.
 
-            # Check if news analysis is already cached
-            if 'news_analysis' not in st.session_state or st.session_state.get('news_analysis_stock') != stock_symbol:
-                with st.spinner("🔍 Searching for latest news and analyst forecasts..."):
-                    from tools import StockTools
-                    import concurrent.futures
-
-                    try:
-                        # Run with a timeout so the UI doesn't hang forever
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(
-                                StockTools.get_stock_news_analysis,
-                                stock_name,
-                                5  # max_articles reduced from 10 to 5 for speed
-                            )
-                            news_result = future.result(timeout=90)  # 90s max
-
-                        st.session_state.news_analysis = news_result
-                        st.session_state.news_analysis_stock = stock_symbol
-                    except concurrent.futures.TimeoutError:
-                        st.warning("⏱️ News analysis timed out. Click Refresh to try again.")
-                        news_result = None
-                    except Exception as e:
-                        st.error(f"❌ Error fetching news analysis: {e}")
-                        news_result = None
-            else:
-                news_result = st.session_state.news_analysis
-        
-            if news_result and not news_result.get('error'):
-                # Display the full LLM analysis
-                st.markdown("### 📝 Detailed Analysis")
-                analysis_text = news_result.get('analysis', 'No analysis available')
-                st.markdown(analysis_text)
-            
-                st.markdown("---")
-            
-                # Display Tavily Summary
-                if news_result.get('tavily_summary'):
-                    st.markdown("### 🌐 Web Search Summary")
-                    st.info(news_result['tavily_summary'])
-                    st.markdown("---")
-            
-                # Display Source Articles
-                st.markdown("### 📚 Source Articles")
-                articles = news_result.get('articles', [])
-            
-                if articles:
-                    # Show article count by source
-                    source_counts = {}
-                    for article in articles:
-                        source = article.get('source', 'Unknown')
-                        source_counts[source] = source_counts.get(source, 0) + 1
-                
-                    st.markdown("**Sources:**")
-                    cols = st.columns(min(len(source_counts), 5))
-                    for idx, (source, count) in enumerate(source_counts.items()):
-                        with cols[idx % len(cols)]:
-                            st.metric(source, count)
-                
-                    st.markdown("---")
-                
-                    # Display articles
-                    for i, article in enumerate(articles, 1):
-                        with st.expander(f"📄 {i}. {article.get('title', 'Untitled')[:80]}..."):
-                            st.markdown(f"**Source:** {article.get('source', 'Unknown')}")
-                            st.markdown(f"**Snippet:** {article.get('snippet', 'No preview available')}")
-                            if article.get('url'):
-                                st.markdown(f"[🔗 Read full article]({article['url']})")
-            
-                # Refresh button for news analysis
-                st.markdown("---")
-                if st.button("🔄 Refresh News Analysis", key="refresh_news"):
-                    if 'news_analysis' in st.session_state:
-                        del st.session_state.news_analysis
-                    if 'news_analysis_stock' in st.session_state:
-                        del st.session_state.news_analysis_stock
-                    st.rerun()
-        
-            elif news_result and news_result.get('error'):
-                st.warning(f"⚠️ {news_result['error']}")
-        
-            # ===== Update Database with Sentiment Data =====
-            # After both sentiment analyses are complete, update the database
-            if sentiment_data and news_result and not news_result.get('error'):
-                try:
-                    from database_utility.database import StockDatabase
-                
-                    # ===== BUILD COMPLETE MARKET SENTIMENT TEXT =====
-                    market_senti_text = f"""📈 Current Market Sentiment Analysis for {stock_name}
-
-    🎯 Overall Market Sentiment
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    Overall Score: {sentiment_data['overall_score']}/100
-    Sentiment: {sentiment_data['overall_label']}
-    Based on: News, Yahoo Finance, Twitter/X
-
-    📊 Sentiment Breakdown
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    📰 News Sentiment: {sentiment_data['news_sentiment']['sentiment_score']}/100 ({sentiment_data['news_sentiment']['sentiment_label']})
-    📊 Yahoo Finance: {sentiment_data['yahoo_sentiment']['sentiment_score']}/100 ({sentiment_data['yahoo_sentiment']['analyst_rating']})
-    """
-                
-                    # Add Twitter sentiment if available
-                    if 'twitter_sentiment' in sentiment_data:
-                        twitter_data = sentiment_data['twitter_sentiment']
-                        market_senti_text += f"🐦 Twitter/X: {twitter_data['sentiment_score']}/100 ({twitter_data['sentiment_label']})\n"
-                        market_senti_text += f"   - Positive: {twitter_data.get('positive_percentage', 0)}%\n"
-                        market_senti_text += f"   - Negative: {twitter_data.get('negative_percentage', 0)}%\n"
-                        market_senti_text += f"   - Neutral: {twitter_data.get('neutral_percentage', 0)}%\n"
-                        if twitter_data.get('tweet_count'):
-                            market_senti_text += f"   - Based on {twitter_data['tweet_count']} tweets\n"
-                
-                    market_senti_text += "\n📈 Positive Factors\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                
-                    positive_points = sentiment_data['news_sentiment'].get('positive_points', [])
-                    if positive_points and positive_points != ['Insufficient data']:
-                        for point in positive_points:
-                            market_senti_text += f"✅ {point}\n"
-                    else:
-                        market_senti_text += "No significant positive factors identified\n"
-                
-                    market_senti_text += "\n📉 Negative Factors\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                
-                    negative_points = sentiment_data['news_sentiment'].get('negative_points', [])
-                    if negative_points and negative_points != ['Insufficient data']:
-                        for point in negative_points:
-                            market_senti_text += f"⚠️ {point}\n"
-                    else:
-                        market_senti_text += "No significant negative factors identified\n"
-                
-                    market_senti_text += "\n💭 Market Mood & Analysis\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    market_senti_text += sentiment_data['final_analysis']
-                
-                    # Determine market sentiment status
-                    market_senti_status = sentiment_data['overall_label'].lower()
-                
-                    # ===== BUILD COMPLETE FUTURE SENTIMENT TEXT =====
-                    future_senti_text = f"""🔮 Future Outlook & News Analysis for {stock_name}
-
-    {news_result.get('analysis', 'No analysis available')}
-    """
-                
-                    # Add Tavily summary if available
-                    if news_result.get('tavily_summary'):
-                        future_senti_text += f"\n\n🌐 Web Search Summary\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        future_senti_text += news_result['tavily_summary']
-                
-                    # Add source articles
-                    articles = news_result.get('articles', [])
-                    if articles:
-                        future_senti_text += f"\n\n📚 Source Articles ({len(articles)} articles)\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    
-                        # Group by source
-                        source_counts = {}
-                        for article in articles:
-                            source = article.get('source', 'Unknown')
-                            source_counts[source] = source_counts.get(source, 0) + 1
-                    
-                        future_senti_text += "Sources:\n"
-                        for source, count in source_counts.items():
-                            future_senti_text += f"  • {source}: {count} articles\n"
-                    
-                        future_senti_text += "\nTop Articles:\n"
-                        for i, article in enumerate(articles[:5], 1):
-                            future_senti_text += f"\n{i}. {article.get('title', 'Untitled')}\n"
-                            future_senti_text += f"   Source: {article.get('source', 'Unknown')}\n"
-                            future_senti_text += f"   {article.get('snippet', 'No preview available')}\n"
-                
-                    # Determine future sentiment status from analysis text
-                    future_senti_status = "neutral"
-                    if future_senti_text:
-                        text_lower = future_senti_text.lower()
-                        positive_keywords = ['positive', 'bullish', 'growth', 'strong', 'optimistic', 'upside', 'buy', 'outperform']
-                        negative_keywords = ['negative', 'bearish', 'decline', 'weak', 'pessimistic', 'downside', 'sell', 'underperform']
-                    
-                        positive_count = sum(1 for keyword in positive_keywords if keyword in text_lower)
-                        negative_count = sum(1 for keyword in negative_keywords if keyword in text_lower)
-                    
-                        if positive_count > negative_count:
-                            future_senti_status = "positive"
-                        elif negative_count > positive_count:
-                            future_senti_status = "negative"
-                
-                    # Update database
-                    db = StockDatabase()
-                    if db.connect():
-                        # Get the latest analysis for this stock
-                        latest = db.get_latest_analysis(stock_symbol)
-                    
-                        if latest:
-                            # Update the existing record with sentiment data
-                            update_query = """
-                            UPDATE stock_analysis
-                            SET market_senti = %s,
-                                current_market_senti_status = %s,
-                                future_senti = %s,
-                                future_senti_status = %s
-                            WHERE id = %s
-                            """
-                            db.cursor.execute(update_query, (
-                                market_senti_text,
-                                market_senti_status,
-                                future_senti_text,
-                                future_senti_status,
-                                latest['id']
-                            ))
-                            db.conn.commit()
-                            print(f"✅ Complete sentiment data updated in database for {stock_name}")
-                            print(f"   - Market sentiment: {len(market_senti_text)} characters")
-                            print(f"   - Future sentiment: {len(future_senti_text)} characters")
-                    
-                        db.disconnect()
-                except Exception as db_error:
-                    print(f"⚠️ Database sentiment update error: {db_error}")
-                    import traceback
-                    traceback.print_exc()
-                    # Continue even if database update fails
-    
             # ═══════════════════════════════════════════════════════
             # FII/DII INSTITUTIONAL SENTIMENT SECTION
             # ═══════════════════════════════════════════════════════
             st.divider()
-            st.subheader("🏦 FII & DII Institutional Sentiment")
+            bx_header("FII & DII Institutional Sentiment", "bxs-bank")
             st.caption("Track Foreign & Domestic Institutional buying/selling activity")
 
             fii_symbol = stock_symbol
@@ -2470,14 +2501,22 @@ The system couldn't display the analysis properly. Please try your request again
 
                 with st.spinner("Fetching FII/DII shareholding pattern..."):
                     try:
-                        from utils.fii_dii_analyzer import get_fii_dii_sentiment as compute_fii_dii
-                        fii_result = compute_fii_dii(
-                            symbol=fii_symbol,
-                            company_name=stock_name,
-                            cached_fii=float(cached_fii_val) if cached_fii_val is not None else None,
-                            cached_dii=float(cached_dii_val) if cached_dii_val is not None else None,
+                        from utils.fii_dii_analyzer import (
+                            get_fii_dii_sentiment as compute_fii_dii,
+                            persist_fii_dii_analysis,
                         )
-                        st.session_state[fii_cache_key] = fii_result
+                        # ── Phase-2 timing: FII/DII Analysis ──
+                        from utils.timing import phase_timer as _phase_timer
+                        with _phase_timer("FII/DII Analysis", symbol=str(fii_symbol).strip().upper()):
+                            fii_result = compute_fii_dii(
+                                symbol=fii_symbol,
+                                company_name=stock_name,
+                                cached_fii=float(cached_fii_val) if cached_fii_val is not None else None,
+                                cached_dii=float(cached_dii_val) if cached_dii_val is not None else None,
+                            )
+                            st.session_state[fii_cache_key] = fii_result
+                            # Persist to DB so FinRobot can read it back as context
+                            persist_fii_dii_analysis(fii_symbol, fii_result)
                     except Exception as e:
                         st.error(f"FII/DII analysis failed: {e}")
 
@@ -2732,24 +2771,56 @@ Rising DII % means domestic institutions are accumulating.
             exchange = "NSE" if ".NS" in stock_symbol else "BSE"
             tradingview_url = f"https://www.tradingview.com/symbols/{exchange}-{clean_symbol}/ideas/"
 
-            st.subheader(f"📊 Trade Ideas for {data.name}")
-            st.caption(f"Top trading ideas for {clean_symbol}")
+            bx_header(f"Trade Ideas for {data.name}", "bx-bulb")
+            st.caption(f"Top trading ideas from TradingView for {clean_symbol}")
 
-            # Check if trade ideas are cached in session
+            # Check if trade ideas are cached in session.
+            # Trade ideas are kicked off in the background from the Data
+            # Dashboard — same pattern as sentiment. If the bg task is still
+            # running, show a live-refreshing progress banner; if cached,
+            # use it immediately; otherwise fall back to inline scraping.
             cache_key = f"trade_ideas_{clean_symbol}"
-            if cache_key not in st.session_state or st.session_state.get('trade_ideas_stock') != stock_symbol:
+            from utils.background_tasks import bg_status as _bg_status_ti
+            _ti_cached = (
+                cache_key in st.session_state
+                and st.session_state.get("trade_ideas_stock") == stock_symbol
+                and st.session_state[cache_key] is not None
+            )
+            _ti_bg_status = _bg_status_ti("trade_ideas", stock_symbol)
+
+            if _ti_cached:
+                ideas_result = st.session_state[cache_key]
+            elif _ti_bg_status == "running": 
+                from streamlit_autorefresh import st_autorefresh
+                st_autorefresh(interval=3000, key=f"_ti_poll_{stock_symbol}")
+                st.info(
+                    "🔄 **Trade ideas are being fetched in the background.**  \n"
+                    "Started automatically when you loaded the stock on the Data "
+                    "Dashboard. This page refreshes every 3 seconds until ready."
+                )
+                ideas_result = None
+            elif _ti_bg_status == "error":
+                _err = st.session_state.get(f"_bg_trade_ideas_error_{stock_symbol}", "unknown error")
+                st.error(f"❌ Background trade-ideas fetch failed: {_err}")
+                if st.button("🔄 Retry trade ideas", key="retry_trade_ideas_from_error"):
+                    from utils.background_tasks import reset_bg_status_for_symbol
+                    reset_bg_status_for_symbol(stock_symbol)
+                    st.rerun()
+                ideas_result = None
+            else:
+                # Legacy inline path: no bg task was started.
                 with st.spinner("🔍 Fetching trade ideas from TradingView..."):
                     try:
                         from utils.tradingview_ideas_scraper import scrape_trade_ideas
-                        ideas_result = scrape_trade_ideas(clean_symbol, exchange, 9)
-
+                        # ── Phase-3 timing: Trade Ideas (TradingView) ──
+                        from utils.timing import phase_timer as _phase_timer
+                        with _phase_timer("Trade Ideas (TradingView)", symbol=str(stock_symbol).strip().upper()):
+                            ideas_result = scrape_trade_ideas(clean_symbol, exchange, 9)
                         st.session_state[cache_key] = ideas_result
                         st.session_state.trade_ideas_stock = stock_symbol
                     except Exception as e:
                         st.error(f"❌ Error fetching trade ideas: {e}")
                         ideas_result = None
-            else:
-                ideas_result = st.session_state[cache_key]
 
             if ideas_result and ideas_result.get('ideas'):
                 ideas = ideas_result['ideas']
@@ -2840,6 +2911,9 @@ Rising DII % means domestic institutions are accumulating.
                             del st.session_state[cache_key]
                         if 'trade_ideas_stock' in st.session_state:
                             del st.session_state.trade_ideas_stock
+                        # Reset bg task status so the fallback inline path runs.
+                        from utils.background_tasks import reset_bg_status_for_symbol
+                        reset_bg_status_for_symbol(stock_symbol)
                         try:
                             from utils.tradingview_ideas_scraper import clear_cache
                             clear_cache(clean_symbol, exchange)
@@ -2865,13 +2939,16 @@ Rising DII % means domestic institutions are accumulating.
             st.info("📊 Analyze a stock to see trade ideas from TradingView")
 
     with fund_tab4:
-        # FinRobot Agent — separate chat for the three-agent deep analysis pipeline
-        st.markdown("### FinRobot Deep Analysis Agent")
-        st.caption("Three-agent pipeline: Fundamental Agent + Sentiment Agent + Reasoning Agent")
+        # TradingWize Agent — separate chat for the deep analysis pipeline
+        st.markdown("### TradingWize Deep Analysis Agent")
 
         # Initialize FinRobot chat state
         if 'finrobot_messages' not in st.session_state:
             st.session_state.finrobot_messages = []
+        # View mode for FinRobot report rendering — "expert" (default, the
+        # existing in-depth format) or "plain" (beginner-friendly version).
+        if 'finrobot_view_mode' not in st.session_state:
+            st.session_state.finrobot_view_mode = "expert"
 
         # Check if a stock is loaded
         _fr_company_data = st.session_state.get('deps')
@@ -2882,7 +2959,49 @@ Rising DII % means domestic institutions are accumulating.
         if _fr_stock_name:
             st.markdown(f"**Currently loaded:** {_fr_stock_name} (`{_fr_stock_symbol}`)")
         else:
-            st.info("Analyze a stock first in the **Chat** tab, then come back here to run FinRobot deep analysis.")
+            st.info("Analyze a stock first in the **Chat** tab, then come back here to run TradingWize deep analysis.")
+
+        # ── View Toggle (Expert ⇄ Plain English) ──
+        # Show it whenever the chat history contains at least one
+        # assistant message that carries a plain-english variant. If no
+        # analysis has been run yet, the toggle is hidden so we don't
+        # confuse the user before any report exists.
+        _fr_has_plain = any(
+            isinstance(m, dict) and m.get("role") == "assistant" and m.get("content_plain")
+            for m in st.session_state.finrobot_messages
+        )
+        if _fr_has_plain:
+            _vt_col1, _vt_col2 = st.columns([1, 1])
+            with _vt_col1:
+                if st.button(
+                    "🔬 Expert View"
+                    + (" ✓" if st.session_state.finrobot_view_mode == "expert" else ""),
+                    key="finrobot_view_expert",
+                    type=("primary" if st.session_state.finrobot_view_mode == "expert" else "secondary"),
+                    use_container_width=True,
+                    help="Full numeric memo — ratios, peer multiples, fiscal-tagged financials, and institutional-grade citations. For analysts and investors comfortable with financial terminology.",
+                ):
+                    st.session_state.finrobot_view_mode = "expert"
+                    st.rerun()
+            with _vt_col2:
+                if st.button(
+                    "🧑‍🏫 Plain English"
+                    + (" ✓" if st.session_state.finrobot_view_mode == "plain" else ""),
+                    key="finrobot_view_plain",
+                    type=("primary" if st.session_state.finrobot_view_mode == "plain" else "secondary"),
+                    use_container_width=True,
+                    help="Beginner-friendly version — everyday analogies, letter grades, and plain-language takeaways. For users new to investing or who prefer a narrative summary.",
+                ):
+                    st.session_state.finrobot_view_mode = "plain"
+                    st.rerun()
+            # Purpose description directly beneath the buttons — one line
+            # per mode so users can map each button to what it produces
+            # without hunting through a single concatenated caption.
+            st.markdown(
+                "🔬 **Expert View** — full numeric memo: ratios, scores, peer multiples, and institutional-grade citations.  \n"
+                "🧑‍🏫 **Plain English** — beginner-friendly analogies, letter grades (A/B/C), and plain-language takeaways.",
+                help="Click a button above to switch between the two views. Your choice is remembered for this session.",
+            )
 
         # Display existing FinRobot report summary if available
         _fr_report = st.session_state.get(f"finrobot_report_{_fr_stock_symbol}")
@@ -2896,36 +3015,79 @@ Rising DII % means domestic institutions are accumulating.
             _rec_color = {"Strong Buy": "#10b981", "Buy": "#34d399", "Hold": "#fbbf24",
                           "Sell": "#f87171", "Strong Sell": "#ef4444"}.get(_r.recommendation, "#94a3b8")
             st.markdown(f"""
-            <div style="display:flex; align-items:center; gap:1rem; margin-bottom:1rem;">
+            <div style="display:flex; align-items:center; gap:1rem; margin-bottom:0.25rem;">
                 <div style="display:inline-block; background:{_rec_color}22; border:2px solid {_rec_color};
                             border-radius:0.5rem; padding:0.4rem 1rem; font-size:1.1rem;
                             font-weight:700; color:{_rec_color};">
                     {_r.recommendation}
                 </div>
                 <span style="color:#666;">Confidence: <b>{_r.confidence}</b> &nbsp;|&nbsp;
-                Score: <b>{_r.final_score:.1f}/100</b> &nbsp;|&nbsp;
+                Recommendation Score: <b>{_r.final_score:.1f}/100</b> &nbsp;|&nbsp;
                 Horizon: <b>{_r.time_horizon}</b></span>
             </div>
             """, unsafe_allow_html=True)
 
-            # Show scores
-            if _fr_report.fundamental:
-                _f = _fr_report.fundamental
-                _sc1, _sc2, _sc3, _sc4 = st.columns(4)
-                _sc1.metric("Overall", f"{_f.overall_fundamental_score:.1f}")
-                _sc2.metric("Valuation", f"{_f.valuation_score:.1f}")
-                _sc3.metric("Health", f"{_f.financial_health_score:.1f}")
-                _sc4.metric("Growth", f"{_f.growth_score:.1f}")
+            # Show the sub-scores that feed the recommendation. Four
+            # fundamental tiles plus one sentiment tile so users can see
+            # exactly what got blended into the Recommendation Score.
+            _f = _fr_report.fundamental
+            _s = _fr_report.sentiment
+            _sc1, _sc2, _sc3, _sc4, _sc5 = st.columns(5)
+            _sc1.metric(
+                "Fundamentals — Overall",
+                f"{_f.overall_fundamental_score:.1f}" if _f else "—",
+                help="Composite fundamental health score (valuation + balance-sheet + growth).",
+            )
+            _sc2.metric(
+                "Valuation",
+                f"{_f.valuation_score:.1f}" if _f else "—",
+                help="P/E, P/B, EV/EBITDA vs sector norms.",
+            )
+            _sc3.metric(
+                "Financial Health",
+                f"{_f.financial_health_score:.1f}" if _f else "—",
+                help="Debt/equity, cash reserves, profitability margins.",
+            )
+            _sc4.metric(
+                "Growth",
+                f"{_f.growth_score:.1f}" if _f else "—",
+                help="Revenue and earnings growth trajectory.",
+            )
+            _sc5.metric(
+                "Future Outlook (input)",
+                f"{_s.sentiment_score:.1f}" if _s else "—",
+                help="Future-outlook score (derived from the future_senti DB column) fed into the Recommendation Score.",
+            )
 
             st.markdown("---")
 
-        # Chat messages display
+        # Chat messages display — the assistant may carry both an "expert"
+        # and a "plain" version of the report; pick the one matching the
+        # active view mode, falling back to the expert text if the plain
+        # variant wasn't produced (e.g. older cached messages).
+        _fr_view = st.session_state.finrobot_view_mode
+        _fr_use_html = (_fr_view == "plain")  # plain view embeds HTML callouts
         for msg in st.session_state.finrobot_messages:
             with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+                if msg.get("role") == "assistant" and _fr_view == "plain" and msg.get("content_plain"):
+                    st.markdown(msg["content_plain"], unsafe_allow_html=True)
+                else:
+                    st.markdown(msg.get("content", ""), unsafe_allow_html=_fr_use_html)
 
-        # Chat input
-        fr_user_input = st.chat_input("Ask FinRobot to analyze (e.g. 'Run deep analysis', 'What's the recommendation?')", key="finrobot_chat_input")
+        # Run Deep Analysis button (replaces the chat input)
+        _fr_run_disabled = not bool(_fr_stock_name)
+        _fr_run_clicked = st.button(
+            "🚀 Run Deep Analysis",
+            key="finrobot_run_deep_analysis",
+            type="primary",
+            use_container_width=True,
+            disabled=_fr_run_disabled,
+            help="Run the TradingWize deep-analysis pipeline on the currently loaded stock"
+                 if not _fr_run_disabled
+                 else "Load a stock on the Data Dashboard first",
+        )
+
+        fr_user_input = "Run deep analysis" if _fr_run_clicked else None
 
         if fr_user_input:
             # Add user message
@@ -2935,7 +3097,7 @@ Rising DII % means domestic institutions are accumulating.
 
             # Process with FinRobot
             with st.chat_message("assistant"):
-                with st.spinner("FinRobot pipeline running..."):
+                with st.spinner("TradingWize pipeline running..."):
                     try:
                         import asyncio
                         from finrobot.chat_agent import run_finrobot_chat
@@ -2952,6 +3114,7 @@ Rising DII % means domestic institutions are accumulating.
                             message_history=_fr_history,
                         ))
                         fr_response = result["response"]
+                        fr_response_plain = result.get("response_plain", "") or ""
                         fr_report = result.get("report")
 
                         # Cache report
@@ -2960,17 +3123,62 @@ Rising DII % means domestic institutions are accumulating.
                             if _fr_company_data:
                                 _fr_company_data.finrobot_report = fr_report
 
+                        # Persist the deep-analysis output to the latest
+                        # stock_analysis row so the report + its headline
+                        # recommendation + final score are available to
+                        # downstream consumers (PPT generator, bulk
+                        # selector, any future dashboards). Best-effort —
+                        # DB errors are logged but don't block the UI.
+                        if fr_report and _fr_stock_symbol:
+                            try:
+                                from database_utility.database import StockDatabase as _FR_DB
+                                _fr_db = _FR_DB()
+                                if _fr_db.connect():
+                                    _fr_db.create_table()
+                                    _fr_rec = (
+                                        fr_report.reasoning.recommendation
+                                        if fr_report.reasoning else None
+                                    )
+                                    _fr_score = (
+                                        float(fr_report.reasoning.final_score)
+                                        if fr_report.reasoning else None
+                                    )
+                                    _fr_db.update_finrobot_columns(
+                                        stock_symbol=_fr_stock_symbol,
+                                        finrobot_response=fr_response,
+                                        finrobot_recommendation=_fr_rec,
+                                        finrobot_score=_fr_score,
+                                    )
+                                    _fr_db.disconnect()
+                            except Exception as _fr_db_err:
+                                print(f"⚠️ FinRobot DB persist failed for {_fr_stock_symbol}: {_fr_db_err}")
+
                     except Exception as e:
-                        fr_response = f"FinRobot pipeline error: {e}"
+                        fr_response = f"TradingWize pipeline error: {e}"
+                        fr_response_plain = ""
 
-                    st.markdown(fr_response)
+                    # Pick the view that matches the user's current toggle.
+                    # Expert = default; Plain English uses HTML callouts so
+                    # unsafe_allow_html must be on.
+                    _fr_live_view = st.session_state.get("finrobot_view_mode", "expert")
+                    if _fr_live_view == "plain" and fr_response_plain:
+                        st.markdown(fr_response_plain, unsafe_allow_html=True)
+                    else:
+                        st.markdown(fr_response)
 
-            st.session_state.finrobot_messages.append({"role": "assistant", "content": fr_response})
+            # Persist BOTH variants on the message so the toggle can flip
+            # between them on subsequent reruns without re-running the LLM.
+            st.session_state.finrobot_messages.append({
+                "role": "assistant",
+                "content": fr_response,
+                "content_plain": fr_response_plain,
+            })
             st.rerun()
 
-    with fund_tab5:
+    if not _OPTION_CHAIN_TAB_DISABLED:
+     with fund_tab5:
         # ── OPTION CHAIN TAB ──
-        st.header("📊 NSE Option Chain — OI Analysis")
+        bx_header("NSE Option Chain — OI Analysis", "bx-candles", level=2)
         st.caption("Live Open Interest data from NSE India · Supports stocks & indices (F&O eligible only)")
 
         # ── INPUT SECTION ──
@@ -3260,7 +3468,7 @@ Rising DII % means domestic institutions are accumulating.
 
                 _oc_sc1, _oc_sc2 = st.columns(2)
                 with _oc_sc1:
-                    st.markdown("#### 📈 Call OI Signal")
+                    bx_header("Call OI Signal", "bx-trending-up", level=4, color="#16a34a")
                     _oc_dir = a.call_oi_shift.direction
                     _oc_dir_color = {"UP": "green", "DOWN": "red", "SIDEWAYS": "gray"}.get(_oc_dir, "gray")
                     st.markdown(
@@ -3273,7 +3481,7 @@ Rising DII % means domestic institutions are accumulating.
                     st.write(a.call_oi_shift.description)
 
                 with _oc_sc2:
-                    st.markdown("#### 📉 Put OI Signal")
+                    bx_header("Put OI Signal", "bx-trending-down", level=4, color="#e53935")
                     _oc_dir2 = a.put_oi_shift.direction
                     _oc_dir_color2 = {"UP": "green", "DOWN": "red", "SIDEWAYS": "gray"}.get(_oc_dir2, "gray")
                     st.markdown(
@@ -3287,7 +3495,7 @@ Rising DII % means domestic institutions are accumulating.
 
                 st.divider()
 
-                st.markdown("#### 📋 Complete Signal Breakdown")
+                bx_header("Complete Signal Breakdown", "bx-list-check", level=4)
                 for _oc_point in a.verdict_points:
                     _pt = _oc_point.strip()
                     if not _pt:
@@ -3344,6 +3552,31 @@ Market tends to gravitate toward Max Pain as expiry approaches.
 elif view_option == "📖 Presentation Viewer":
     # Presentation Viewer - Dedicated page for viewing generated presentations
     st.markdown("### 📖 Presentation Viewer")
+
+    # Scoped CSS — shrink the oversized Streamlit nav buttons (Previous,
+    # Next, Restart from Slide 1) on this page only. The global button
+    # styles still apply elsewhere; this block just overrides the
+    # height / padding / font-size inside the Presentation Viewer so
+    # the nav bar fits on one line at 100% zoom.
+    st.markdown("""
+    <style>
+        /* Compact primary/nav buttons — this view only */
+        .stButton > button,
+        .stDownloadButton > button {
+            min-height: 2.25rem !important;
+            height: 2.25rem !important;
+            padding: 0.25rem 1rem !important;
+            font-size: 0.85rem !important;
+            font-weight: 600 !important;
+        }
+        .stButton > button p,
+        .stDownloadButton > button p {
+            font-size: 0.85rem !important;
+            line-height: 1.1 !important;
+            margin: 0 !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
     
     # Check if PPT was generated (check new bilingual structure first, then fall back to old)
     has_ppt = (hasattr(st.session_state, 'ppt_path_en') and st.session_state.ppt_path_en) or \
@@ -3354,7 +3587,7 @@ elif view_option == "📖 Presentation Viewer":
         st.info("💡 Generate a presentation first by analyzing a stock and clicking 'Generate Presentation' in the sidebar")
         
         if st.button("🔙 Back to Chat", use_container_width=True):
-            st.session_state.view_selector = "🏦 Fundamental Analysis"
+            st.session_state.view_selector = "🔬 Deep Analysis"
             st.rerun()
     else:
         # Language selector at the top (if bilingual PPTs are available)
@@ -3389,23 +3622,7 @@ elif view_option == "📖 Presentation Viewer":
             st.session_state.current_slide = 1
         if "total_slides" not in st.session_state:
             st.session_state.total_slides = 12  # Default, will be updated from JSON
-        if "auto_play" not in st.session_state:
-            st.session_state.auto_play = True  # Default to True for automatic experience
-        
-        # Check for query parameter to advance slide (triggered by video end)
-        query_params = st.query_params
-        if "advance_slide" in query_params:
-            try:
-                target_slide = int(query_params["advance_slide"])
-                if 1 <= target_slide <= st.session_state.total_slides:
-                    st.session_state.current_slide = target_slide
-                    print(f"🎬 Auto-advanced to slide {target_slide}")
-                # Clear the query parameter
-                st.query_params.clear()
-                st.rerun()
-            except:
-                pass
-        
+
         # Get total slides from script JSON if available
         if hasattr(st.session_state, 'script_json_path') and st.session_state.script_json_path and os.path.exists(st.session_state.script_json_path):
             try:
@@ -3416,51 +3633,21 @@ elif view_option == "📖 Presentation Viewer":
                 st.session_state.total_slides = len(slides)
             except:
                 pass
-        
-        # ========== SLIDE-VIDEO MAPPING (BILINGUAL) ==========
-        # Determine video folder based on selected language
-        if st.session_state.ppt_language == "hindi":
-            video_folder = "video_hindi"
-            print(f"🎬 Using Hindi video folder: {video_folder}")
-        else:  # english
-            video_folder = "video_eng"
-            print(f"🎬 Using English video folder: {video_folder}")
-        
-        # Map slides to videos in the appropriate language folder
-        slide_videos = {}
-        for i in range(1, st.session_state.total_slides + 1):
-            # Use absolute path for reliability
-            video_path = os.path.abspath(f"{video_folder}/202602 ({i}).mp4")
-            slide_videos[i] = video_path
-            
-            # Debug: Check if video exists
-            if os.path.exists(video_path):
-                print(f"   ✅ Slide {i}: {video_path}")
-            else:
-                print(f"   ⚠️ Slide {i}: Video not found at {video_path}")
-        
-        # Top controls bar
-        col_info, col_controls, col_restart = st.columns([2, 1, 1])
-        
+
+        # Top controls bar — the old video-synchronized layout
+        # (Automatic-mode checkbox + side video panel) was removed per
+        # client request; the viewer now just renders the PDF/PPT and
+        # lets the user page through it manually.
+        col_info, col_restart = st.columns([4, 1])
+
         with col_info:
-            # Show language indicator
             lang_emoji = "🇬🇧" if st.session_state.ppt_language == "english" else "🇮🇳"
             lang_text = "English" if st.session_state.ppt_language == "english" else "हिंदी"
             st.success(f"📁 {ppt_filename} | {lang_emoji} {lang_text} | Slide {st.session_state.current_slide}/{st.session_state.total_slides}")
-        
-        with col_controls:
-            st.session_state.auto_play = st.checkbox(
-                "🎬 Automatic Mode", 
-                value=st.session_state.auto_play, 
-                help="Videos play automatically and advance to next slide when finished - Full hands-free experience!"
-            )
-        
+
         with col_restart:
-            if st.button("🔄 Restart from Slide 1", use_container_width=True):
+            if st.button("🔄 Restart", use_container_width=True):
                 st.session_state.current_slide = 1
-                # Clear all slide timers
-                if "slide_start_time" in st.session_state:
-                    st.session_state.slide_start_time = {}
                 st.rerun()
         
         # Check if PDF is available for viewing
@@ -3489,37 +3676,24 @@ elif view_option == "📖 Presentation Viewer":
                 print(f"✅ PDF encoded to base64: {len(base64_pdf)} characters")
                 
                 # ========== NAVIGATION CONTROLS ==========
-                col_prev, col_replay, col_next = st.columns([1, 1, 1])
-                
+                # Outer spacer columns keep the buttons compact and
+                # centred instead of stretching edge-to-edge.
+                _, col_prev, col_next, _ = st.columns([2, 2, 2, 2])
+
                 with col_prev:
                     if st.button("⬅️ Previous", use_container_width=True, disabled=(st.session_state.current_slide <= 1)):
                         st.session_state.current_slide = max(1, st.session_state.current_slide - 1)
-                        # Clear the timer for the new slide so it restarts
-                        if "slide_start_time" in st.session_state and st.session_state.current_slide in st.session_state.slide_start_time:
-                            del st.session_state.slide_start_time[st.session_state.current_slide]
                         st.rerun()
-                
-                with col_replay:
-                    if st.button("🔄 Replay", use_container_width=True):
-                        # Clear the timer to restart current slide
-                        if "slide_start_time" in st.session_state and st.session_state.current_slide in st.session_state.slide_start_time:
-                            del st.session_state.slide_start_time[st.session_state.current_slide]
-                        st.rerun()
-                
+
                 with col_next:
                     if st.button("➡️ Next", use_container_width=True, disabled=(st.session_state.current_slide >= st.session_state.total_slides)):
                         st.session_state.current_slide = min(st.session_state.total_slides, st.session_state.current_slide + 1)
-                        # Clear the timer for the new slide so it restarts
-                        if "slide_start_time" in st.session_state and st.session_state.current_slide in st.session_state.slide_start_time:
-                            del st.session_state.slide_start_time[st.session_state.current_slide]
                         st.rerun()
-                
+
                 st.markdown("---")
-                
-                # TWO-COLUMN LAYOUT: PDF Viewer (left) + Synchronized Video Panel (right)
-                col_pdf, col_video = st.columns([3, 1])
-                
-                with col_pdf:
+
+                # Full-width PDF viewer (the side video panel was removed).
+                if True:
                     # Display PDF with specific page (synchronized with current slide)
                     current_page = st.session_state.current_slide
                     
@@ -3551,13 +3725,16 @@ elif view_option == "📖 Presentation Viewer":
                                 align-items: center;
                                 justify-content: flex-start;
                                 overflow-y: auto;
-                                padding: 20px 0;
+                                padding: 8px 12px;
+                                box-sizing: border-box;
                             }}
                             canvas {{
                                 border: 1px solid #ccc;
                                 box-shadow: 0 4px 12px rgba(0,0,0,0.3);
                                 background: white;
-                                margin-bottom: 20px;
+                                margin-bottom: 8px;
+                                max-width: 100%;
+                                height: auto;
                             }}
                             .loading {{
                                 color: white;
@@ -3584,49 +3761,66 @@ elif view_option == "📖 Presentation Viewer":
                                 pdfArray[i] = pdfData.charCodeAt(i);
                             }}
                             
-                            // Load and render PDF
+                            // Load and render PDF — scale the page so it
+                            // fits the iframe width (minus a small
+                            // padding) instead of a fixed 1.5x zoom.
+                            // This keeps the page visible alongside
+                            // the Previous / Next buttons in the same
+                            // viewport on any screen size.
                             const loadingTask = pdfjsLib.getDocument({{data: pdfArray}});
                             loadingTask.promise.then(function(pdf) {{
                                 console.log('PDF loaded, pages:', pdf.numPages);
-                                
-                                // Render the specific page
+
                                 const pageNumber = {current_page};
                                 pdf.getPage(pageNumber).then(function(page) {{
                                     console.log('Page loaded:', pageNumber);
-                                    
-                                    const scale = 1.5;
-                                    const viewport = page.getViewport({{scale: scale}});
-                                    
-                                    const canvas = document.createElement('canvas');
-                                    const context = canvas.getContext('2d');
-                                    canvas.height = viewport.height;
-                                    canvas.width = viewport.width;
-                                    
+
                                     const container = document.getElementById('pdf-container');
                                     container.innerHTML = '';
+
+                                    // Width-fit scaling with a sensible
+                                    // cap — prevents absurdly large
+                                    // renders on ultrawide monitors.
+                                    const baseViewport = page.getViewport({{scale: 1}});
+                                    const containerWidth = (container.clientWidth || window.innerWidth) - 24;
+                                    const fitScale = Math.min(containerWidth / baseViewport.width, 1.1);
+                                    const viewport = page.getViewport({{scale: fitScale}});
+
+                                    // Render sharper on HiDPI screens
+                                    // without blowing up CSS size.
+                                    const dpr = window.devicePixelRatio || 1;
+                                    const canvas = document.createElement('canvas');
+                                    const context = canvas.getContext('2d');
+                                    canvas.width = Math.floor(viewport.width * dpr);
+                                    canvas.height = Math.floor(viewport.height * dpr);
+                                    canvas.style.width = viewport.width + 'px';
+                                    canvas.style.height = viewport.height + 'px';
+                                    context.scale(dpr, dpr);
                                     container.appendChild(canvas);
-                                    
+
                                     const renderContext = {{
                                         canvasContext: context,
                                         viewport: viewport
                                     }};
-                                    
+
                                     page.render(renderContext).promise.then(function() {{
                                         console.log('Page rendered successfully');
                                     }});
                                 }});
                             }}, function(reason) {{
                                 console.error('Error loading PDF:', reason);
-                                document.getElementById('pdf-container').innerHTML = 
+                                document.getElementById('pdf-container').innerHTML =
                                     '<div class="loading" style="color: #ff6b6b;">Error loading PDF: ' + reason + '</div>';
                             }});
                         </script>
                     </body>
                     </html>
                     '''
-                    
-                    # Use components.html to render the custom PDF viewer
-                    components.html(pdf_viewer_html, height=920, scrolling=True)
+
+                    # Iframe height sized so the PDF page + the
+                    # Previous / Next buttons fit in one viewport at
+                    # 100% zoom (was 920px — too tall).
+                    components.html(pdf_viewer_html, height=620, scrolling=True)
                     print(f"✅ PDF viewer rendered - Page {current_page} (timestamp: {pdf_timestamp})")
                     
                     # Add download button as fallback
@@ -3638,148 +3832,7 @@ elif view_option == "📖 Presentation Viewer":
                         help="Download the PDF if it's not displaying correctly"
                     )
                 
-                with col_video:
-                    # ========== SYNCHRONIZED VIDEO PANEL ==========
-                    current_video_path = slide_videos.get(st.session_state.current_slide)
-                    
-                    if current_video_path and os.path.exists(current_video_path):
-                        # Encode video to base64 for embedding
-                        with open(current_video_path, "rb") as video_file:
-                            video_bytes = video_file.read()
-                        base64_video = base64.b64encode(video_bytes).decode('utf-8')
-                        
-                        # Generate unique key for video to force reload on slide change
-                        video_timestamp = int(time.time() * 1000)
-                        video_key = f"video_slide_{st.session_state.current_slide}_{video_timestamp}"
-                        
-                        # Build video HTML with onended event
-                        autoplay_attr = "autoplay" if st.session_state.auto_play else ""
-                        
-                        # Create JavaScript that will submit a form when video ends
-                        next_slide = st.session_state.current_slide + 1
-                        can_advance = next_slide <= st.session_state.total_slides
-                        
-                        video_html = f'''
-                        <div style="position: sticky; top: 80px; margin-top: 0.5rem;">
-                            <div style="background: white; padding: 1rem; border-radius: 0.75rem; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
-                                <h4 style="margin: 0 0 0.75rem 0; color: #1f2937; font-size: 1rem; font-weight: 600;">
-                                    🎤 Slide {st.session_state.current_slide} of {st.session_state.total_slides}
-                                </h4>
-                                <video 
-                                    id="{video_key}" 
-                                    width="100%" 
-                                    controls 
-                                    {autoplay_attr}
-                                    style="border-radius: 0.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.2);"
-                                    onended="handleVideoEnd()">
-                                    <source src="data:video/mp4;base64,{base64_video}" type="video/mp4">
-                                    Your browser does not support the video tag.
-                                </video>
-                                <p style="margin: 0.5rem 0 0 0; font-size: 0.75rem; color: #6b7280; text-align: center;">
-                                    Slide {st.session_state.current_slide}: Professional Analysis
-                                </p>
-                            </div>
-                        </div>
-                        
-                        <script>
-                        function handleVideoEnd() {{
-                            const autoPlay = {str(st.session_state.auto_play).lower()};
-                            const canAdvance = {str(can_advance).lower()};
-                            
-                            if (autoPlay && canAdvance) {{
-                                console.log("Video ended, attempting to advance to next slide");
-                                
-                                // Try to find and click the hidden advance button
-                                try {{
-                                    // Look for the button in parent document
-                                    const buttons = window.parent.document.querySelectorAll('button');
-                                    for (let btn of buttons) {{
-                                        if (btn.textContent.includes('AUTO_ADVANCE_HIDDEN')) {{
-                                            console.log("Found advance button, clicking...");
-                                            btn.click();
-                                            return;
-                                        }}
-                                    }}
-                                    console.log("Advance button not found");
-                                }} catch(e) {{
-                                    console.error("Error clicking button:", e);
-                                }}
-                            }}
-                        }}
-                        </script>
-                        '''
-                        
-                        # Use components.html WITHOUT auto-refresh
-                        components.html(video_html, height=450, scrolling=False)
-                        print(f"✅ Synchronized video rendered - Slide {st.session_state.current_slide}")
-                        
-                        # Hidden button that JavaScript will click when video ends
-                        if st.session_state.auto_play and st.session_state.current_slide < st.session_state.total_slides:
-                            # Use a form to make the button more accessible to JavaScript
-                            with st.form(key=f"advance_form_{st.session_state.current_slide}", clear_on_submit=True):
-                                submitted = st.form_submit_button(
-                                    "AUTO_ADVANCE_HIDDEN", 
-                                    use_container_width=False,
-                                    type="primary"
-                                )
-                                if submitted:
-                                    st.session_state.current_slide += 1
-                                    # Clear the timer for the new slide
-                                    if "slide_start_time" in st.session_state and st.session_state.current_slide in st.session_state.slide_start_time:
-                                        del st.session_state.slide_start_time[st.session_state.current_slide]
-                                    print(f"🎬 Auto-advancing to slide {st.session_state.current_slide}")
-                                    st.rerun()
-                            
-                            # Hide the button with CSS
-                            st.markdown("""
-                            <style>
-                            /* Hide the AUTO_ADVANCE_HIDDEN button */
-                            button[kind="primary"]:has-text("AUTO_ADVANCE_HIDDEN"),
-                            button:has-text("AUTO_ADVANCE_HIDDEN"),
-                            form:has(button:has-text("AUTO_ADVANCE_HIDDEN")) {
-                                display: none !important;
-                                visibility: hidden !important;
-                                height: 0 !important;
-                                width: 0 !important;
-                                padding: 0 !important;
-                                margin: 0 !important;
-                                opacity: 0 !important;
-                                position: absolute !important;
-                                left: -9999px !important;
-                            }
-                            </style>
-                            """, unsafe_allow_html=True)
-                        
-                        # Show status
-                        if st.session_state.auto_play:
-                            if st.session_state.current_slide < st.session_state.total_slides:
-                                st.info("Automatic mode: Next slide will start when video ends")
-                            else:
-                                st.success("🎉 Final slide - Presentation complete!")
-                    else:
-                        # Placeholder if video doesn't exist for this slide
-                        placeholder_html = f'''
-                        <div style="position: sticky; top: 80px; margin-top: 0.5rem;">
-                            <div style="background: white; padding: 1.5rem; border-radius: 0.75rem; box-shadow: 0 4px 12px rgba(0,0,0,0.15); text-align: center;">
-                                <div style="font-size: 3rem; margin-bottom: 0.5rem;">🎤</div>
-                                <h4 style="margin: 0 0 0.5rem 0; color: #1f2937; font-size: 1rem; font-weight: 600;">
-                                    Slide {st.session_state.current_slide} Video
-                                </h4>
-                                <p style="margin: 0; font-size: 0.875rem; color: #6b7280;">
-                                    Video not available
-                                </p>
-                                <p style="margin: 0.5rem 0 0 0; font-size: 0.75rem; color: #9ca3af;">
-                                    Expected at:<br/>
-                                    <code style="background: #f3f4f6; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.7rem;">{current_video_path}</code>
-                                </p>
-                            </div>
-                        </div>
-                        '''
-                        
-                        st.markdown(placeholder_html, unsafe_allow_html=True)
-                        print(f"⚠️ Video file not found for slide {st.session_state.current_slide}")
-                
-                # Action buttons BELOW the two-column layout
+                # Action buttons BELOW the PDF viewer.
                 st.markdown("---")
                 st.markdown("#### 📥 Download Options")
                 
@@ -3819,7 +3872,7 @@ elif view_option == "📖 Presentation Viewer":
                 with col3:
                     # Back button
                     if st.button("🔙 Back", use_container_width=True):
-                        st.session_state.view_selector = "🏦 Fundamental Analysis"
+                        st.session_state.view_selector = "🔬 Deep Analysis"
                         st.rerun()
                 
                 # Display Narration Scripts below download buttons
@@ -3961,7 +4014,7 @@ elif view_option == "📖 Presentation Viewer":
                 
                 with col3:
                     if st.button("🔙 Back", use_container_width=True, key="back_error"):
-                        st.session_state.view_selector = "🏦 Fundamental Analysis"
+                        st.session_state.view_selector = "🔬 Deep Analysis"
                         st.rerun()
         
         else:
@@ -3981,52 +4034,703 @@ elif view_option == "📖 Presentation Viewer":
                 st.markdown("- **Linux:** Install LibreOffice: `sudo apt-get install libreoffice`")
             
             if st.button("🔙 Back to Chat"):
-                st.session_state.view_selector = "🏦 Fundamental Analysis"
+                st.session_state.view_selector = "🔬 Deep Analysis"
                 st.rerun()
 
 elif view_option == "📈 Data Dashboard":
+    # ══════════════════════════════════════════════════════════════
+    # DASHBOARD — unified stock analysis interface with embedded search
+    # ══════════════════════════════════════════════════════════════
+    # Detect the active Streamlit theme so downstream code that needs
+    # theme-aware colors (hero welcome state, Plotly chart templates,
+    # etc.) can branch on it. Returns "dark" or "light"; falls back to
+    # "light" when the option isn't configured.
+    try:
+        _tw_theme_base = (st.get_option("theme.base") or "light").lower()
+    except Exception:
+        _tw_theme_base = "light"
+
+    # Skeleton loader + card styles
+    st.markdown("""
+    <style>
+    @keyframes tw_shimmer {
+        0%   { background-position: -400px 0; }
+        100% { background-position: 400px 0; }
+    }
+    .tw-skeleton {
+        background: linear-gradient(90deg, #1a1a1a 0%, #2a2a2a 50%, #1a1a1a 100%);
+        background-size: 800px 100%;
+        animation: tw_shimmer 1.4s infinite linear;
+        border-radius: 8px;
+    }
+    .tw-welcome {
+        background: #0f0f0f;
+        border: 1px dashed #2a2a2a;
+        border-radius: 12px;
+        padding: 48px 24px;
+        text-align: center;
+        color: #888;
+        margin-top: 12px;
+    }
+    .tw-welcome-title { color: #fff; font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+    .tw-welcome-sub   { color: #888; font-size: 14px; }
+    .tw-variant-card {
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin: 10px 0 4px 0;
+    }
+    .tw-variant-title { color: #fff; font-weight: 600; font-size: 14px; margin-bottom: 8px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── Future-sentiment DB persister ────────────────────────────────
+    # Called after the parallel news-analysis finishes successfully.
+    # Composes a compact text block from the distilled outlook_data (or
+    # the raw analysis if distillation failed) and UPDATEs the
+    # stock_analysis.future_senti + future_senti_status columns on the
+    # latest row for the given symbol. Best-effort — swallows DB errors.
+    def _build_future_senti_text(stock_name: str, news_result: dict) -> tuple[str, str]:
+        """Return (text, status) for the future_senti DB columns.
+        Status is derived from outlook verdict — "bullish"/"bearish"/"neutral".
+        """
+        _od = news_result.get("outlook_data") or {}
+        _verdict = _od.get("outlook", "") or ""
+        _low = _verdict.lower()
+        _status = "bullish" if "bullish" in _low else (
+            "bearish" if "bearish" in _low else "neutral"
+        )
+
+        _lines = [f"🔮 Future Outlook & News Analysis for {stock_name}", ""]
+
+        if _verdict:
+            _lines.append(
+                f"Overall Outlook: {_od.get('outlook_emoji', '')} {_verdict}".strip()
+            )
+            _lines.append("")
+
+        _av = (_od.get("analyst_view") or "").strip()
+        if _av:
+            _lines += ["Analyst & Market View:", _av, ""]
+
+        _perf = (_od.get("performance") or "").strip()
+        if _perf:
+            _lines += ["Recent Financial Performance:", _perf, ""]
+
+        _drivers = _od.get("growth_drivers") or []
+        if _drivers:
+            _lines.append("🟢 Growth Drivers:")
+            for _d in _drivers:
+                _lines.append(f"  • {_d}")
+            _lines.append("")
+
+        _risks = _od.get("risk_factors") or []
+        if _risks:
+            _lines.append("🔴 Risk Factors:")
+            for _r in _risks:
+                _lines.append(f"  • {_r}")
+            _lines.append("")
+
+        _tp = (_od.get("target_price") or "").strip()
+        _cons = (_od.get("consensus") or "").strip()
+        if _tp and _tp.lower() != "not available":
+            _lines.append(f"🎯 Analyst Price Target: {_tp}")
+        if _cons and _cons.lower() != "not available":
+            _lines.append(f"📊 Analyst Consensus: {_cons}")
+
+        # Fallback to the raw analysis text if distillation produced
+        # nothing — still better than leaving the column empty.
+        if not _od:
+            _raw = (news_result.get("analysis") or "").strip()
+            if _raw:
+                _lines.append(_raw)
+
+        return "\n".join(_lines).strip(), _status
+
+    def _persist_future_sentiment(stock_symbol: str, stock_name: str, news_result: dict) -> None:
+        """Best-effort UPDATE of future_senti + future_senti_status columns."""
+        try:
+            _text, _status = _build_future_senti_text(stock_name, news_result)
+            if not _text:
+                return
+            from database_utility.database import StockDatabase
+            _db = StockDatabase()
+            if _db.connect():
+                _db.update_sentiment_columns(
+                    stock_symbol=stock_symbol,
+                    future_senti=_text,
+                    future_senti_status=_status,
+                )
+                _db.disconnect()
+        except Exception as _e:
+            print(f"⚠️ future_senti DB persist failed for {stock_symbol}: {_e}")
+
+    # ── Structured outlook distiller — used by the news-analysis pipeline ──
+    # Defined here (top of dashboard view) so both the agent-call block
+    # and the Refresh-button handler further down can reference it.
+    def _distill_outlook(raw_result: dict, query: str) -> dict:
+        """Condense the full news analysis into a structured outlook dict
+        with sections: verdict, analyst view, performance highlights,
+        growth drivers, risk factors, and target/consensus. Returns a
+        dict (or empty dict on failure).
+
+        Uses a model fallback chain (same as the sentiment classifier)
+        and a generous token budget (1800) to avoid the truncated-JSON
+        bug that hit with the previous 900-token limit.
+        """
+        _body_parts: list[str] = []
+        _analysis = (raw_result.get("analysis") or "").strip()
+        _tavily = (raw_result.get("tavily_summary") or "").strip()
+        if _analysis:
+            _body_parts.append(_analysis)
+        if _tavily:
+            _body_parts.append(_tavily)
+        if not _body_parts:
+            return {}
+
+        _combined = "\n\n".join(_body_parts)[:8000]
+
+        _sys = (
+            "You are a senior equity research analyst. "
+            "Read the report and return a JSON object with EXACTLY these keys:\n"
+            "  outlook: \"Strongly Bullish\"|\"Moderately Bullish\"|\"Neutral\"|\"Moderately Bearish\"|\"Strongly Bearish\"\n"
+            "  outlook_emoji: \"🟢\" (bullish) | \"🟡\" (neutral) | \"🔴\" (bearish)\n"
+            "  analyst_view: 2-3 sentences — analyst names, targets, ratings\n"
+            "  performance: 2-3 sentences — recent quarter numbers, YoY changes\n"
+            "  growth_drivers: array of 3-5 short strings (1 sentence each, include numbers)\n"
+            "  risk_factors: array of 2-4 short strings (1 sentence each, include numbers)\n"
+            "  target_price: e.g. \"₹3,800 (13% upside)\" or \"Not available\"\n"
+            "  consensus: e.g. \"32 Buy / 10 Hold / 4 Sell\" or \"Not available\"\n\n"
+            "RULES: Be specific with numbers from the text. Do NOT invent data. "
+            "Keep each growth_driver/risk_factor to ONE sentence max. "
+            "Return ONLY valid JSON — no markdown fences, no extra text."
+        )
+        _usr = (
+            f"Full future-outlook report for {query}:\n\n"
+            f"{_combined}\n\n"
+            "Return ONLY the JSON object."
+        )
+
+        _models = [
+            "openai/gpt-oss-120b",
+            "google/gemini-2.0-flash-001",
+            "meta-llama/llama-3.1-8b-instruct",
+            "openai/gpt-oss-20b",
+        ]
+
+        import json as _json
+        import re as _re
+        from utils.model_config import guarded_llm_call as _g
+
+        for _model in _models:
+            try:
+                _resp = _g(
+                    messages=[
+                        {"role": "system", "content": _sys},
+                        {"role": "user", "content": _usr},
+                    ],
+                    model=_model,
+                    temperature=0.2,
+                    max_tokens=1800,
+                )
+                _raw = _resp.choices[0].message.content.strip() if _resp and _resp.choices else ""
+                if not _raw:
+                    print(f"⚠️ Outlook distill: {_model} returned empty — trying next")
+                    continue
+                # Strip code fences
+                if _raw.startswith("```"):
+                    _raw = _re.sub(r"^```(?:json)?\s*", "", _raw, count=1)
+                    _raw = _re.sub(r"\s*```\s*$", "", _raw, count=1)
+                _obj = _json.loads(_raw)
+                if isinstance(_obj, dict) and "outlook" in _obj:
+                    print(f"✅ Distilled structured outlook via {_model}: {_obj.get('outlook')}")
+                    return _obj
+                print(f"⚠️ Outlook distill: {_model} returned JSON without 'outlook' key — trying next")
+            except _json.JSONDecodeError as _je:
+                print(f"⚠️ Outlook distill: {_model} JSON parse error ({_je}) — trying next")
+            except Exception as _e:
+                print(f"⚠️ Outlook distill: {_model} failed ({_e}) — trying next")
+
+        print("⚠️ All models failed for outlook distillation — returning empty")
+        return {}
+
+    # ── Search-bar state ──────────────────────────────────────────
+    st.session_state.setdefault("dash_is_loading", False)
+    st.session_state.setdefault("dash_pending_query", None)
+    st.session_state.setdefault("dash_variants", [])
+    st.session_state.setdefault("dash_error", None)
+    st.session_state.setdefault("dash_parsed", None)  # parsed agent text
+    st.session_state.setdefault("dash_news_analysis", None)
+    st.session_state.setdefault("dash_news_analysis_symbol", None)
+    st.session_state.setdefault("dash_active_tab", "🏢 Snapshot")
+
+    # ── Search bar ────────────────────────────────────────────────
+    _search_col, _btn_col = st.columns([6, 1])
+    with _search_col:
+        _q = st.text_input(
+            "Search stock",
+            key="dash_search_input",
+            placeholder="Search any stock or company... (e.g., 'TCS', 'Reliance', 'INFY.NS')",
+            label_visibility="collapsed",
+            disabled=st.session_state.dash_is_loading,
+        )
+    with _btn_col:
+        _go = st.button(
+            "🔍 Search",
+            use_container_width=True,
+            type="primary",
+            disabled=st.session_state.dash_is_loading,
+        )
+
+    if (_go or (_q and _q != st.session_state.get("_dash_last_q", ""))) and _q.strip():
+        st.session_state._dash_last_q = _q
+        st.session_state.dash_pending_query = _q.strip()
+        st.session_state.dash_is_loading = True
+        st.session_state.dash_error = None
+        st.session_state.dash_variants = []
+        # Clear any previous stock's cached view so a partial/failed re-analysis
+        # can't leave stale fields (e.g. wrong dividend yield, empty holdings)
+        # visible on the dashboard while the new search is running.
+        st.session_state.company_data = None
+        st.session_state.dash_parsed = None
+        st.session_state._dash_last_raw_response = None
+        st.session_state.dash_news_analysis = None
+        st.session_state.dash_news_analysis_symbol = None
+        # Reset the per-symbol enrichment flag so the new stock's yfinance
+        # gap-fill runs fresh instead of being skipped as "already enriched".
+        for _k in [k for k in st.session_state.keys() if k.startswith("_dash_enriched_")]:
+            del st.session_state[_k]
+        # Clear any cached OHLC candlestick dataframes from previous searches.
+        for _k in [k for k in st.session_state.keys() if k.startswith("_dash_ohlc_")]:
+            del st.session_state[_k]
+        st.rerun()
+
+    # ── Error banner ──────────────────────────────────────────────
+    if st.session_state.dash_error:
+        st.error(f"❌ {st.session_state.dash_error}")
+
+    # ── Multi-stock selection card ────────────────────────────────
+    if st.session_state.dash_variants and not st.session_state.dash_is_loading:
+        st.markdown(
+            '<div class="tw-variant-card">'
+            '<div class="tw-variant-title">Multiple stocks found — select one to analyze</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        for idx, variant in enumerate(st.session_state.dash_variants):
+            _vname = variant.get("name", "Unknown")
+            _vticker = variant.get("ticker") or variant.get("symbol", "")
+            if st.button(
+                f"{idx + 1}. {_vname}  ·  {_vticker}",
+                key=f"dash_variant_{idx}",
+                use_container_width=True,
+            ):
+                st.session_state.dash_pending_query = _vticker
+                st.session_state.dash_is_loading = True
+                st.session_state.dash_variants = []
+                st.session_state.company_data = None
+                st.session_state.dash_parsed = None
+                for _k in [k for k in st.session_state.keys() if k.startswith("_dash_enriched_")]:
+                    del st.session_state[_k]
+                st.rerun()
+        if st.button("✖ Dismiss", key="dash_variant_dismiss"):
+            st.session_state.dash_variants = []
+            st.rerun()
+
+    # ── Agent call (runs when a query is pending) ─────────────────
+    if st.session_state.dash_pending_query:
+        _pending = st.session_state.dash_pending_query
+        st.session_state.dash_pending_query = None
+
+        # Show skeleton loaders while waiting
+        _sk_placeholder = st.empty()
+        with _sk_placeholder.container():
+            st.markdown(
+                '<div class="tw-skeleton" style="height:380px;margin:12px 0;"></div>'
+                '<div style="display:flex;gap:12px;margin:12px 0;">'
+                '<div class="tw-skeleton" style="flex:1;height:100px"></div>'
+                '<div class="tw-skeleton" style="flex:1;height:100px"></div>'
+                '<div class="tw-skeleton" style="flex:1;height:100px"></div>'
+                '<div class="tw-skeleton" style="flex:1;height:100px"></div>'
+                '</div>'
+                '<div class="tw-skeleton" style="height:220px;margin:12px 0;"></div>'
+                '<div class="tw-skeleton" style="height:160px;margin:12px 0;"></div>',
+                unsafe_allow_html=True,
+            )
+
+        import asyncio as _asyncio
+        import concurrent.futures as _cf
+        from utils.parse_agent_response import (
+            parse_agent_response,
+            is_multi_stock_response,
+            parse_multi_stock_options,
+        )
+        from tools import StockTools as _DashStockTools
+
+        # Ensure session-state scaffolding the agent expects
+        if "message_history" not in st.session_state:
+            st.session_state.message_history = []
+        if "deps" not in st.session_state:
+            st.session_state.deps = ConversationState()
+
+        _deps = st.session_state.deps
+        _deps.current_user_input = _pending
+        _deps.validation_done_this_turn = False
+        _deps.last_analysis_response = None
+        _deps.last_validation_response = None
+        # Force a fresh analysis for each new dashboard search
+        _deps.analysis_complete = False
+        _deps.company_data = None
+        _deps.stock_symbol = None
+        _deps.stock_name = None
+        _deps.pending_variants = None
+        _deps.report_generated = False
+        # Don't carry chat-era history into dashboard searches — tools will skip work if they think
+        # the stock was already analyzed in the conversation.
+        _local_history: list = []
+
+        async def _dash_run_agent(query: str):
+            try:
+                _res = await agent.run(
+                    query,
+                    message_history=_local_history,
+                    deps=_deps,
+                )
+                return _res, None
+            except Exception as e:
+                return None, str(e)
+
+        def _dash_run_news_analysis(query: str):
+            """Parallel Future-Outlook news analysis fetcher. Runs alongside the
+            main agent so the extra Tavily + LLM cost is fully overlapped with
+            the stock-data pipeline instead of adding serial latency.
+
+            After the full Tavily+LLM report is fetched, an extra LLM call
+            distils it into a structured outlook dict (verdict, analyst view,
+            performance, drivers, risks, target) stored under ``outlook_data``
+            so the dashboard can render a rich card instead of raw text.
+            """
+            try:
+                _result = _DashStockTools.get_stock_news_analysis(query, max_articles=5)
+                if _result and not _result.get("error"):
+                    _result["outlook_data"] = _distill_outlook(_result, query)
+                return _result
+            except Exception as _e:
+                print(f"⚠️ Dashboard news analysis failed: {_e}")
+                return {"error": str(_e)}
+
+        # Timeout budget: cold-cache runs can realistically take 4–6 minutes because
+        # the agent fans out to screener.in, Tavily, yfinance, Perplexity (competitors),
+        # news, validation retries, missing-field LLM gap-fill, expert opinion, and
+        # PDF summarisation. 360s gives comfortable headroom.
+        _DASH_TIMEOUT_SECS = 360
+        _NEWS_TIMEOUT_SECS = 120  # news analysis is ~30–90s; allow some headroom
+
+        _raw_response = ""
+        _err = None
+        _result = None
+        _news_result: dict | None = None
+        _timed_out = False
+        try:
+            # max_workers=2 so the news analysis runs concurrently with the agent
+            # instead of being queued behind it.
+            with _cf.ThreadPoolExecutor(max_workers=2) as _ex:
+                _fut = _ex.submit(lambda: _asyncio.run(_dash_run_agent(_pending)))
+                _news_fut = _ex.submit(_dash_run_news_analysis, _pending)
+                try:
+                    _result, _err = _fut.result(timeout=_DASH_TIMEOUT_SECS)
+                except _cf.TimeoutError:
+                    # ThreadPoolExecutor.__exit__ still blocks on shutdown(wait=True)
+                    # until the background task completes — Python can't kill a
+                    # running thread. That means by the time we leave this `with`
+                    # block the tool WILL have finished and `deps.last_analysis_response`
+                    # should be populated. Keep going to the cached-response check
+                    # below instead of aborting immediately.
+                    print(f"⏰ Dashboard agent.run exceeded {_DASH_TIMEOUT_SECS}s — will recover from tool cache.")
+                    _timed_out = True
+
+                # Harvest the news analysis result. It ran fully in parallel with
+                # the agent so its wall-clock cost is already absorbed. Use a
+                # short secondary wait — if it's still chewing after the agent
+                # finishes, give it a bit more time, otherwise move on.
+                try:
+                    _news_result = _news_fut.result(timeout=_NEWS_TIMEOUT_SECS)
+                except _cf.TimeoutError:
+                    print(f"⏰ Dashboard news analysis exceeded {_NEWS_TIMEOUT_SECS}s — rendering without it.")
+                    _news_result = None
+                except Exception as _ne:
+                    print(f"⚠️ Dashboard news analysis errored: {_ne}")
+                    _news_result = None
+        except Exception as e:
+            _err = f"Error: {e}"
+
+        # Authoritative response source: the tool-cached output on deps. The analysis
+        # tool writes here as soon as it finishes, so this is set even when the
+        # pydantic-ai wrapper errors or we hit the timeout above.
+        _cached_a = getattr(_deps, "last_analysis_response", None)
+        _cached_v = getattr(_deps, "last_validation_response", None)
+        if _cached_a:
+            _raw_response = _cached_a
+            _err = None
+            _timed_out = False
+        elif _cached_v:
+            _raw_response = _cached_v
+            _err = None
+            _timed_out = False
+        elif _result is not None and not _err:
+            _raw_response = getattr(_result, "output", None) or getattr(_result, "data", "") or ""
+
+        if isinstance(_raw_response, ToolResponse):
+            _raw_response = _raw_response.content or ""
+        if isinstance(_raw_response, str) and _raw_response.startswith("FINAL_ANSWER:\n"):
+            _raw_response = _raw_response[len("FINAL_ANSWER:\n"):]
+        if _raw_response and not isinstance(_raw_response, str):
+            _raw_response = str(_raw_response)
+
+        # If we have company_data on deps, analysis effectively succeeded regardless
+        # of what the wrapper reported — clear any residual error state.
+        if getattr(_deps, "company_data", None):
+            _err = None
+            _timed_out = False
+
+        if _timed_out and not _raw_response:
+            _err = f"Analysis exceeded {_DASH_TIMEOUT_SECS} seconds. Please try again."
+
+        _sk_placeholder.empty()
+        st.session_state.dash_is_loading = False
+
+        if _err and not _raw_response and not getattr(_deps, "company_data", None):
+            st.session_state.dash_error = f"Could not fetch data for '{_pending}'. {_err}"
+            st.rerun()
+
+        # Multi-stock selection: detect either via text pattern or via pending_variants
+        # that the validation tool populated when multiple matches exist.
+        _has_variants = bool(getattr(_deps, "pending_variants", None)) and not _deps.company_data
+        if _has_variants or (_raw_response and is_multi_stock_response(_raw_response)):
+            _opts = parse_multi_stock_options(_raw_response) if _raw_response else []
+            if not _opts and getattr(_deps, "pending_variants", None):
+                _opts = [
+                    {"name": v.get("name", ""), "ticker": v.get("symbol", "")}
+                    for v in _deps.pending_variants
+                ]
+            if _opts:
+                st.session_state.dash_variants = _opts
+                st.rerun()
+
+        # Full analysis — persist company_data + parsed text, then rerun
+        if _deps.company_data:
+            st.session_state.company_data = _deps.company_data
+            if _deps.stock_name:
+                st.session_state.current_stock = _deps.stock_name
+            st.session_state.dash_parsed = parse_agent_response(_raw_response) if _raw_response else None
+            # Keep the raw response so downstream render code can recover values
+            # that aren't in the structured CompanyData (e.g. Indian Promoter /
+            # FII / DII holdings when a cached analysis came back without them).
+            st.session_state._dash_last_raw_response = _raw_response or ""
+            # Persist the parallel news analysis keyed by symbol so the dashboard
+            # renders the Future Outlook section without re-fetching on every rerun.
+            if _news_result and not _news_result.get("error"):
+                st.session_state.dash_news_analysis = _news_result
+                st.session_state.dash_news_analysis_symbol = _deps.company_data.symbol
+                # Persist the future-outlook summary to the stock_analysis
+                # row for this symbol so FinRobot / PPT generator / any other
+                # consumer that reads `future_senti` from the DB sees real
+                # data instead of NULL. Best-effort — DB errors are logged
+                # but don't interrupt the UI render.
+                try:
+                    _persist_future_sentiment(
+                        _deps.company_data.symbol,
+                        _deps.company_data.name,
+                        _news_result,
+                    )
+                except Exception as _fs_err:
+                    print(f"⚠️ future_senti DB persist failed: {_fs_err}")
+            elif _news_result and _news_result.get("error"):
+                # Keep the error around so the section can show "couldn't fetch".
+                st.session_state.dash_news_analysis = _news_result
+                st.session_state.dash_news_analysis_symbol = _deps.company_data.symbol
+        elif not _raw_response:
+            # Agent returned nothing and produced no structured data — surface an error
+            st.session_state.dash_error = f"Could not analyze '{_pending}'. Please try a different query."
+        st.rerun()
+
     if st.session_state.company_data:
         data = st.session_state.company_data
-        st.subheader(f"📊 {data.name} ({data.symbol})")
+        _parsed = st.session_state.get("dash_parsed") or {}
+        _website = getattr(getattr(data, 'snapshot', None), 'website', None) or ''
+        st.markdown(
+            f"<h3 style='margin:0 0 0.5rem 0;'>"
+            f"<span>{data.name}</span>"
+            f"</h3>",
+            unsafe_allow_html=True,
+        )
+
+        # Background task kickoff used to fire here (at the top of the
+        # dashboard render). That caused the trade-ideas subprocess to
+        # race with the dashboard's own yfinance / screener enrichment
+        # and frequently return an empty result that got cached as
+        # success. The kickoff is now deferred to the END of this
+        # `if st.session_state.company_data:` block (just after the
+        # FII/DII section) so every dashboard widget has finished its
+        # own network work before the trade-ideas scraper is spawned.
 
         # Auto-enrich from yfinance if key dashboard fields are missing (e.g. DB cache hit)
+        _fin = data.financials
+        _md = data.market_data
         _needs_enrich = (
-            not getattr(data.financials, 'ebitda', None) or
-            not getattr(data.financials, 'eps', None) or
-            not data.market_data.price_history
+            not getattr(_fin, 'ebitda', None) or
+            not getattr(_fin, 'eps', None) or
+            not _md.price_history or
+            not getattr(_fin, 'total_assets', None) or
+            not getattr(_fin, 'total_liabilities', None) or
+            not getattr(_fin, 'total_debt', None) or
+            not getattr(_fin, 'cash_balance', None) or
+            not getattr(_fin, 'operating_cash_flow', None) or
+            not getattr(_fin, 'enterprise_value', None) or
+            not getattr(_fin, 'ev_ebitda', None)
         )
         if _needs_enrich and data.symbol and not st.session_state.get(f'_dash_enriched_{data.symbol}'):
             try:
+                import math
                 import yfinance as yf
                 _dash_tk = yf.Ticker(data.symbol)
                 _dash_info = _dash_tk.info or {}
                 _dash_hist = _dash_tk.history(period="1y")
 
-                # Fill missing financials
-                if not getattr(data.financials, 'ebitda', None):
-                    data.financials.ebitda = _dash_info.get('ebitda')
-                if not getattr(data.financials, 'eps', None):
-                    data.financials.eps = _dash_info.get('trailingEps')
-                if not getattr(data.financials, 'free_cash_flow', None):
-                    data.financials.free_cash_flow = _dash_info.get('freeCashflow')
+                def _clean(v):
+                    """Strip NaN / None / non-numeric values that sneak in from yfinance."""
+                    if v is None:
+                        return None
+                    try:
+                        f = float(v)
+                    except (TypeError, ValueError):
+                        return None
+                    if math.isnan(f) or math.isinf(f):
+                        return None
+                    return f
 
-                # Fill price history
-                if not data.market_data.price_history and not _dash_hist.empty:
-                    data.market_data.price_history = {
+                # ── Income / cash-flow fields from info ──
+                if not getattr(_fin, 'ebitda', None):
+                    _fin.ebitda = _clean(_dash_info.get('ebitda'))
+                if not getattr(_fin, 'eps', None):
+                    _fin.eps = _clean(_dash_info.get('trailingEps'))
+                if not getattr(_fin, 'free_cash_flow', None):
+                    _fin.free_cash_flow = _clean(_dash_info.get('freeCashflow'))
+                if not getattr(_fin, 'operating_cash_flow', None):
+                    _fin.operating_cash_flow = _clean(_dash_info.get('operatingCashflow'))
+                if not getattr(_fin, 'total_debt', None):
+                    _fin.total_debt = _clean(_dash_info.get('totalDebt'))
+                if not getattr(_fin, 'cash_balance', None):
+                    _fin.cash_balance = _clean(_dash_info.get('totalCash'))
+                if not getattr(_fin, 'enterprise_value', None):
+                    _fin.enterprise_value = _clean(_dash_info.get('enterpriseValue'))
+                if not getattr(_fin, 'ev_ebitda', None):
+                    _fin.ev_ebitda = _clean(_dash_info.get('enterpriseToEbitda'))
+                if not getattr(_fin, 'pb_ratio', None):
+                    _fin.pb_ratio = _clean(_dash_info.get('priceToBook'))
+
+                # ── Market-data fields from info (volume / beta) ──
+                # These come straight from yfinance and the cache-hit builder
+                # usually fills them, but the safety net here covers any path
+                # that left them empty (e.g. a partial CompanyData rebuild).
+                if not getattr(_md, 'volume', None):
+                    _vol = _clean(_dash_info.get('volume'))
+                    _md.volume = int(_vol) if _vol else None
+                if not getattr(_md, 'avg_volume', None):
+                    _avg_vol = _clean(_dash_info.get('averageVolume'))
+                    _md.avg_volume = int(_avg_vol) if _avg_vol else None
+                if not getattr(_md, 'beta', None):
+                    _md.beta = _clean(_dash_info.get('beta'))
+
+                # ── Balance-sheet fields (not in info) from the balance_sheet DataFrame ──
+                #    yfinance returns a DataFrame with row labels like "Total Assets",
+                #    "Total Liabilities Net Minority Interest", etc. Most recent column first.
+                _missing_bs = (
+                    not getattr(_fin, 'total_assets', None)
+                    or not getattr(_fin, 'total_liabilities', None)
+                    or not getattr(_fin, 'total_debt', None)
+                    or not getattr(_fin, 'cash_balance', None)
+                )
+                if _missing_bs:
+                    try:
+                        _bs = _dash_tk.balance_sheet
+                        if _bs is not None and not _bs.empty:
+                            _bs_col = _bs.columns[0]
+
+                            def _bs_lookup(*needles: str):
+                                """Return the first numeric row whose label contains every needle."""
+                                for idx in _bs.index:
+                                    label = str(idx).lower()
+                                    if all(n in label for n in needles):
+                                        val = _clean(_bs[_bs_col].get(idx))
+                                        if val is not None:
+                                            return val
+                                return None
+
+                            if not getattr(_fin, 'total_assets', None):
+                                _fin.total_assets = _bs_lookup("total", "assets")
+                            if not getattr(_fin, 'total_liabilities', None):
+                                _fin.total_liabilities = _bs_lookup("total", "liabilities")
+                            if not getattr(_fin, 'total_debt', None):
+                                _fin.total_debt = _bs_lookup("total", "debt")
+                            if not getattr(_fin, 'cash_balance', None):
+                                _fin.cash_balance = (
+                                    _bs_lookup("cash", "equivalent")
+                                    or _bs_lookup("cash", "short term")
+                                    or _bs_lookup("cash")
+                                )
+                    except Exception as _bs_err:
+                        print(f"⚠️ balance_sheet fetch failed: {_bs_err}")
+
+                # ── operating_cash_flow from cashflow DataFrame if info missed it ──
+                if not getattr(_fin, 'operating_cash_flow', None):
+                    try:
+                        _cf_df = _dash_tk.cashflow
+                        if _cf_df is not None and not _cf_df.empty:
+                            _cf_col = _cf_df.columns[0]
+                            for idx in _cf_df.index:
+                                _lab = str(idx).lower()
+                                if "operat" in _lab and "cash" in _lab:
+                                    _v = _clean(_cf_df[_cf_col].get(idx))
+                                    if _v is not None:
+                                        _fin.operating_cash_flow = _v
+                                        break
+                    except Exception as _cf_err:
+                        print(f"⚠️ cashflow fetch failed: {_cf_err}")
+
+                # ── Compute ev_ebitda if we now have both pieces ──
+                if not getattr(_fin, 'ev_ebitda', None) and _fin.enterprise_value and _fin.ebitda:
+                    try:
+                        _fin.ev_ebitda = _fin.enterprise_value / _fin.ebitda
+                    except Exception:
+                        pass
+
+                # ── Price history ──
+                if not _md.price_history and not _dash_hist.empty:
+                    _md.price_history = {
                         str(dt.date()): float(row["Close"])
                         for dt, row in _dash_hist.iterrows()
                     }
 
-                # Fill overall high/low from history
+                # ── Overall high/low from history ──
                 if not _dash_hist.empty:
-                    if not getattr(data.market_data, 'overall_high', None):
-                        data.market_data.overall_high = float(_dash_hist['High'].max())
-                    if not getattr(data.market_data, 'overall_low', None):
-                        data.market_data.overall_low = float(_dash_hist['Low'].min())
-                    if data.market_data.overall_high and data.market_data.current_price:
-                        data.market_data.percentage_change_from_high = round(
-                            ((data.market_data.current_price - data.market_data.overall_high) / data.market_data.overall_high) * 100, 2
+                    if not getattr(_md, 'overall_high', None):
+                        _md.overall_high = float(_dash_hist['High'].max())
+                    if not getattr(_md, 'overall_low', None):
+                        _md.overall_low = float(_dash_hist['Low'].min())
+                    if _md.overall_high and _md.current_price:
+                        _md.percentage_change_from_high = round(
+                            ((_md.current_price - _md.overall_high) / _md.overall_high) * 100, 2
                         )
+
+                # Note: Indian promoter / FII / DII holdings come from screener.in via the
+                # agent's scraper (tools.py). yfinance only exposes a single
+                # `heldPercentInstitutions` field which is a different metric (combined
+                # institutional ownership under US reporting rules), so we intentionally
+                # do NOT fall back to it — displaying a dash is more honest than showing
+                # a misleading number. If the screener.in scrape failed upstream, the
+                # Holdings row on the Market Data tab will show "—" for those fields.
 
                 st.session_state[f'_dash_enriched_{data.symbol}'] = True
             except Exception as _e:
@@ -4034,90 +4738,161 @@ elif view_option == "📈 Data Dashboard":
 
         col1, col2 = st.columns([2, 1])
 
-        # -------- Price Trend (TradingView style) --------
+        # -------- Price Trend (TradingView-style candlestick) --------
         with col1:
-            if data.market_data.price_history:
-                st.markdown("#### Chart")
+            # ── Fetch OHLC data (yfinance first, mentor API as fallback) ──
+            # Cached per-symbol on session_state so the period-button reruns
+            # don't re-fetch; cleared when a new stock is searched.
+            _ohlc_cache_key = f"_dash_ohlc_{data.symbol}"
+            _ohlc_df = st.session_state.get(_ohlc_cache_key)
 
-                all_dates = list(data.market_data.price_history.keys())
-                all_prices = list(data.market_data.price_history.values())
+            if _ohlc_df is None:
+                import pandas as _pd
+                # Try yfinance first — it's free, reliable, and already
+                # used elsewhere in the pipeline.
+                try:
+                    import yfinance as _yf
+                    _hist = _yf.Ticker(data.symbol).history(period="2y", interval="1d")
+                    if _hist is not None and not _hist.empty:
+                        _ohlc_df = _hist[["Open", "High", "Low", "Close", "Volume"]].copy()
+                        print(f"✅ OHLC from yfinance: {len(_ohlc_df)} daily candles for {data.symbol}")
+                except Exception as _yf_err:
+                    print(f"⚠️ yfinance OHLC fetch failed: {_yf_err}")
+
+                # Fall back to the mentor API if yfinance didn't return data.
+                if _ohlc_df is None or _ohlc_df.empty:
+                    try:
+                        import os as _os
+                        _api_base = _os.getenv("API_BASE_URL")
+                        _api_token = _os.getenv("API_BEARER_TOKEN")
+                        _csrf = _os.getenv("API_CSRF_TOKEN")
+                        if _api_base and _api_token:
+                            from drawing_instruction.api_price_fetcher import APIPriceFetcher
+                            from datetime import datetime as _dt, timedelta as _td
+                            _fetcher = APIPriceFetcher(_api_base, _api_token, _csrf)
+                            _ohlc_df = _fetcher.fetch_price_data(
+                                symbol=data.symbol,
+                                timeframe="1d",
+                                from_date=(_dt.now() - _td(days=730)).strftime("%Y-%m-%d"),
+                                to_date=_dt.now().strftime("%Y-%m-%d"),
+                                market="stocks",
+                            )
+                            if _ohlc_df is not None and not _ohlc_df.empty:
+                                print(f"✅ OHLC from mentor API: {len(_ohlc_df)} candles for {data.symbol}")
+                        else:
+                            print("⚠️ Mentor API env vars missing (API_BASE_URL / API_BEARER_TOKEN)")
+                    except Exception as _api_err:
+                        print(f"⚠️ Mentor API OHLC fetch failed: {_api_err}")
+
+                if _ohlc_df is not None and not _ohlc_df.empty:
+                    st.session_state[_ohlc_cache_key] = _ohlc_df
+
+            if _ohlc_df is not None and not _ohlc_df.empty:
+                st.markdown("#### Chart")
 
                 # Period selector via session state
                 if "pt_period" not in st.session_state:
                     st.session_state.pt_period = "1Y"
 
-                period_map = {"1 day": 1, "5 days": 5, "1 month": 30, "6 months": 180, "Year to date": None, "1 year": 365, "All time": len(all_dates)}
+                _selected = st.session_state.pt_period
+                _period_days_map = {
+                    "1W": 7, "1M": 30, "3M": 90, "6M": 180,
+                    "1Y": 365, "ALL": len(_ohlc_df),
+                }
+                _days = _period_days_map.get(_selected, 365)
+                _sliced = _ohlc_df.tail(_days)
 
-                # Determine days for current selected period
-                selected = st.session_state.pt_period
-                period_days_map = {"1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365, "ALL": len(all_dates)}
-                days = period_days_map.get(selected, 365)
+                _opens = _sliced["Open"].tolist()
+                _highs = _sliced["High"].tolist()
+                _lows = _sliced["Low"].tolist()
+                _closes = _sliced["Close"].tolist()
+                _dates_idx = _sliced.index
 
-                dates = all_dates[-days:]
-                prices = all_prices[-days:]
+                # For annotations / below-chart metrics we still need a plain
+                # dates / close-prices pair compatible with the old code path.
+                all_dates = [str(d.date()) if hasattr(d, "date") else str(d) for d in _ohlc_df.index]
+                all_prices = _ohlc_df["Close"].tolist()
+                dates = all_dates[-_days:]
+                prices = all_prices[-_days:]
+                days = _days  # used by the below-chart code
 
-                current_price = prices[-1] if prices else 0
-                price_change = prices[-1] - prices[0] if len(prices) > 1 else 0
+                current_price = _closes[-1] if _closes else 0
+                price_change = _closes[-1] - _closes[0] if len(_closes) > 1 else 0
                 is_positive = price_change >= 0
-                line_color = "#089981" if is_positive else "#F23645"
-                fill_color = "rgba(8,153,129,0.12)" if is_positive else "rgba(242,54,69,0.12)"
+                up_color = "#089981"
+                down_color = "#F23645"
+                annot_color = up_color if is_positive else down_color
 
-                fig = go.Figure()
-
-                # Area fill trace
-                fig.add_trace(go.Scatter(
-                    x=dates,
-                    y=prices,
-                    mode="lines",
-                    fill="tozeroy",
-                    fillcolor=fill_color,
-                    line=dict(color=line_color, width=1.5, shape="spline"),
-                    hovertemplate="₹%{y:,.2f}<br>%{x}<extra></extra>"
-                ))
+                # ── Candlestick chart (TradingView style) ──
+                fig = go.Figure(
+                    data=[
+                        go.Candlestick(
+                            x=_dates_idx,
+                            open=_opens, high=_highs, low=_lows, close=_closes,
+                            increasing=dict(
+                                line=dict(color=up_color, width=1),
+                                fillcolor=up_color,
+                            ),
+                            decreasing=dict(
+                                line=dict(color=down_color, width=1),
+                                fillcolor=down_color,
+                            ),
+                            hoverlabel=dict(bgcolor="#1E222D", font_size=12, font_color="#D1D4DC"),
+                            name="Price",
+                            showlegend=False,
+                        )
+                    ]
+                )
 
                 fig.update_layout(
                     template="plotly_dark",
-                    height=380,
+                    height=420,
                     plot_bgcolor="rgba(0,0,0,0)",
                     paper_bgcolor="rgba(0,0,0,0)",
                     showlegend=False,
-                    margin=dict(l=0, r=50, t=10, b=10),
+                    margin=dict(l=0, r=60, t=10, b=10),
                     xaxis=dict(
                         showgrid=False,
                         showline=False,
                         zeroline=False,
+                        rangeslider=dict(visible=False),
                         tickfont=dict(color="#787B86", size=11),
-                        tickformat="%b '%y" if days > 90 else "%d %b",
+                        tickformat="%b '%y" if _days > 90 else "%d %b",
+                        # Hide weekend gaps for daily candlesticks
+                        rangebreaks=[dict(bounds=["sat", "mon"])] if _days <= 365 else [],
                     ),
                     yaxis=dict(
-                        showgrid=False,
+                        showgrid=True,
+                        gridcolor="rgba(120,123,134,0.12)",
                         showline=False,
                         zeroline=False,
                         side="right",
-                        tickprefix="₹",
+                        tickprefix="₹" if data.symbol.endswith((".NS", ".BO")) else "$",
                         tickfont=dict(color="#787B86", size=11),
                     ),
-                    hoverlabel=dict(bgcolor="#1E222D", font_size=12, font_color="#D1D4DC"),
                     hovermode="x unified",
                 )
 
-                # Current price annotation on right edge
+                # Current price tag on the right edge
                 fig.add_annotation(
-                    x=dates[-1], y=current_price,
-                    text=f"₹{current_price:,.2f}",
+                    x=_dates_idx[-1], y=current_price,
+                    text=f"{'₹' if data.symbol.endswith(('.NS', '.BO')) else '$'}{current_price:,.2f}",
                     showarrow=False,
                     xanchor="left", xshift=8,
                     font=dict(color="white", size=12),
-                    bgcolor=line_color,
+                    bgcolor=annot_color,
                     borderpad=4,
                 )
 
-                # Prev close line
-                prev_close = prices[0] if prices else 0
+                # Previous close reference line (first candle's open)
+                _prev_close = _opens[0] if _opens else 0
                 fig.add_hline(
-                    y=prev_close, line_dash="dot",
+                    y=_prev_close, line_dash="dot",
                     line_color="#787B86", line_width=0.8,
-                    annotation_text=f"Prev close  ₹{prev_close:,.2f}",
+                    annotation_text=(
+                        f"Prev open  "
+                        f"{'₹' if data.symbol.endswith(('.NS', '.BO')) else '$'}{_prev_close:,.2f}"
+                    ),
                     annotation_position="bottom right",
                     annotation_font_color="#787B86",
                     annotation_font_size=10,
@@ -4142,26 +4917,56 @@ elif view_option == "📈 Data Dashboard":
                         )
 
                 # --- Performance metrics below buttons (TradingView style) ---
-                metric_periods = {"1 day": 1, "5 days": 5, "1 month": 30, "6 months": 180, "1 year": 365, "All time": len(all_dates)}
+                # Labels and day windows match the 6 period buttons above 1-to-1
+                # so each button has its own metric directly underneath it.
+                metric_periods = [
+                    ("1W",  "1 week",   7),
+                    ("1M",  "1 month",  30),
+                    ("3M",  "3 months", 90),
+                    ("6M",  "6 months", 180),
+                    ("1Y",  "1 year",   365),
+                    ("ALL", "All time", len(all_dates)),
+                ]
                 metric_cols = st.columns(len(metric_periods))
-                for idx, (mlabel, mdays) in enumerate(metric_periods.items()):
+                for idx, (_btn, mlabel, mdays) in enumerate(metric_periods):
                     mdays = min(mdays, len(all_prices))
-                    if mdays >= 2:
-                        start_p = all_prices[-mdays]
-                        end_p = all_prices[-1]
-                        pct = ((end_p - start_p) / start_p) * 100 if start_p else 0
-                        color = "#089981" if pct >= 0 else "#F23645"
-                        with metric_cols[idx]:
+                    with metric_cols[idx]:
+                        if mdays >= 2:
+                            start_p = all_prices[-mdays]
+                            end_p = all_prices[-1]
+                            pct = ((end_p - start_p) / start_p) * 100 if start_p else 0
+                            color = "#089981" if pct >= 0 else "#F23645"
                             st.markdown(
                                 f"<div style='text-align:center;padding:4px 0'>"
-                                f"<div style='color:#787B86;font-size:12px'>{mlabel}</div>"
+                                f"<div style='color:var(--tw-muted);font-size:12px'>{mlabel}</div>"
                                 f"<div style='color:{color};font-size:14px;font-weight:600'>{pct:+.2f}%</div>"
                                 f"</div>",
                                 unsafe_allow_html=True,
                             )
+                        else:
+                            # Not enough history for this window — render an empty
+                            # placeholder so the column widths stay aligned with
+                            # the buttons above.
+                            st.markdown(
+                                f"<div style='text-align:center;padding:4px 0'>"
+                                f"<div style='color:var(--tw-muted);font-size:12px'>{mlabel}</div>"
+                                f"<div style='color:var(--tw-muted);font-size:14px;font-weight:600'>—</div>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+            else:
+                # Both yfinance and the mentor API failed to return OHLC data.
+                # Show a clear notice so the user understands why the chart is
+                # missing instead of seeing a silent empty column.
+                st.markdown("#### Chart")
+                st.info(
+                    "📉 Candlestick data unavailable for this stock. "
+                    "Both yfinance and the mentor API failed to return OHLC. "
+                    "Try again in a moment or check the terminal for fetch errors."
+                )
 
         with col2:
-            st.subheader("💰 Financial Breakdown")
+            bx_header("Financial Breakdown", "bx-dollar-circle")
             if data.financials.revenue and data.financials.net_profit:
                 # Determine currency and unit based on market
                 is_indian = data.symbol.endswith('.NS') or data.symbol.endswith('.BO')
@@ -4189,20 +4994,46 @@ elif view_option == "📈 Data Dashboard":
 
         st.markdown("---")
 
+        # ── Theme-aware CSS via Streamlit's injected custom properties.
+        # Streamlit sets these on the <body>/root element and updates them
+        # live when the user switches theme via the hamburger menu, so
+        # we don't have to branch in Python (st.get_option reads the
+        # config-file theme, not the runtime choice). Borders, dividers
+        # and muted labels use neutral rgba so they stay readable in both
+        # themes without having to know the theme at render time.
+        _tw_tokens = {
+            "__CARD_BG__":      "var(--secondary-background-color, #1a1a1a)",
+            "__CARD_BORDER__":  "rgba(128, 128, 128, 0.22)",
+            "__MUTED__":        "color-mix(in srgb, var(--text-color, #fafafa) 62%, transparent)",
+            "__TEXT__":         "var(--text-color, #fafafa)",
+            "__DIVIDER__":      "rgba(128, 128, 128, 0.18)",
+            "__TRACK__":        "rgba(128, 128, 128, 0.30)",
+            "__SHADOW__":       "0 1px 3px rgba(15, 23, 42, 0.08)",
+        }
+
+        def _tw_apply_tokens(css: str) -> str:
+            """Substitute theme-aware placeholder tokens in a CSS template."""
+            for _k, _v in _tw_tokens.items():
+                css = css.replace(_k, _v)
+            return css
+
         # ── CSS for Technical Analysis cards ──
-        st.markdown("""
+        st.markdown(_tw_apply_tokens("""
         <style>
         .ta-section-title {
-            font-size: 12px; color: #888; letter-spacing: 0.06em;
+            font-size: 12px; color: __MUTED__; letter-spacing: 0.06em;
             text-transform: uppercase; font-weight: 600;
-            border-bottom: 0.5px solid #333; padding-bottom: 8px; margin-bottom: 12px; margin-top: 24px;
+            border-bottom: 0.5px solid __DIVIDER__; padding-bottom: 8px;
+            margin-bottom: 12px; margin-top: 24px;
         }
         .ta-card {
-            background: #1a1a1a; border-radius: 8px; padding: 14px 16px;
+            background: __CARD_BG__; border: 1px solid __CARD_BORDER__;
+            border-radius: 8px; padding: 14px 16px;
             height: 100%; min-height: 90px;
+            box-shadow: __SHADOW__;
         }
-        .ta-label { font-size: 11px; color: #888; margin-bottom: 4px; }
-        .ta-value { font-size: 20px; font-weight: 500; color: #fff; margin-bottom: 4px; }
+        .ta-label { font-size: 11px; color: __MUTED__; margin-bottom: 4px; }
+        .ta-value { font-size: 20px; font-weight: 500; color: __TEXT__; margin-bottom: 4px; }
         .ta-sub { font-size: 11px; }
         .ta-badge {
             display: inline-block; border-radius: 99px; padding: 2px 8px;
@@ -4213,7 +5044,7 @@ elif view_option == "📈 Data Dashboard":
         .ta-badge-amber { background: #fef3c7; color: #92400e; }
         .ta-badge-blue { background: #e0f2fe; color: #0c4a6e; }
         .ta-range-track {
-            background: #333; border-radius: 99px; height: 4px; width: 100%;
+            background: __TRACK__; border-radius: 99px; height: 4px; width: 100%;
             margin: 8px 0 4px 0; position: relative;
         }
         .ta-range-fill {
@@ -4221,12 +5052,58 @@ elif view_option == "📈 Data Dashboard":
         }
         .ta-ma-row {
             display: flex; justify-content: space-between; align-items: center;
-            padding: 6px 0; border-bottom: 0.5px solid #2a2a2a;
+            padding: 6px 0; border-bottom: 0.5px solid __DIVIDER__;
         }
         .ta-ma-row:last-child { border-bottom: none; }
         .ta-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+
+        /* ── SWOT-style treatment for every st.container(border=True)
+           card in the main content area.
+
+           Baseline: rounded corners + an always-visible green left
+           accent bar that gives the card a clear identity (same as
+           the SWOT cards' `--accent` stripe).
+
+           On hover: background tints green, border sharpens, card
+           slides right 2px, and a soft green glow blooms — identical
+           animation to the SWOT / News cards so every section looks
+           coherent.
+
+           Every property is !important because Streamlit's emotion-css
+           generates high-specificity classes that would otherwise beat
+           a plain data-testid selector. */
+        section[data-testid="stMain"] div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius: 10px !important;
+            border-left: 3px solid rgba(116, 229, 4, 0.55) !important;
+            transition: background-color 0.25s ease,
+                        border-color 0.25s ease,
+                        border-left-color 0.25s ease,
+                        box-shadow 0.3s ease,
+                        transform 0.25s ease !important;
+        }
+        section[data-testid="stMain"] div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+            background: rgba(116, 229, 4, 0.09) !important;
+            border-color: rgba(116, 229, 4, 0.50) !important;
+            border-left-color: #74e504 !important;
+            box-shadow: 0 4px 18px rgba(116, 229, 4, 0.22) !important;
+            transform: translateX(2px) !important;
+        }
+        /* Keep the chat-area scroll container flat: we explicitly null
+           out border/shadow on height-constrained wrappers elsewhere in
+           this stylesheet, so make sure the hover rule above does not
+           re-introduce a border there. */
+        section[data-testid="stMain"] div[data-testid="stVerticalBlockBorderWrapper"]:has(> div[style*="overflow"]) {
+            border-left: none !important;
+        }
+        section[data-testid="stMain"] div[data-testid="stVerticalBlockBorderWrapper"]:has(> div[style*="overflow"]):hover {
+            background: transparent !important;
+            border-color: transparent !important;
+            border-left: none !important;
+            box-shadow: none !important;
+            transform: none !important;
+        }
         </style>
-        """, unsafe_allow_html=True)
+        """), unsafe_allow_html=True)
 
         # ── Helper values ──
         _is_indian = data.symbol.endswith('.NS') or data.symbol.endswith('.BO')
@@ -4244,183 +5121,895 @@ elif view_option == "📈 Data Dashboard":
             return f'<span class="ta-badge ta-badge-{kind}">{text}</span>'
 
         # ══════════════════════════════════════════════
-        # 1. PRICE & VALUATION
+        # Tabbed Info Panel — Snapshot / Overview / Financials / Market Data / Performance
         # ══════════════════════════════════════════════
-        st.markdown('<div class="ta-section-title">PRICE & VALUATION</div>', unsafe_allow_html=True)
+        st.markdown(_tw_apply_tokens("""
+        <style>
+        .tw-info-card {
+            background: __CARD_BG__; border: 1px solid __CARD_BORDER__;
+            border-radius: 8px; padding: 16px; height: 100%;
+            box-shadow: __SHADOW__;
+        }
+        .tw-info-icon { font-size: 18px; }
+        .tw-info-label { font-size: 11px; color: __MUTED__; letter-spacing: 0.04em;
+            text-transform: uppercase; margin-bottom: 4px; }
+        .tw-info-value { font-size: 15px; font-weight: 600; color: __TEXT__; word-break: break-word; }
+        .tw-metric-row {
+            display: flex; justify-content: space-between; padding: 8px 0;
+            border-bottom: 0.5px solid __DIVIDER__; font-size: 13px;
+        }
+        .tw-metric-row:last-child { border-bottom: none; }
+        .tw-metric-label { color: __MUTED__; }
+        .tw-metric-value { color: __TEXT__; font-weight: 600; }
+        .tw-metric-value.neg { color: #ef4444; }
+        .tw-sub-title { font-size: 13px; font-weight: 700; color: __TEXT__;
+            margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+        .tw-period-badge {
+            display: inline-block; padding: 8px 14px; border-radius: 999px;
+            font-size: 12px; font-weight: 600; margin-right: 8px; margin-bottom: 8px;
+        }
+        .tw-period-pos { background: #dcfce7; color: #166534; border: 1px solid #22c55e55; }
+        .tw-period-neg { background: #fee2e2; color: #991b1b; border: 1px solid #ef444455; }
+        .tw-period-label { display: block; color: __MUTED__; font-size: 10px;
+            letter-spacing: 0.08em; text-transform: uppercase; }
+        </style>
+        """), unsafe_allow_html=True)
 
-        pv1, pv2, pv3, pv4 = st.columns(4)
+        _snap_obj = getattr(data, "snapshot", None)
+        _parsed_snap = _parsed.get("snapshot", {}) if _parsed else {}
 
-        # Current Price
-        with pv1:
-            cp = data.market_data.current_price
-            day_chg = data.market_data.day_change
-            chg_color = "#22c55e" if day_chg and day_chg >= 0 else "#ef4444"
-            chg_text = f'<div class="ta-sub" style="color:{chg_color}">{day_chg:+.2f}% today</div>' if day_chg is not None else ""
-            st.markdown(f'''<div class="ta-card">
-                <div class="ta-label">Current Price</div>
-                <div class="ta-value">{_cur}{cp:,.2f}</div>{chg_text}
-            </div>''' if cp is not None else '<div class="ta-card"><div class="ta-label">Current Price</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+        def _snap_val(obj_field: str, parsed_key: str) -> str:
+            if _snap_obj is not None:
+                _v = getattr(_snap_obj, obj_field, None)
+                if _v and _v != "N/A":
+                    return str(_v)
+            return _parsed_snap.get(parsed_key, "") or "—"
 
-        # 52W Range
-        with pv2:
-            w52h = data.market_data.week_52_high
-            w52l = data.market_data.week_52_low
+        # ── Jump-nav bar (looks like tabs, but just scrolls to anchors) ──
+        # All 5 sections now stack vertically on the same page. The "tabs"
+        # here are anchor links that jump-scroll to the section headers
+        # below, giving users the scroll-through-everything experience
+        # they asked for while keeping the familiar tab-style navigation.
+        st.markdown(_tw_apply_tokens("""
+        <style>
+        .tw-jumpnav {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2px;
+            border-bottom: 1px solid __DIVIDER__;
+            margin-bottom: 18px;
+            padding-bottom: 2px;
+        }
+        .tw-jumpnav a {
+            padding: 10px 16px;
+            color: inherit;       /* use page text color */
+            opacity: 0.70;        /* muted, but readable on any bg */
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 600;
+            border-bottom: 2px solid transparent;
+            transition: color 0.15s, border-color 0.15s, opacity 0.15s;
+        }
+        .tw-jumpnav a:hover,
+        .tw-jumpnav a:focus,
+        .tw-jumpnav a:active {
+            color: #74e504;
+            opacity: 1;
+            border-bottom-color: #74e504;
+        }
+        .tw-section-anchor {
+            position: relative;
+            top: -20px;
+            visibility: hidden;
+        }
+        .tw-section-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: __TEXT__;
+            margin: 32px 0 14px 0;
+            padding-bottom: 8px;
+            border-bottom: 1px solid __DIVIDER__;
+        }
+        .tw-section-title:first-of-type { margin-top: 8px; }
+        .tw-jumpnav a .bx,
+        .tw-section-title .bx {
+            color: #74e504;
+            margin-right: 6px;
+            vertical-align: -2px;
+        }
+        </style>
+        <div class="tw-jumpnav">
+            <a href="#sec-snap"><i class='bx bxs-building-house'></i>Snapshot</a>
+            <a href="#sec-over"><i class='bx bxs-file-doc'></i>Overview</a>
+            <a href="#sec-fin"><i class='bx bxs-dollar-circle'></i>Financials</a>
+            <a href="#sec-mkt"><i class='bx bx-line-chart'></i>Market Data</a>
+            <a href="#sec-perf"><i class='bx bx-bar-chart-alt-2'></i>Performance</a>
+        </div>
+        """), unsafe_allow_html=True)
+
+        # ── Section 1: Company Snapshot ───────────────────────────
+        # Invisible anchor so the jump-nav bar above can still scroll to
+        # this section. The visible heading below is a native Streamlit
+        # <h3> (via bx_header) so Streamlit themes it automatically in
+        # both light and dark modes.
+        st.markdown('<div id="sec-snap" style="position:relative;top:-20px;height:0;"></div>',
+                    unsafe_allow_html=True)
+        bx_header("Snapshot", "bxs-building-house", level=3)
+
+        _snap_fields = [
+            ("🏢", "Company Name", "company_name", "companyName"),
+            ("📈", "Ticker Symbol", "ticker_symbol", "tickerSymbol"),
+            ("🏦", "Exchange", "exchange", "exchange"),
+            ("🏭", "Sector", "sector", "sector"),
+            ("🔧", "Industry", "industry", "industry"),
+            ("📍", "Headquarters", "headquarters", "headquarters"),
+            ("📅", "Founded", "founded_year", "founded"),
+            ("👤", "CEO", "ceo", "ceo"),
+            ("👥", "Employees", "employees", "employees"),
+            ("🌐", "Website", "website", "website"),
+        ]
+
+        # Same rounded-card + hover-animation treatment as the SWOT
+        # quadrants: theme-neutral gray background, green left-accent bar,
+        # on hover a green tint + slide-right + soft glow. All cards
+        # share the app's accent green since Snapshot fields are neutral
+        # informational items (unlike SWOT which has semantic colours
+        # per quadrant).
+        st.markdown("""
+        <style>
+        .tw-snap-card {
+            --accent: #74e504;
+            background: rgba(128, 128, 128, 0.06);
+            border: 1px solid rgba(128, 128, 128, 0.22);
+            border-left: 3px solid var(--accent);
+            border-radius: 8px;
+            padding: 14px 18px;
+            margin-bottom: 12px;
+            min-height: 78px;
+            transition: background 0.2s ease,
+                        border-color 0.2s ease,
+                        transform 0.2s ease,
+                        box-shadow 0.2s ease;
+        }
+        .tw-snap-card:hover {
+            background: color-mix(in srgb, var(--accent) 10%, transparent);
+            border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+            border-left-color: var(--accent);
+            transform: translateX(2px);
+            box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 18%, transparent);
+        }
+        /* Modifier: green accent on all four sides (not just the left).
+           Used by the Performance period-return cards per client request. */
+        .tw-snap-card--ring {
+            border: 1px solid var(--accent);
+            border-left: 1px solid var(--accent);
+        }
+        .tw-snap-card--ring:hover {
+            border-color: var(--accent);
+            border-left-color: var(--accent);
+        }
+        .tw-snap-label {
+            font-size: 11px;
+            opacity: 0.65;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+        .tw-snap-value {
+            font-size: 15px;
+            font-weight: 600;
+            color: inherit;
+            word-break: break-word;
+            line-height: 1.35;
+        }
+        .tw-snap-value a {
+            color: #74e504;
+            text-decoration: none;
+            transition: text-decoration 0.15s ease;
+        }
+        .tw-snap-value a:hover { text-decoration: underline; }
+        </style>
+        """, unsafe_allow_html=True)
+
+        import html as _snap_html_mod
+        for row_start in range(0, len(_snap_fields), 3):
+            _cols = st.columns(3)
+            for _col, (icon, label, f_obj, f_parsed) in zip(
+                _cols, _snap_fields[row_start : row_start + 3]
+            ):
+                _val = _snap_val(f_obj, f_parsed)
+                # Build the value HTML depending on the field type.
+                if label == "Website" and _val not in ("—", ""):
+                    _esc = _snap_html_mod.escape(_val)
+                    _val_html = (
+                        f"<a href='{_esc}' target='_blank' rel='noopener'>"
+                        f"{_esc}</a>"
+                    )
+                elif label == "Employees" and _val not in ("—", ""):
+                    try:
+                        _val_html = f"{int(float(str(_val).replace(',', ''))):,}"
+                    except (ValueError, TypeError):
+                        _val_html = _snap_html_mod.escape(_val)
+                else:
+                    _val_html = _snap_html_mod.escape(_val)
+                with _col:
+                    st.markdown(
+                        f"<div class='tw-snap-card'>"
+                        f"<div class='tw-snap-label'>{icon} {label.upper()}</div>"
+                        f"<div class='tw-snap-value'>{_val_html}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+        # ── Tab 2: Business Overview ──────────────────────────────
+        # ── Section 2: Business Overview ──────────────────────────
+        st.markdown('<div id="sec-over" style="position:relative;top:-20px;height:0;"></div>',
+                    unsafe_allow_html=True)
+        bx_header("Overview", "bxs-file-doc", level=3)
+        _biz_obj = getattr(data, "business_overview", None)
+        _biz_text = ""
+        if _biz_obj is not None:
+            _biz_text = getattr(_biz_obj, "description", "") or ""
+        if not _biz_text and _parsed.get("businessOverview"):
+            _biz_text = _parsed["businessOverview"]
+
+        if _biz_text:
+            import html as _ov_html
+            _safe_name = _ov_html.escape(data.name)
+            _safe_text = _ov_html.escape(_biz_text)
+            # Render Overview as a custom HTML card using the same
+            # .tw-snap-card class (rounded corners, green left accent,
+            # SWOT-style hover animation). Full description is shown
+            # directly — no expander, so users see it at a glance.
+            st.markdown(
+                f"<div class='tw-snap-card' style='padding:18px 24px;"
+                f"min-height:auto;margin-bottom:14px;'>"
+                f"<div style='font-size:1.05rem;font-weight:700;color:inherit;"
+                f"margin-bottom:10px;'>{_safe_name}</div>"
+                f"<div style='color:inherit;opacity:0.82;line-height:1.6;"
+                f"font-size:14px;'>{_safe_text}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("Business overview not available for this stock.")
+
+        _screener_summary = (_parsed.get("screenerSummary") or "").strip()
+        if _screener_summary:
+            with st.container():
+                bx_header("Screener.in Quarterly Summary", "bx-bar-chart-square", level=4)
+                with st.expander("View summary", expanded=False):
+                    st.markdown(_screener_summary)
+
+        # ── Tab 3: Financial Metrics ──────────────────────────────
+        # ── Section 3: Financials ─────────────────────────────────
+        st.markdown('<div id="sec-fin" style="position:relative;top:-20px;height:0;"></div>',
+                    unsafe_allow_html=True)
+        bx_header("Financials", "bxs-dollar-circle", level=3)
+
+        # Helper: render a titled key/value card as custom HTML using the
+        # same .tw-snap-card class as the Snapshot / SWOT cards — so the
+        # Financials sub-cards get the same rounded corners, green left
+        # accent bar, and slide-right hover animation. Rows are flex
+        # layouts with the label on the left (muted) and value on the
+        # right (bold, red if negative).
+        import html as _fin_html
+        def _kv_card(title: str, rows: list[tuple[str, str, bool]]) -> None:
+            _rows_html = ""
+            for _label, _value, _neg in rows:
+                _vv = _value if _value not in (None, "", "N/A") else "—"
+                _val_style = "color:#dc2626;" if _neg else "color:inherit;"
+                _rows_html += (
+                    f"<div style='display:flex;justify-content:space-between;"
+                    f"align-items:center;padding:7px 0;"
+                    f"border-bottom:0.5px solid rgba(128,128,128,0.18);"
+                    f"font-size:13.5px;'>"
+                    f"<span style='color:inherit;opacity:0.7'>"
+                    f"{_fin_html.escape(_label)}</span>"
+                    f"<span style='{_val_style}font-weight:700;"
+                    f"text-align:right'>{_fin_html.escape(_vv)}</span>"
+                    f"</div>"
+                )
+            st.markdown(
+                f"<div class='tw-snap-card' style='padding:16px 20px;"
+                f"min-height:auto;margin-bottom:14px;'>"
+                f"<div style='font-weight:700;font-size:14px;color:inherit;"
+                f"margin-bottom:8px;'>{title}</div>"
+                f"{_rows_html}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        def _fmt_ccy(v):
+            return _fmt_large(v) if v is not None else "—"
+
+        _fin = data.financials
+        _rev = getattr(_fin, "revenue", None)
+        _np = getattr(_fin, "net_profit", None)
+        _ebitda = getattr(_fin, "ebitda", None)
+        _eps = getattr(_fin, "eps", None)
+        _ta = getattr(_fin, "total_assets", None)
+        _tl = getattr(_fin, "total_liabilities", None)
+        _td = getattr(_fin, "total_debt", None)
+        _cash = getattr(_fin, "cash_balance", None)
+        _de = getattr(_fin, "debt_to_equity", None)
+        _ocf = getattr(_fin, "operating_cash_flow", None)
+        _fcf = getattr(_fin, "free_cash_flow", None)
+        _pe = getattr(_fin, "pe_ratio", None)
+        _pb = getattr(_fin, "pb_ratio", None)
+        _mcap_f = getattr(data.market_data, "market_cap", None)
+        _ev = getattr(_fin, "enterprise_value", None)
+        _evebitda = getattr(_fin, "ev_ebitda", None)
+        _pm_f = getattr(_fin, "profit_margin", None)
+        _om_f = getattr(_fin, "operating_margin", None)
+        _gm_f = getattr(_fin, "gross_margin", None)
+
+        _sector = getattr(data.snapshot, "sector", None) or getattr(data.market_data, "sector", None)
+        _industry = getattr(data.snapshot, "industry", None)
+        _is_bank = is_banking_sector(_sector, _industry)
+        _is_finco = is_financial_sector(_sector, _industry)
+
+        def _pct(v):
+            if v is None:
+                return "—"
+            _mul = 100 if abs(v) < 1 else 1
+            return f"{v * _mul:.2f}%"
+
+        _row_a, _row_b = st.columns(2)
+        with _row_a:
+            _income_rows = [
+                ("Revenue" if not _is_bank else "Interest Income", _fmt_ccy(_rev), False),
+                ("Net Profit", _fmt_ccy(_np), _np is not None and _np < 0),
+            ]
+            if not _is_bank:
+                _income_rows.append(("EBITDA", _fmt_ccy(_ebitda), False))
+            _income_rows.append(
+                ("EPS (TTM)", f"{_cur}{_eps:,.2f}" if _eps is not None else "—", False)
+            )
+            _kv_card("📊 Income Statement", _income_rows)
+        with _row_b:
+            _bs_rows = [
+                ("Total Assets", _fmt_ccy(_ta), False),
+                ("Total Liabilities", _fmt_ccy(_tl), False),
+                (
+                    "Total Borrowings" if _is_bank else "Total Debt",
+                    _fmt_ccy(_td),
+                    False,
+                ),
+                ("Cash Balance", _fmt_ccy(_cash), False),
+            ]
+            if not _is_bank:
+                _bs_rows.append(
+                    ("Debt / Equity", f"{_de:.2f}" if _de is not None else "—", False)
+                )
+            _kv_card("🏦 Balance Sheet", _bs_rows)
+
+        _row_c, _row_d = st.columns(2)
+        with _row_c:
+            if _is_bank:
+                # FCF is not meaningful for banks — show OCF only, and a note.
+                _cf_rows = [("Operating CF", _fmt_ccy(_ocf), False)]
+                _kv_card("💸 Cash Flow", _cf_rows)
+                st.caption(
+                    "ℹ️ Free cash flow is not a standard metric for banks — "
+                    "cash-generation is captured via Net Interest Income and "
+                    "is shown in the Banking Metrics section."
+                )
+            else:
+                _kv_card(
+                    "💸 Cash Flow",
+                    [
+                        ("Operating CF", _fmt_ccy(_ocf), False),
+                        ("Free Cash Flow", _fmt_ccy(_fcf), _fcf is not None and _fcf < 0),
+                    ],
+                )
+        with _row_d:
+            _val_rows = [
+                ("P/E Ratio", f"{_pe:.2f}" if _pe is not None else "—", False),
+                ("P/B Ratio", f"{_pb:.2f}" if _pb is not None else "—", False),
+                ("Market Cap", _fmt_ccy(_mcap_f), False),
+            ]
+            if not _is_bank:
+                _val_rows.append(("Enterprise Value", _fmt_ccy(_ev), False))
+                _val_rows.append(
+                    ("EV / EBITDA", f"{_evebitda:.2f}" if _evebitda is not None else "—", False)
+                )
+            _kv_card("📐 Valuation", _val_rows)
+
+        if _is_bank:
+            # For banks, show Profit & Operating Margin only. Gross Margin is
+            # not meaningful (banks don't have COGS in the industrial sense).
+            _kv_card(
+                "📈 Margins",
+                [
+                    ("Profit Margin", _pct(_pm_f), _pm_f is not None and _pm_f < 0),
+                    ("Operating Margin", _pct(_om_f), _om_f is not None and _om_f < 0),
+                ],
+            )
+        else:
+            _kv_card(
+                "📈 Margins",
+                [
+                    ("Profit Margin", _pct(_pm_f), _pm_f is not None and _pm_f < 0),
+                    ("Operating Margin", _pct(_om_f), _om_f is not None and _om_f < 0),
+                    ("Gross Margin", _pct(_gm_f), _gm_f is not None and _gm_f < 0),
+                ],
+            )
+
+        # ── Banking Metrics section (banks only) ──
+        # NIM / NPA / CASA / CAR / ROA / C-D / PCR / Cost-to-Income — the
+        # ratios that actually matter for a bank's health. Rendered across
+        # three paired cards (Profitability, Asset Quality, Funding & Capital).
+        # Shown as "—" where screener.in didn't expose the field, so users see
+        # the gap rather than getting a silently truncated section.
+        _bm = getattr(data, "banking_metrics", None)
+        if _is_bank and _bm is not None:
+            st.markdown("")
+            bx_header("Banking Metrics", "bx-landmark", level=3)
+
+            def _pct_or_dash(v, suffix: str = "%"):
+                if v is None:
+                    return "—"
+                # screener.in exports banking ratios as plain numbers already
+                # in percent form (e.g. 3.45 means 3.45%). Don't rescale.
+                return f"{v:.2f}{suffix}"
+
+            def _bm_neg_if(v, threshold: float) -> bool:
+                """NPA/cost-to-income above threshold is flagged red."""
+                return v is not None and v >= threshold
+
+            _bm_a, _bm_b = st.columns(2)
+            with _bm_a:
+                _kv_card(
+                    "📈 Profitability",
+                    [
+                        ("Net Interest Margin", _pct_or_dash(_bm.net_interest_margin), False),
+                        ("Return on Assets", _pct_or_dash(_bm.return_on_assets), False),
+                        ("Return on Equity", _pct_or_dash(_bm.return_on_equity), False),
+                        (
+                            "Cost-to-Income",
+                            _pct_or_dash(_bm.cost_to_income),
+                            _bm_neg_if(_bm.cost_to_income, 60),
+                        ),
+                    ],
+                )
+            with _bm_b:
+                _kv_card(
+                    "🩺 Asset Quality",
+                    [
+                        (
+                            "Gross NPA",
+                            _pct_or_dash(_bm.gross_npa),
+                            _bm_neg_if(_bm.gross_npa, 3),
+                        ),
+                        (
+                            "Net NPA",
+                            _pct_or_dash(_bm.net_npa),
+                            _bm_neg_if(_bm.net_npa, 1),
+                        ),
+                        ("Provision Coverage", _pct_or_dash(_bm.provision_coverage), False),
+                    ],
+                )
+
+            _kv_card(
+                "💰 Funding & Capital",
+                [
+                    ("CASA Ratio", _pct_or_dash(_bm.casa_ratio), False),
+                    ("Capital Adequacy (CAR)", _pct_or_dash(_bm.capital_adequacy), False),
+                    ("Credit-Deposit Ratio", _pct_or_dash(_bm.credit_deposit), False),
+                ],
+            )
+
+            # Caption: explains what's missing vs. what's N/A.
+            _any_present = any(
+                getattr(_bm, _f) is not None
+                for _f in (
+                    "net_interest_margin", "return_on_assets", "return_on_equity",
+                    "cost_to_income", "gross_npa", "net_npa", "provision_coverage",
+                    "casa_ratio", "capital_adequacy", "credit_deposit",
+                )
+            )
+            if not _any_present:
+                st.caption(
+                    "ℹ️ Banking ratios not available from data source — "
+                    "screener.in may not expose these for this bank yet."
+                )
+
+        # ── Tab 4: Market Data ────────────────────────────────────
+        # ── Section 4: Market Data ────────────────────────────────
+        st.markdown('<div id="sec-mkt" style="position:relative;top:-20px;height:0;"></div>',
+                    unsafe_allow_html=True)
+        bx_header("Market Data", "bx-line-chart", level=3)
+
+        cp = data.market_data.current_price
+        day_chg = data.market_data.day_change
+        w52h = data.market_data.week_52_high
+        w52l = data.market_data.week_52_low
+        mcap = data.market_data.market_cap
+        vol = getattr(data.market_data, "volume", None)
+        avg_vol = data.market_data.avg_volume
+        beta = getattr(data.market_data, "beta", None)
+        dy = getattr(data.financials, "dividend_yield", None)
+
+        def _fmt_vol(v):
+            if v is None:
+                return "—"
+            if _is_indian:
+                if v >= 1e7:
+                    return f"{v / 1e7:.2f} Cr"
+                if v >= 1e5:
+                    return f"{v / 1e5:.2f} L"
+                return f"{v:,.0f}"
+            if v >= 1e6:
+                return f"{v / 1e6:.2f}M"
+            return f"{v:,.0f}"
+
+        # Helper: render a single metric card as custom HTML using the
+        # same .tw-snap-card class as the Snapshot / Overview / Financials
+        # cards — so each Market Data card gets the rounded corners, green
+        # left accent bar, and SWOT-style slide-right hover animation.
+        # sub_color: "green" | "red" | None (default muted caption).
+        import html as _mkt_html
+        def _metric_card(label: str, value: str, sub: str | None = None, sub_color: str | None = None):
+            _safe_label = _mkt_html.escape(label)
+            _safe_value = _mkt_html.escape(value)
+            if sub:
+                if sub_color == "green":
+                    _sub_style = "color:#16a34a;font-weight:600;"
+                elif sub_color == "red":
+                    _sub_style = "color:#dc2626;font-weight:600;"
+                else:
+                    _sub_style = "color:inherit;opacity:0.65;"
+                _sub_html = (
+                    f"<div style='{_sub_style}font-size:12px;"
+                    f"margin-top:4px;'>{_mkt_html.escape(sub)}</div>"
+                )
+            else:
+                _sub_html = ""
+            st.markdown(
+                f"<div class='tw-snap-card' style='padding:14px 18px;"
+                f"min-height:92px;margin-bottom:12px;'>"
+                f"<div style='font-size:11px;opacity:0.65;"
+                f"letter-spacing:0.04em;text-transform:uppercase;"
+                f"font-weight:500;margin-bottom:6px;'>{_safe_label}</div>"
+                f"<div style='font-size:1.15rem;font-weight:700;"
+                f"color:inherit;line-height:1.2;'>{_safe_value}</div>"
+                f"{_sub_html}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        _m_row1 = st.columns(4)
+        with _m_row1[0]:
+            if cp is not None:
+                _sub = f"{day_chg:+.2f}% today" if day_chg is not None else None
+                _sub_c = None
+                if day_chg is not None:
+                    _sub_c = "green" if day_chg >= 0 else "red"
+                _metric_card("Current Price", f"{_cur}{cp:,.2f}", _sub, _sub_c)
+            else:
+                _metric_card("Current Price", "—")
+        with _m_row1[1]:
             if w52h and w52l and cp:
-                range_pct = ((cp - w52l) / (w52h - w52l)) * 100 if w52h != w52l else 50
-                range_pct = max(0, min(100, range_pct))
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">52W Range</div>
-                    <div class="ta-value" style="font-size:16px">{_cur}{w52l:,.0f} – {_cur}{w52h:,.0f}</div>
-                    <div class="ta-range-track"><div class="ta-range-fill" style="width:{range_pct}%;background:#2962FF;"></div></div>
-                    <div class="ta-sub" style="color:#888">at {range_pct:.0f}% of range</div>
-                </div>''', unsafe_allow_html=True)
+                _r = max(0, min(100, ((cp - w52l) / (w52h - w52l)) * 100 if w52h != w52l else 50))
+                # 52W Range card: custom HTML with an inline progress bar
+                # so the whole card lives in one .tw-snap-card div (same
+                # hover animation as the other metric cards).
+                st.markdown(
+                    f"<div class='tw-snap-card' style='padding:14px 18px;"
+                    f"min-height:92px;margin-bottom:12px;'>"
+                    f"<div style='font-size:11px;opacity:0.65;"
+                    f"letter-spacing:0.04em;text-transform:uppercase;"
+                    f"font-weight:500;margin-bottom:6px;'>52W RANGE</div>"
+                    f"<div style='font-size:0.95rem;font-weight:700;"
+                    f"color:inherit;line-height:1.2;margin-bottom:8px;'>"
+                    f"{_cur}{w52l:,.0f} – {_cur}{w52h:,.0f}</div>"
+                    f"<div style='background:rgba(128,128,128,0.25);"
+                    f"border-radius:99px;height:4px;width:100%;"
+                    f"position:relative;margin-bottom:6px;'>"
+                    f"<div style='background:#2962FF;border-radius:99px;"
+                    f"height:4px;width:{_r:.1f}%;position:absolute;"
+                    f"top:0;left:0;'></div></div>"
+                    f"<div style='font-size:11px;color:inherit;opacity:0.65;'>"
+                    f"at {_r:.0f}% of range</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
             else:
-                st.markdown('<div class="ta-card"><div class="ta-label">52W Range</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+                _metric_card("52W Range", "—")
+        with _m_row1[2]:
+            _metric_card("Market Cap", _fmt_large(mcap) if mcap else "—")
+        with _m_row1[3]:
+            _metric_card("Volume", _fmt_vol(vol))
 
-        # Market Cap
-        with pv3:
-            mcap = data.market_data.market_cap
-            if mcap:
-                if _is_indian:
-                    cap_label = "Large Cap" if mcap >= 2e11 else ("Mid Cap" if mcap >= 5e10 else "Small Cap")
-                else:
-                    cap_label = "Large Cap" if mcap >= 1e10 else ("Mid Cap" if mcap >= 2e9 else "Small Cap")
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">Market Cap</div>
-                    <div class="ta-value">{_fmt_large(mcap)}</div>
-                    <div class="ta-sub" style="color:#888">{cap_label}</div>
-                </div>''', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="ta-card"><div class="ta-label">Market Cap</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
-
-        # Avg Volume (10D)
-        with pv4:
-            avg_vol = data.market_data.avg_volume
-            if avg_vol:
-                if avg_vol >= 1e7:
-                    vol_str = f"{avg_vol/1e7:.2f} Cr"
-                elif avg_vol >= 1e5:
-                    vol_str = f"{avg_vol/1e5:.2f} L"
-                else:
-                    vol_str = f"{avg_vol:,.0f}"
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">Avg Volume (10D)</div>
-                    <div class="ta-value">{vol_str}</div>
-                </div>''', unsafe_allow_html=True)
-            else:
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">Avg Volume (10D)</div>
-                    <div class="ta-value">—</div>
-                </div>''', unsafe_allow_html=True)
-
-        # ══════════════════════════════════════════════
-        # 2. FUNDAMENTALS
-        # ══════════════════════════════════════════════
-        st.markdown('<div class="ta-section-title">FUNDAMENTALS</div>', unsafe_allow_html=True)
-
-        f1, f2, f3, f4 = st.columns(4)
-
-        # P/E Ratio
-        with f1:
-            pe = data.financials.pe_ratio
-            if pe:
-                pe_badge = _badge("Moderate", "amber") if 15 <= pe <= 30 else (_badge("Low", "green") if pe < 15 else _badge("High", "red"))
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">P/E Ratio</div>
-                    <div class="ta-value">{pe:.2f}</div>{pe_badge}
-                </div>''', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="ta-card"><div class="ta-label">P/E Ratio</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
-
-        # EPS (TTM)
-        with f2:
-            eps = getattr(data.financials, "eps", None)
-            st.markdown(f'''<div class="ta-card">
-                <div class="ta-label">EPS (TTM)</div>
-                <div class="ta-value">{_cur}{eps:,.2f}</div>
-                <div class="ta-sub" style="color:#888">Earnings/share</div>
-            </div>''' if eps else '<div class="ta-card"><div class="ta-label">EPS (TTM)</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
-
-        # Profit Margin
-        with f3:
-            pm = data.financials.profit_margin
-            if pm is not None:
-                pm_pct = pm * 100
-                pm_badge = _badge("Healthy", "green") if pm_pct > 10 else (_badge("Low", "red") if pm_pct < 5 else _badge("Moderate", "amber"))
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">Profit Margin</div>
-                    <div class="ta-value">{pm_pct:.2f}%</div>{pm_badge}
-                </div>''', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="ta-card"><div class="ta-label">Profit Margin</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
-
-        # Debt / Equity
-        with f4:
-            de = getattr(data.financials, "debt_to_equity", None)
-            if de is not None:
-                de_badge = _badge("Low", "green") if de < 0.5 else (_badge("Moderate", "amber") if de < 1.5 else _badge("High", "red"))
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">Debt / Equity</div>
-                    <div class="ta-value">{de:.2f}</div>{de_badge}
-                </div>''', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="ta-card"><div class="ta-label">Debt / Equity</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
-
-        # ══════════════════════════════════════════════
-        # 3. GROWTH & PROFITABILITY
-        # ══════════════════════════════════════════════
-        st.markdown('<div class="ta-section-title">GROWTH & PROFITABILITY</div>', unsafe_allow_html=True)
-
-        g1, g2, g3, g4 = st.columns(4)
-
-        # Revenue (TTM)
-        with g1:
-            rev = data.financials.revenue
-            rev_yoy = ""
-            st.markdown(f'''<div class="ta-card">
-                <div class="ta-label">Revenue (TTM)</div>
-                <div class="ta-value">{_fmt_large(rev)}</div>
-            </div>''', unsafe_allow_html=True)
-
-        # EBITDA
-        with g2:
-            ebitda = getattr(data.financials, "ebitda", None)
-            ebitda_margin = ""
-            if ebitda and rev:
-                ebitda_margin = f'<div class="ta-sub" style="color:#888">Margin: ~{(ebitda/rev)*100:.0f}%</div>'
-            st.markdown(f'''<div class="ta-card">
-                <div class="ta-label">EBITDA</div>
-                <div class="ta-value">{_fmt_large(ebitda)}</div>{ebitda_margin}
-            </div>''', unsafe_allow_html=True)
-
-        # ROE
-        with g3:
-            roe = getattr(data.financials, "roe", None)
-            if roe is not None:
-                roe_pct = roe * 100 if abs(roe) < 1 else roe
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">ROE</div>
-                    <div class="ta-value">{roe_pct:.1f}%</div>
-                </div>''', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="ta-card"><div class="ta-label">ROE</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
-
-        # Dividend Yield
-        with g4:
-            dy = getattr(data.financials, "dividend_yield", None)
+        _m_row2 = st.columns(4)
+        with _m_row2[0]:
+            _metric_card("Avg Volume (10D)", _fmt_vol(avg_vol))
+        with _m_row2[1]:
+            _metric_card("Beta", f"{beta:.2f}" if beta is not None else "—")
+        with _m_row2[2]:
+            # Dividend yield is ambiguous: screener.in stores a fraction
+            # (0.0051 for 0.51%), yfinance sometimes returns a raw percent
+            # for Indian stocks (0.52 for 0.52%). Split at 0.5 — below that
+            # must be a fraction (scale x100), at or above is already a
+            # percentage. 0.5 is safe: Indian stocks very rarely exceed 10%
+            # yield, and no realistic stock has a raw-percent yield below
+            # 0.5 that would be misinterpreted as 50%.
             if dy is not None:
-                dy_pct = dy * 100 if abs(dy) < 1 else dy
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">Dividend Yield</div>
-                    <div class="ta-value">{dy_pct:.2f}%</div>
-                </div>''', unsafe_allow_html=True)
+                _dy = dy * 100 if abs(dy) < 0.5 else dy
+                _metric_card("Dividend Yield", f"{_dy:.2f}%")
             else:
-                st.markdown('<div class="ta-card"><div class="ta-label">Dividend Yield</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+                _metric_card("Dividend Yield", "—")
+        with _m_row2[3]:
+            _ev = getattr(data.financials, "enterprise_value", None)
+            _metric_card("Enterprise Value", _fmt_large(_ev) if _ev is not None else "—")
+
+        # ── Holdings sub-row: Promoter / FII / DII ──
+            def _fmt_holding(v):
+                """Holdings may be stored as fraction (0.7177) or percentage (71.77)."""
+                if v is None:
+                    return None
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    return None
+                return f * 100 if abs(f) < 1 else f
+
+            def _parse_holding_from_text(label: str):
+                """Recover a holding percentage from the cached agent response text.
+                Used as a fallback when company_data doesn't have structured
+                holdings (e.g. cached analyses that predate the new builder)."""
+                import re as _re
+                _txt = st.session_state.get("_dash_last_raw_response") or ""
+                if not _txt:
+                    # Also look at the last message in chat messages (legacy path)
+                    _msgs = st.session_state.get("messages") or []
+                    for _msg in reversed(_msgs):
+                        if _msg.get("role") == "assistant":
+                            _txt = _msg.get("content", "")
+                            break
+                if not _txt:
+                    return None
+                _m = _re.search(rf"\*?\*?{label}:?\*?\*?\s*([\d.]+)\s*%", _txt, _re.IGNORECASE)
+                if not _m:
+                    return None
+                try:
+                    return float(_m.group(1))
+                except ValueError:
+                    return None
+
+            _promoter = (
+                _fmt_holding(getattr(data.market_data, "promoter_holding", None))
+                or _parse_holding_from_text("Promoter Holding")
+            )
+            _fii = (
+                _fmt_holding(getattr(data.market_data, "fii_holding", None))
+                or _parse_holding_from_text("FII Holding")
+            )
+            _dii = (
+                _fmt_holding(getattr(data.market_data, "dii_holding", None))
+                or _parse_holding_from_text("DII Holding")
+            )
+
+        st.markdown("")
+        st.markdown("**Holdings**")
+        _m_row3 = st.columns(3)
+        for _col, _label, _val, _icon in zip(
+            _m_row3,
+            ["Promoter Holding", "FII Holding", "DII Holding"],
+            [_promoter, _fii, _dii],
+            ["🏛️", "🌐", "🏦"],
+        ):
+            with _col:
+                _metric_card(
+                    f"{_icon} {_label}",
+                    f"{_val:.2f}%" if _val is not None else "—",
+                )
+
+        # ── Holdings donut chart ──
+        # Visualises Promoter / FII / DII / Public split so the reader can
+        # eyeball the ownership structure without mentally summing the cards.
+        # "Public" is derived as the residual (100 - known categories), floored
+        # at 0 — guards against rounding drift when screener.in reports the
+        # categories from independent percentages.
+        _hold_items = [
+            ("Promoter", _promoter, "#6366F1"),
+            ("FII",      _fii,      "#22C55E"),
+            ("DII",      _dii,      "#F59E0B"),
+        ]
+        _hold_items = [(lbl, v, c) for (lbl, v, c) in _hold_items if v is not None]
+        if _hold_items:
+            _known_sum = sum(v for (_, v, _) in _hold_items)
+            _public_v = max(0.0, 100.0 - _known_sum)
+            # Only add Public slice if there's a meaningful remainder — prevents
+            # a 0.01% sliver from appearing when categories already sum to ~100.
+            if _public_v >= 1.0:
+                _hold_items.append(("Public", _public_v, "#94A3B8"))
+
+            import plotly.graph_objects as _pgo
+            _hold_fig = _pgo.Figure(
+                data=[
+                    _pgo.Pie(
+                        labels=[lbl for (lbl, _, _) in _hold_items],
+                        values=[v for (_, v, _) in _hold_items],
+                        hole=0.62,
+                        marker=dict(
+                            colors=[c for (_, _, c) in _hold_items],
+                            line=dict(color="rgba(0,0,0,0)", width=0),
+                        ),
+                        textinfo="label+percent",
+                        textposition="outside",
+                        textfont=dict(size=11, color="#cbd5e1"),
+                        hovertemplate="<b>%{label}</b>: %{value:.2f}%<extra></extra>",
+                        sort=False,
+                        direction="clockwise",
+                    )
+                ]
+            )
+            _hold_fig.update_layout(
+                template="plotly_dark",
+                height=260,
+                margin=dict(l=10, r=10, t=10, b=10),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                showlegend=False,
+                annotations=[
+                    dict(
+                        text="Ownership",
+                        x=0.5, y=0.5,
+                        font=dict(size=12, color="#94a3b8"),
+                        showarrow=False,
+                    )
+                ],
+            )
+            st.plotly_chart(_hold_fig, width='stretch')
+
+        # ── Tab 5: Price Performance ──────────────────────────────
+        # ── Section 5: Performance ────────────────────────────────
+        st.markdown('<div id="sec-perf" style="position:relative;top:-20px;height:0;"></div>',
+                    unsafe_allow_html=True)
+        bx_header("Performance", "bx-bar-chart-alt-2", level=3)
+
+        _periods = (_parsed.get("pricePerformance") or {}).get("periods", [])
+        # Build from company_data if parser output missing
+        if not _periods:
+            _mapping = [
+                ("1D", getattr(data.market_data, "day_change", None)),
+                ("1W", getattr(data.market_data, "week_change", None)),
+                ("1M", getattr(data.market_data, "month_change", None)),
+                ("6M", getattr(data.market_data, "month_6_change", None)),
+                ("1Y", getattr(data.market_data, "year_change", None)),
+                ("5Y CAGR", getattr(data.market_data, "year_5_cagr", None)),
+            ]
+            for _lbl, _v in _mapping:
+                if _v is not None:
+                    _periods.append(
+                        {
+                            "label": _lbl,
+                            "value": f"{_v:+.2f}%",
+                            "isPositive": _v >= 0,
+                        }
+                    )
+
+        if _periods:
+            # Render period returns as custom HTML cards using the same
+            # .tw-snap-card class as the Snapshot / Overview / Financials /
+            # Market Data cards — rounded corners, green left accent bar,
+            # and SWOT-style slide-right hover animation. Positive values
+            # are green, negatives are red, using fixed hex colours that
+            # read correctly in both light and dark themes.
+            import html as _perf_html
+            _pcols = st.columns(len(_periods))
+            for _c, _p in zip(_pcols, _periods):
+                _is_pos = _p.get("isPositive")
+                _val_color = "#16a34a" if _is_pos else "#dc2626"
+                _label = _perf_html.escape(str(_p.get("label", "")))
+                _value = _perf_html.escape(str(_p.get("value", "—")))
+                with _c:
+                    st.markdown(
+                        f"<div class='tw-snap-card tw-snap-card--ring' "
+                        f"style='padding:14px 16px;"
+                        f"min-height:82px;margin-bottom:12px;text-align:center;'>"
+                        f"<div style='font-size:11px;opacity:0.65;"
+                        f"letter-spacing:0.04em;text-transform:uppercase;"
+                        f"font-weight:500;margin-bottom:6px;'>{_label}</div>"
+                        f"<div style='font-size:1.05rem;font-weight:700;"
+                        f"color:{_val_color};line-height:1.2;'>{_value}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+        else:
+            st.info("No period-return data available.")
+
+        # 7-day history — prefer live price_history, fall back to parsed
+        _history_rows: list[tuple[str, str, str, bool]] = []
+        if data.market_data.price_history:
+            _items = list(data.market_data.price_history.items())[-7:]
+            for _i, (_date, _price) in enumerate(_items):
+                if _i == 0:
+                    _history_rows.append((str(_date), f"{_cur}{_price:,.2f}", "—", True))
+                else:
+                    _prev = _items[_i - 1][1]
+                    _chg = ((_price - _prev) / _prev) * 100 if _prev else 0
+                    _history_rows.append(
+                        (
+                            str(_date),
+                            f"{_cur}{_price:,.2f}",
+                            f"{_chg:+.2f}%",
+                            _chg >= 0,
+                        )
+                    )
+        else:
+            for _h in (_parsed.get("pricePerformance") or {}).get("sevenDayHistory", []):
+                _history_rows.append(
+                    (
+                        _h.get("date", ""),
+                        _h.get("price", "—"),
+                        _h.get("change", "—"),
+                        bool(_h.get("isPositive")),
+                    )
+                )
+
+        if _history_rows:
+            # Render the 7-day price history as a custom HTML table wrapped
+            # in a .tw-snap-card so it gets the same rounded corners, green
+            # left accent bar, and SWOT-style slide-right hover animation
+            # as every other section. Row-level colour on the Change column
+            # uses fixed hex (#16a34a / #dc2626) that reads in both themes.
+            import html as _hist_html
+            _POS = "#16a34a"
+            _NEG = "#dc2626"
+            _hdr_style = (
+                "text-align:left;padding:10px 12px;font-size:11px;"
+                "letter-spacing:0.06em;text-transform:uppercase;"
+                "font-weight:600;color:inherit;opacity:0.65;"
+                "border-bottom:1px solid rgba(128,128,128,0.22);"
+            )
+            _cell_base = (
+                "padding:10px 12px;font-size:13.5px;color:inherit;"
+                "border-bottom:0.5px solid rgba(128,128,128,0.14);"
+            )
+            _rows_html = ""
+            for _d, _price, _chg, _pos in _history_rows:
+                _cell_l = f"{_cell_base}text-align:left;"
+                _cell_c = f"{_cell_base}text-align:right;font-weight:600;"
+                if _chg == "—":
+                    _chg_style = f"{_cell_c}opacity:0.55;"
+                else:
+                    _chg_color = _POS if _pos else _NEG
+                    _chg_style = f"{_cell_c}color:{_chg_color};"
+                _rows_html += (
+                    f"<tr>"
+                    f"<td style='{_cell_l}'>{_hist_html.escape(str(_d))}</td>"
+                    f"<td style='{_cell_c}'>{_hist_html.escape(str(_price))}</td>"
+                    f"<td style='{_chg_style}'>{_hist_html.escape(str(_chg))}</td>"
+                    f"</tr>"
+                )
+
+            st.markdown(
+                f"<div class='tw-snap-card' style='padding:6px 8px;"
+                f"min-height:auto;margin-bottom:14px;'>"
+                f"<div style='font-weight:700;font-size:14px;"
+                f"color:inherit;padding:10px 14px 4px 14px;'>"
+                f"Recent Price History (Last 7 Days)</div>"
+                f"<table style='width:100%;border-collapse:collapse;"
+                f"table-layout:auto;'>"
+                f"<thead><tr>"
+                f"<th style='{_hdr_style}text-align:left;'>Date</th>"
+                f"<th style='{_hdr_style}text-align:right;'>Price</th>"
+                f"<th style='{_hdr_style}text-align:right;'>Change</th>"
+                f"</tr></thead>"
+                f"<tbody>{_rows_html}</tbody>"
+                f"</table>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
         # ══════════════════════════════════════════════
         # 4. TECHNICAL SIGNALS
         # ══════════════════════════════════════════════
-        st.markdown('<div class="ta-section-title">TECHNICAL SIGNALS</div>', unsafe_allow_html=True)
+        bx_header("Technical Signals", "bx-pulse", level=3)
 
         # Initialize default values for price analysis
         all_dates = []
@@ -4462,63 +6051,204 @@ elif view_option == "📈 Data Dashboard":
 
             ts1, ts2, ts3 = st.columns(3)
 
-            # Moving Averages card
+            # All three Technical Signals cards are rendered as custom
+            # HTML using the same .tw-snap-card class as Snapshot /
+            # Overview / Financials / Market Data / Performance — so
+            # they get the rounded corners, green left accent bar, and
+            # SWOT-style slide-right hover animation. A shared fixed
+            # pixel height keeps the row visually balanced.
+            _TS_CARD_HEIGHT = 220
+            _POS_COLOR = "#16a34a"
+            _NEG_COLOR = "#dc2626"
+            _MUTED = "opacity:0.65"
+
+            def _ts_row(label: str, value_html: str) -> str:
+                """One label/value row inside a Technical Signals card."""
+                return (
+                    f"<div style='display:flex;justify-content:space-between;"
+                    f"align-items:center;padding:7px 0;font-size:13.5px;'>"
+                    f"<span style='color:inherit;{_MUTED}'>{label}</span>"
+                    f"<span style='text-align:right;font-weight:600;"
+                    f"color:inherit'>{value_html}</span>"
+                    f"</div>"
+                )
+
+            def _ts_card(title: str, body_html: str) -> str:
+                """Wrap inner rows in a .tw-snap-card with a fixed height."""
+                return (
+                    f"<div class='tw-snap-card' style='padding:16px 20px;"
+                    f"min-height:auto;height:{_TS_CARD_HEIGHT}px;"
+                    f"margin-bottom:12px;overflow:hidden;'>"
+                    f"<div style='font-weight:700;font-size:14px;"
+                    f"color:inherit;margin-bottom:8px;'>{title}</div>"
+                    f"{body_html}"
+                    f"</div>"
+                )
+
+            # ── Moving Averages card ──
+            _ma_rows = ""
+            _ma_states: list[bool] = []  # True if price above MA, False if below
+            for ma_label, ma_val in [
+                ("MA 20", latest_sma20),
+                ("MA 50", latest_sma50),
+                ("MA 200", latest_sma200),
+            ]:
+                if ma_val is not None:
+                    _above = latest_price > ma_val
+                    _ma_states.append(_above)
+                    _dot_col = _POS_COLOR if _above else _NEG_COLOR
+                    _signal = "Above" if _above else "Below"
+                    _left = (
+                        f"<span style='color:{_dot_col};margin-right:6px;"
+                        f"font-size:11px;'>●</span>"
+                        f"<span style='color:inherit;{_MUTED}'>{ma_label}</span>"
+                        f"<span style='color:inherit;opacity:0.5;margin:0 6px;'>·</span>"
+                        f"<span style='color:{_dot_col};font-weight:700;'>{_signal}</span>"
+                    )
+                    _right = f"{_cur}{ma_val:,.0f}"
+                else:
+                    _left = (
+                        f"<span style='color:inherit;opacity:0.4;margin-right:6px;'>○</span>"
+                        f"<span style='color:inherit;{_MUTED}'>{ma_label}</span>"
+                    )
+                    _right = "<span style='opacity:0.5'>—</span>"
+                _ma_rows += (
+                    f"<div style='display:flex;justify-content:space-between;"
+                    f"align-items:center;padding:7px 0;font-size:13.5px;'>"
+                    f"<span>{_left}</span>"
+                    f"<span style='text-align:right;font-weight:700;"
+                    f"color:inherit;'>{_right}</span>"
+                    f"</div>"
+                )
+
+            # ── Trend interpretation (appended below MA rows) ──
+            # Summarise the short-/medium-/long-term stack in plain English so
+            # the user doesn't have to piece it together from the three dots.
+            # Assumes _ma_states is in the order [MA20, MA50, MA200] as built
+            # from the loop above.
+            _trend_text = ""
+            _trend_col = "inherit"
+            if len(_ma_states) == 3:
+                _a20, _a50, _a200 = _ma_states
+                if _a20 and _a50 and _a200:
+                    _trend_text = "Strong uptrend — price above all 3 MAs."
+                    _trend_col = _POS_COLOR
+                elif not _a20 and not _a50 and not _a200:
+                    _trend_text = "Strong downtrend — price below all 3 MAs."
+                    _trend_col = _NEG_COLOR
+                elif _a20 and _a200 and not _a50:
+                    _trend_text = (
+                        "Mixed signal — above short- and long-term MAs but "
+                        "below MA50. Watch for reclaim of MA50."
+                    )
+                elif _a20 and not _a50 and not _a200:
+                    _trend_text = (
+                        "Early recovery — price reclaimed MA20 but medium- "
+                        "and long-term trends still down."
+                    )
+                elif not _a20 and _a50 and _a200:
+                    _trend_text = (
+                        "Pullback within uptrend — below MA20 but holding "
+                        "above MA50/MA200."
+                    )
+                elif not _a20 and not _a50 and _a200:
+                    _trend_text = (
+                        "Weakening trend — broke MA20 and MA50, MA200 still "
+                        "providing long-term support."
+                    )
+                elif _a20 and _a50 and not _a200:
+                    _trend_text = (
+                        "Short-term rally against a long-term downtrend — "
+                        "below MA200."
+                    )
+                else:
+                    _trend_text = "Mixed short- vs. long-term signals."
+            elif len(_ma_states) >= 1:
+                _above_ct = sum(_ma_states)
+                _trend_text = (
+                    f"{_above_ct} of {len(_ma_states)} MAs above price — "
+                    "partial data only."
+                )
+
+            if _trend_text:
+                _ma_rows += (
+                    f"<div style='margin-top:8px;padding-top:8px;"
+                    f"border-top:1px solid rgba(128,128,128,0.18);"
+                    f"font-size:11.5px;color:{_trend_col};opacity:0.95;"
+                    f"line-height:1.35;'>{_trend_text}</div>"
+                )
+
             with ts1:
-                ma_rows = ""
-                for ma_label, ma_val in [("MA 20", latest_sma20), ("MA 50", latest_sma50), ("MA 200", latest_sma200)]:
-                    if ma_val is not None:
-                        above = latest_price > ma_val
-                        dot_color = "#22c55e" if above else "#ef4444"
-                        signal_text = f'<span style="color:{dot_color}">{"Above" if above else "Below"}</span>'
-                        ma_rows += f'''<div class="ta-ma-row">
-                            <span><span class="ta-dot" style="background:{dot_color}"></span><span style="color:#ccc">{ma_label}</span></span>
-                            <span style="color:#888">{_cur}{ma_val:,.0f} · {signal_text}</span>
-                        </div>'''
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">Moving Averages</div>{ma_rows}
-                </div>''', unsafe_allow_html=True)
+                st.markdown(_ts_card("Moving Averages", _ma_rows), unsafe_allow_html=True)
 
-            # Momentum card
+            # ── Momentum card ──
             with ts2:
-                rsi_color = "#22c55e" if latest_rsi and latest_rsi < 70 and latest_rsi > 30 else ("#ef4444" if latest_rsi and latest_rsi >= 70 else "#22c55e")
-                rsi_label = "Neutral" if latest_rsi and 30 < latest_rsi < 70 else ("Overbought" if latest_rsi and latest_rsi >= 70 else "Oversold")
-                rsi_badge_kind = "amber" if rsi_label == "Neutral" else ("red" if rsi_label == "Overbought" else "green")
-                macd_badge = _badge("Bullish", "green") if macd_bullish else _badge("Bearish", "red")
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">Momentum</div>
-                    <div class="ta-ma-row">
-                        <span style="color:#ccc">RSI (14)</span>
-                        <span style="color:#fff;font-weight:500">{latest_rsi:.1f} {_badge(rsi_label, rsi_badge_kind)}</span>
-                    </div>
-                    <div class="ta-ma-row">
-                        <span style="color:#ccc">MACD</span>
-                        <span>{macd_badge}</span>
-                    </div>
-                    <div class="ta-ma-row">
-                        <span style="color:#ccc">Volatility</span>
-                        <span style="color:#fff;font-weight:500">{volatility:.1%}</span>
-                    </div>
-                </div>''' if latest_rsi else '<div class="ta-card"><div class="ta-label">Momentum</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+                if latest_rsi is not None:
+                    _rsi_label = (
+                        "Neutral" if 30 < latest_rsi < 70
+                        else ("Overbought" if latest_rsi >= 70 else "Oversold")
+                    )
+                    _rsi_kind = (
+                        "amber" if _rsi_label == "Neutral"
+                        else ("red" if _rsi_label == "Overbought" else "green")
+                    )
+                    # Plain-English RSI interpretation so the user doesn't have
+                    # to recall what the 30/70 thresholds imply.
+                    if _rsi_label == "Overbought":
+                        _rsi_hint = "Potential short-term pullback risk."
+                        _rsi_hint_col = _NEG_COLOR
+                    elif _rsi_label == "Oversold":
+                        _rsi_hint = "Potential reversal opportunity."
+                        _rsi_hint_col = _POS_COLOR
+                    else:
+                        _rsi_hint = "Momentum within normal range."
+                        _rsi_hint_col = "inherit"
 
-            # Drawdown & Risk card
+                    _macd_badge = (
+                        _badge("Bullish", "green") if macd_bullish
+                        else _badge("Bearish", "red")
+                    )
+                    _mom_body = (
+                        _ts_row(
+                            "RSI (14)",
+                            f"{latest_rsi:.1f} {_badge(_rsi_label, _rsi_kind)}",
+                        )
+                        + _ts_row("MACD", _macd_badge)
+                        + _ts_row("Volatility", f"{volatility:.1%}")
+                        + (
+                            f"<div style='margin-top:6px;padding-top:6px;"
+                            f"border-top:1px solid rgba(128,128,128,0.18);"
+                            f"font-size:11.5px;color:{_rsi_hint_col};"
+                            f"opacity:0.95;line-height:1.35;'>"
+                            f"{_rsi_hint}</div>"
+                        )
+                    )
+                else:
+                    _mom_body = "<div style='opacity:0.5'>—</div>"
+                st.markdown(_ts_card("Momentum", _mom_body), unsafe_allow_html=True)
+
+            # ── Drawdown & Risk card ──
             with ts3:
                 pct_from_ath = data.market_data.percentage_change_from_high
                 yr_return = data.market_data.year_change
                 beta = data.market_data.beta
-                rows_dd = ""
+                _dr_rows: list[str] = []
                 if pct_from_ath is not None:
-                    dd_color = "#ef4444" if pct_from_ath < 0 else "#22c55e"
-                    rows_dd += f'<div class="ta-ma-row"><span style="color:#ccc">From ATH</span><span style="color:{dd_color};font-weight:500">{pct_from_ath:+.2f}%</span></div>'
+                    _col = _NEG_COLOR if pct_from_ath < 0 else _POS_COLOR
+                    _dr_rows.append(_ts_row(
+                        "From ATH",
+                        f"<span style='color:{_col}'>{pct_from_ath:+.2f}%</span>",
+                    ))
                 if yr_return is not None:
-                    yr_color = "#22c55e" if yr_return >= 0 else "#ef4444"
-                    rows_dd += f'<div class="ta-ma-row"><span style="color:#ccc">1Y Return</span><span style="color:{yr_color};font-weight:500">{yr_return:+.2f}%</span></div>'
+                    _col = _POS_COLOR if yr_return >= 0 else _NEG_COLOR
+                    _dr_rows.append(_ts_row(
+                        "1Y Return",
+                        f"<span style='color:{_col}'>{yr_return:+.2f}%</span>",
+                    ))
                 if beta is not None:
-                    rows_dd += f'<div class="ta-ma-row"><span style="color:#ccc">Beta</span><span style="color:#fff;font-weight:500">{beta:.2f}</span></div>'
-                if not rows_dd:
-                    rows_dd = '<div class="ta-value">—</div>'
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">Drawdown & Risk</div>{rows_dd}
-                </div>''', unsafe_allow_html=True)
+                    _dr_rows.append(_ts_row("Beta", f"{beta:.2f}"))
+                _dr_body = "".join(_dr_rows) if _dr_rows else "<div style='opacity:0.5'>—</div>"
+                st.markdown(_ts_card("Drawdown & Risk", _dr_body), unsafe_allow_html=True)
 
             # ── SMA Chart ──
             sma_fig = go.Figure()
@@ -4553,59 +6283,124 @@ elif view_option == "📈 Data Dashboard":
                 st.plotly_chart(rsi_fig, width='stretch')
         else:
             ts1, ts2, ts3 = st.columns(3)
-            with ts1:
-                st.markdown('<div class="ta-card"><div class="ta-label">Moving Averages</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
-            with ts2:
-                st.markdown('<div class="ta-card"><div class="ta-label">Momentum</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
-            with ts3:
-                st.markdown('<div class="ta-card"><div class="ta-label">Drawdown & Risk</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+            for _c, _title in zip((ts1, ts2, ts3), ("Moving Averages", "Momentum", "Drawdown & Risk")):
+                with _c:
+                    st.markdown(
+                        f"<div class='tw-snap-card' style='padding:16px 20px;"
+                        f"min-height:120px;margin-bottom:12px;'>"
+                        f"<div style='font-weight:700;font-size:14px;"
+                        f"color:inherit;margin-bottom:8px;'>{_title}</div>"
+                        f"<div style='opacity:0.5'>—</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
             st.info("No price history available for technical analysis")
 
         # ══════════════════════════════════════════════
         # 5. ANALYST & SENTIMENT
         # ══════════════════════════════════════════════
-        st.markdown('<div class="ta-section-title">ANALYST & SENTIMENT</div>', unsafe_allow_html=True)
+        bx_header("Analyst & Sentiment", "bx-user-voice", level=3)
 
         an1, an2 = st.columns(2)
 
-        # Selection Status card (reuses max_drop logic)
+        # Both cards use the same .tw-snap-card class (rounded corners,
+        # green left accent bar, SWOT-style slide-right hover animation).
+        # A shared fixed pixel height keeps the row visually balanced.
+        _AN_CARD_HEIGHT = 160
+        _AN_POS = "#16a34a"
+        _AN_NEG = "#dc2626"
+
+        # ── Drawdown Alert card ──
+        # Flags stocks that have fallen ≥25% from their recent peak — a
+        # "value candidate" screen used by the portfolio tracker. The old
+        # "Selected / Not Selected" wording was ambiguous, so the card is
+        # now titled "Drawdown Alert" with explicit Triggered / No Alert
+        # states and a tooltip explaining the criterion.
         with an1:
             max_drop = getattr(data.market_data, 'max_drop_after_high', None)
             if max_drop is not None:
-                is_selected = max_drop <= -25
+                _alert_on = max_drop <= -25
+                _drop_val = max_drop
             elif data.market_data.percentage_change_from_high is not None:
-                is_selected = data.market_data.percentage_change_from_high <= -25
+                _alert_on = data.market_data.percentage_change_from_high <= -25
+                _drop_val = data.market_data.percentage_change_from_high
             else:
-                is_selected = None
+                _alert_on = None
+                _drop_val = None
 
-            if is_selected is not None:
-                sel_text = "Selected" if is_selected else "Not Selected"
-                sel_color = "#22c55e" if is_selected else "#ef4444"
-                sel_icon = "✅" if is_selected else "❌"
-                drop_sub = f'<div class="ta-sub" style="color:#888;margin-top:4px">Dropped {abs(max_drop):.1f}% after peak</div>' if max_drop is not None else ""
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">Selection Status</div>
-                    <div class="ta-value">{sel_icon} {sel_text}</div>{drop_sub}
-                </div>''', unsafe_allow_html=True)
+            if _alert_on is not None:
+                _sel_text = "Alert Triggered" if _alert_on else "No Alert"
+                _sel_icon = "bxs-error-alt" if _alert_on else "bxs-check-shield"
+                _sel_color = _AN_NEG if _alert_on else _AN_POS
+                if _drop_val is not None:
+                    if _alert_on:
+                        _sub = f"Dropped {abs(_drop_val):.1f}% after peak — meets ≥25% drawdown threshold."
+                    else:
+                        _sub = f"Dropped {abs(_drop_val):.1f}% after peak — below 25% threshold."
+                else:
+                    _sub = ""
+                _sub_html = (
+                    f"<div style='font-size:12px;color:inherit;opacity:0.7;"
+                    f"margin-top:6px;line-height:1.35;'>{_sub}</div>"
+                    if _sub else ""
+                )
+                _body = (
+                    f"<div style='font-size:1.4rem;font-weight:700;"
+                    f"margin-top:4px;color:inherit;'>"
+                    f"<i class='bx {_sel_icon}' style='color:{_sel_color};"
+                    f"margin-right:8px;vertical-align:-3px;'></i>{_sel_text}"
+                    f"</div>{_sub_html}"
+                )
             else:
-                st.markdown('<div class="ta-card"><div class="ta-label">Selection Status</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+                _body = (
+                    "<div style='opacity:0.5;margin-top:4px;'>—</div>"
+                    "<div style='font-size:12px;opacity:0.65;margin-top:6px;'>"
+                    "Insufficient price history to evaluate drawdown.</div>"
+                )
+            st.markdown(
+                f"<div class='tw-snap-card' style='padding:16px 20px;"
+                f"min-height:auto;height:{_AN_CARD_HEIGHT}px;"
+                f"margin-bottom:12px;overflow:hidden;'>"
+                f"<div style='font-weight:700;font-size:14px;"
+                f"color:inherit;margin-bottom:4px;' "
+                f"title='Flags stocks that have dropped 25%+ from their recent peak — a value-candidate screen.'>"
+                f"Drawdown Alert</div>"
+                f"{_body}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
-        # Overall High/Low card
+        # ── Overall Price Range card ──
         with an2:
             oh = data.market_data.overall_high
             ol = data.market_data.overall_low
+            pct_ath = data.market_data.percentage_change_from_high
             if oh is not None and ol is not None:
-                st.markdown(f'''<div class="ta-card">
-                    <div class="ta-label">Overall Price Range</div>
-                    <div class="ta-value" style="font-size:16px">{_cur}{ol:,.2f} – {_cur}{oh:,.2f}</div>
-                    <div class="ta-sub" style="color:{"#ef4444" if data.market_data.percentage_change_from_high and data.market_data.percentage_change_from_high < 0 else "#22c55e"};margin-top:4px">
-                        {data.market_data.percentage_change_from_high:+.2f}% from ATH</div>
-                </div>''' if data.market_data.percentage_change_from_high is not None else f'''<div class="ta-card">
-                    <div class="ta-label">Overall Price Range</div>
-                    <div class="ta-value" style="font-size:16px">{_cur}{ol:,.2f} – {_cur}{oh:,.2f}</div>
-                </div>''', unsafe_allow_html=True)
+                _range_html = (
+                    f"<div style='font-size:1.2rem;font-weight:700;"
+                    f"margin-top:4px;color:inherit;'>"
+                    f"{_cur}{ol:,.2f} – {_cur}{oh:,.2f}</div>"
+                )
+                if pct_ath is not None:
+                    _col = _AN_NEG if pct_ath < 0 else _AN_POS
+                    _range_html += (
+                        f"<div style='color:{_col};font-weight:600;"
+                        f"margin-top:6px;font-size:13px;'>"
+                        f"{pct_ath:+.2f}% from ATH</div>"
+                    )
+                _body2 = _range_html
             else:
-                st.markdown('<div class="ta-card"><div class="ta-label">Overall Price Range</div><div class="ta-value">—</div></div>', unsafe_allow_html=True)
+                _body2 = "<div style='opacity:0.5;margin-top:4px;'>—</div>"
+            st.markdown(
+                f"<div class='tw-snap-card' style='padding:16px 20px;"
+                f"min-height:auto;height:{_AN_CARD_HEIGHT}px;"
+                f"margin-bottom:12px;overflow:hidden;'>"
+                f"<div style='font-weight:700;font-size:14px;"
+                f"color:inherit;margin-bottom:4px;'>Overall Price Range</div>"
+                f"{_body2}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
         # =========================
         # =========================
@@ -4613,7 +6408,7 @@ elif view_option == "📈 Data Dashboard":
         # =========================
         if data.market_data.competitors:
             st.markdown("---")
-            st.subheader("🏢 Competitors")
+            bx_header("Competitors", "bx-buildings")
             st.markdown("*Real-time financial data*")
             
             # Create competitor comparison table (METRIC-BASED FORMAT)
@@ -4682,58 +6477,988 @@ elif view_option == "📈 Data Dashboard":
                         'Revenue': revenue_formatted
                     }
             
-            # Create metric-based table data
+            # Render the comparison as a custom HTML table wrapped in a
+            # .tw-snap-card — so it gets the same rounded corners, green
+            # left accent bar, and SWOT-style slide-right hover animation
+            # as every other dashboard section. Metric labels live in the
+            # left column; each company has its own right-aligned column,
+            # and the main company's column header gets a highlighted
+            # background so users can spot it at a glance.
             if companies and company_data:
-                # Define metrics to display
+                import html as _comp_html
                 metrics = ['Symbol', 'Market Cap', 'Revenue', 'PE Ratio', 'Profit Margin']
-                
-                # Build table data with metrics as rows
-                table_data = {}
-                table_data['Metric'] = metrics
-                
-                for company in companies:
-                    table_data[company] = [
-                        company_data[company].get('Symbol', 'N/A'),
-                        company_data[company].get('Market Cap', 'N/A'),
-                        company_data[company].get('Revenue', 'N/A'),
-                        company_data[company].get('PE Ratio', 'N/A'),
-                        company_data[company].get('Profit Margin', 'N/A')
+
+                _hdr_style = (
+                    "padding:10px 12px;font-size:11px;"
+                    "letter-spacing:0.06em;text-transform:uppercase;"
+                    "font-weight:700;color:inherit;opacity:0.75;"
+                    "border-bottom:1px solid rgba(128,128,128,0.25);"
+                    "white-space:nowrap;"
+                )
+                _hdr_main_style = (
+                    _hdr_style
+                    + "background:rgba(116,229,4,0.12);color:#74e504;opacity:1;"
+                )
+                _cell_base = (
+                    "padding:9px 12px;font-size:13px;color:inherit;"
+                    "border-bottom:0.5px solid rgba(128,128,128,0.14);"
+                )
+
+                # Build header row: "METRIC" + one column per company
+                _ths = [f"<th style='{_hdr_style}text-align:left;'>METRIC</th>"]
+                for _comp in companies:
+                    _is_main = "⭐" in _comp
+                    _style = _hdr_main_style if _is_main else _hdr_style
+                    _ths.append(
+                        f"<th style='{_style}text-align:right;'>"
+                        f"{_comp_html.escape(_comp)}</th>"
+                    )
+                _header_html = "<thead><tr>" + "".join(_ths) + "</tr></thead>"
+
+                # Build body rows: one row per metric
+                _trs = []
+                for _metric in metrics:
+                    _cells = [
+                        f"<td style='{_cell_base}text-align:left;"
+                        f"font-weight:600;opacity:0.75;'>{_comp_html.escape(_metric)}</td>"
                     ]
-                
-                # Create DataFrame
-                df = pd.DataFrame(table_data)
-                
-                # Add custom container for styling
-                st.markdown('<div class="competitor-table">', unsafe_allow_html=True)
-                
-                # Display the table with custom styling
-                st.dataframe(
-                    df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Metric": st.column_config.TextColumn(
-                            "Metric",
-                            width="medium",
-                        ),
-                        **{company: st.column_config.TextColumn(
-                            company,
-                            width="medium",
-                        ) for company in companies}
+                    for _comp in companies:
+                        _val = company_data[_comp].get(_metric, 'N/A') or 'N/A'
+                        _is_main = "⭐" in _comp
+                        _cell_style = _cell_base + "text-align:right;font-weight:600;"
+                        if _is_main:
+                            _cell_style += "background:rgba(116,229,4,0.06);"
+                        _cells.append(
+                            f"<td style='{_cell_style}'>"
+                            f"{_comp_html.escape(str(_val))}</td>"
+                        )
+                    _trs.append("<tr>" + "".join(_cells) + "</tr>")
+                _body_html = "<tbody>" + "".join(_trs) + "</tbody>"
+
+                st.markdown(
+                    f"<div class='tw-snap-card' style='padding:6px 8px;"
+                    f"min-height:auto;margin-bottom:12px;overflow-x:auto;'>"
+                    f"<div style='font-weight:700;font-size:14px;"
+                    f"color:inherit;padding:10px 14px 4px 14px;'>"
+                    f"Competitor Comparison"
+                    f"</div>"
+                    f"<table style='width:100%;border-collapse:collapse;'>"
+                    f"{_header_html}{_body_html}"
+                    f"</table>"
+                    f"<div style='font-size:11px;color:inherit;opacity:0.6;"
+                    f"padding:8px 14px 10px 14px;'>"
+                    f"⭐ = Your selected company &nbsp;·&nbsp; "
+                    f"Data from real-time sources</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+        # ══════════════════════════════════════════════
+        # SWOT ANALYSIS — 2x2 grid
+        # ══════════════════════════════════════════════
+        _swot_obj = getattr(data, "swot", None)
+        _swot_src = {
+            "strengths": list(getattr(_swot_obj, "strengths", []) or []),
+            "weaknesses": list(getattr(_swot_obj, "weaknesses", []) or []),
+            "opportunities": list(getattr(_swot_obj, "opportunities", []) or []),
+            "threats": list(getattr(_swot_obj, "threats", []) or []),
+        }
+        if not any(_swot_src.values()):
+            _swot_src = _parsed.get("swot", _swot_src) or _swot_src
+
+        if any(_swot_src.values()):
+            st.markdown("---")
+            bx_header("SWOT Analysis", "bx-target-lock", level=3)
+
+            # Rounded-corner cards with the same hover-animation treatment
+            # as the news cards: theme-neutral gray background, per-quadrant
+            # accent on the left border, and on hover a tinted background +
+            # stronger border + subtle slide & glow — all using the card's
+            # own accent colour via a CSS custom property (`--accent`).
+            import html as _swot_html_mod
+            st.markdown("""
+            <style>
+            .tw-swot-card {
+                --accent: #74e504;
+                background: rgba(128, 128, 128, 0.06);
+                border: 1px solid rgba(128, 128, 128, 0.22);
+                border-left: 3px solid var(--accent);
+                border-radius: 8px;
+                padding: 16px 20px;
+                height: 220px;
+                margin-bottom: 12px;
+                transition: background 0.2s ease,
+                            border-color 0.2s ease,
+                            transform 0.2s ease,
+                            box-shadow 0.2s ease;
+                overflow: hidden;
+            }
+            .tw-swot-card:hover {
+                background: color-mix(in srgb, var(--accent) 10%, transparent);
+                border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+                border-left-color: var(--accent);
+                transform: translateX(2px);
+                box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 18%, transparent);
+            }
+            .tw-swot-title {
+                color: var(--accent);
+                font-weight: 700; font-size: 13px;
+                letter-spacing: 0.08em; text-transform: uppercase;
+                margin-bottom: 10px;
+                display: flex; align-items: center; gap: 6px;
+            }
+            .tw-swot-list {
+                list-style: disc; padding-left: 20px; margin: 0;
+                color: inherit;
+            }
+            .tw-swot-list li {
+                font-size: 13.5px; line-height: 1.55; margin-bottom: 4px;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
+            def _render_swot_card(
+                items: list[str],
+                title: str,
+                icon_cls: str,
+                accent: str,
+            ) -> None:
+                """Render one SWOT quadrant as a rounded hover-animated card."""
+                _rendered = [i for i in items if i]
+                if _rendered:
+                    _items_html = "".join(
+                        f"<li>{_swot_html_mod.escape(_item)}</li>"
+                        for _item in _rendered
+                    )
+                    _body = f'<ul class="tw-swot-list">{_items_html}</ul>'
+                else:
+                    _body = ("<div style='color:inherit;opacity:0.55;"
+                             "font-size:13px;'>Not available</div>")
+                st.markdown(
+                    f"<div class='tw-swot-card' style='--accent:{accent};'>"
+                    f"<div class='tw-swot-title'>"
+                    f"<i class='bx {icon_cls}' style='color:{accent};"
+                    f"vertical-align:-2px;font-size:1.1em;'></i>{title}"
+                    f"</div>"
+                    f"{_body}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            _sw_row1 = st.columns(2)
+            with _sw_row1[0]:
+                _render_swot_card(
+                    _swot_src["strengths"], "Strengths",
+                    "bxs-check-shield", "#22c55e",
+                )
+            with _sw_row1[1]:
+                _render_swot_card(
+                    _swot_src["weaknesses"], "Weaknesses",
+                    "bxs-error-alt", "#ef4444",
+                )
+            _sw_row2 = st.columns(2)
+            with _sw_row2[0]:
+                _render_swot_card(
+                    _swot_src["opportunities"], "Opportunities",
+                    "bxs-rocket", "#3b82f6",
+                )
+            with _sw_row2[1]:
+                _render_swot_card(
+                    _swot_src["threats"], "Threats",
+                    "bxs-shield-x", "#f97316",
+                )
+
+        # ══════════════════════════════════════════════
+        # NEWS & ANNOUNCEMENTS
+        # ══════════════════════════════════════════════
+        _news_items: list[dict] = []
+        for _n in getattr(data, "news", None) or []:
+            if isinstance(_n, dict):
+                _news_items.append(
+                    {
+                        "headline": _n.get("title") or _n.get("headline", ""),
+                        "source": _n.get("source", "") or "",
+                        "date": _n.get("date", "") or _n.get("published", "") or "",
+                        "url": _n.get("url", "") or _n.get("link", "") or "",
                     }
                 )
-                
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-                # Add legend
-                st.caption("⭐ = Your selected company | Data from real-time sources")
-    else:
-        st.info("📊 Analyze a stock to see the data dashboard")
+        if not _news_items and _parsed.get("news"):
+            _news_items = list(_parsed["news"])
+
+        if _news_items:
+            st.markdown("---")
+            bx_header("News & Announcements", "bx-news", level=3)
+            # Keep the rounded pill card + green hover animation, but swap
+            # every hardcoded dark colour for a theme-neutral rgba (soft
+            # gray outline, `inherit` text) so the same card renders fine
+            # on both light and dark backgrounds. The accent green
+            # (#74e504) on hover / icon / link stays the same because it
+            # reads well on either theme.
+            st.markdown("""
+            <style>
+            .tw-news-card {
+                background: rgba(128, 128, 128, 0.06);
+                border: 1px solid rgba(128, 128, 128, 0.22);
+                border-radius: 8px;
+                padding: 14px 16px; margin-bottom: 10px;
+                transition: background 0.2s ease,
+                            border-left-color 0.2s ease,
+                            border-color 0.2s ease,
+                            transform 0.2s ease,
+                            box-shadow 0.2s ease;
+                border-left: 3px solid transparent;
+                display: flex; justify-content: space-between; gap: 12px;
+            }
+            .tw-news-card:hover {
+                background: rgba(116, 229, 4, 0.10);
+                border-color: rgba(116, 229, 4, 0.35);
+                border-left-color: #74e504;
+                transform: translateX(2px);
+                box-shadow: 0 2px 10px rgba(116, 229, 4, 0.15);
+            }
+            .tw-news-headline {
+                color: inherit;
+                font-size: 14px; font-weight: 600;
+                line-height: 1.45; display: -webkit-box;
+                -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+                overflow: hidden; text-overflow: ellipsis;
+            }
+            .tw-news-meta {
+                color: inherit; opacity: 0.65;
+                font-size: 12px; margin-top: 4px;
+            }
+            .tw-news-link {
+                color: #74e504; text-decoration: none; font-size: 12px;
+                font-weight: 600;
+                white-space: nowrap; align-self: flex-start;
+            }
+            .tw-news-link:hover { text-decoration: underline; }
+            .tw-news-headline .bx {
+                color: #74e504; margin-right: 8px; vertical-align: -2px;
+                font-size: 1.05em;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
+            _visible = _news_items[:5]
+            for _item in _visible:
+                _link = _item.get("url", "")
+                _headline = _item.get("headline", "")
+                _meta_bits = [b for b in [_item.get("source", ""), _item.get("date", "")] if b]
+                _meta_line = "  ·  ".join(_meta_bits)
+                # Build the "Read ↗" link inline with the meta row so it's
+                # clearly visible right under the headline — not a tiny
+                # floating element on the far right that gets cropped.
+                if _link:
+                    if _meta_line:
+                        _meta_line += "  ·  "
+                    _meta_line += f'<a class="tw-news-link" href="{_link}" target="_blank">Read ↗</a>'
+                _meta_html = (
+                    f'<div class="tw-news-meta">{_meta_line}</div>'
+                    if _meta_line
+                    else ""
+                )
+                st.markdown(
+                    f'<div class="tw-news-card">'
+                    f'<div style="flex:1">'
+                    f'<div class="tw-news-headline"><i class="bx bxs-news"></i>{_headline}</div>'
+                    f'{_meta_html}'
+                    f'</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            if len(_news_items) > 5:
+                with st.expander(f"Show {len(_news_items) - 5} more"):
+                    for _item in _news_items[5:]:
+                        _link = _item.get("url", "")
+                        _headline = _item.get("headline", "")
+                        if _link:
+                            st.markdown(f"- **{_headline}**  ·  [Read ↗]({_link})")
+                        else:
+                            st.markdown(f"- **{_headline}**")
+
+        # ══════════════════════════════════════════════
+        # UNIFIED INVESTMENT INSIGHT
+        # Merges expert-opinion (market/analyst view) and Screener.in quarterly
+        # PDF summary (fundamentals/financials view) into a single analyst
+        # synthesis rendered as one card. For cached analyses written before
+        # the unified rollout we fall back to concatenating the two legacy
+        # sections so older reports still render something meaningful.
+        # ══════════════════════════════════════════════
+        _unified_text = (_parsed.get("unifiedInsight") or "").strip()
+        _expert_text = (_parsed.get("expertOpinion") or "").strip()
+        _screener_text = (_parsed.get("screenerSummary") or "").strip()
+
+        # Prefer the unified insight. If absent (legacy cached response),
+        # stitch the two legacy blocks together so the user sees the content.
+        _insight_body = ""
+        _insight_is_legacy = False
+        if _unified_text:
+            _insight_body = _unified_text
+        elif _expert_text and _screener_text:
+            _insight_body = (
+                f"{_expert_text}\n\n"
+                "— — —\n\n"
+                f"{_screener_text}"
+            )
+            _insight_is_legacy = True
+        elif _expert_text:
+            _insight_body = _expert_text
+            _insight_is_legacy = True
+        elif _screener_text:
+            _insight_body = _screener_text
+            _insight_is_legacy = True
+
+        if _insight_body:
+            st.markdown("---")
+
+            # Render the Unified Investment Insight card using the same
+            # .tw-snap-card class as every other dashboard section —
+            # rounded corners, green left accent bar, SWOT-style slide-
+            # right hover animation. Theme-neutral colours replace the
+            # old hardcoded dark gradient/white text so the card reads
+            # correctly in both light and dark modes.
+            import html as _html
+            _safe_body = _html.escape(_insight_body).replace("\n", "<br>")
+            _subtitle = (
+                "Synthesized from expert analysis &amp; official quarterly reports"
+                if not _insight_is_legacy
+                else "Legacy report — expert opinion &amp; screener summary "
+                     "(re-analyze to generate a unified insight)"
+            )
+            _footer = (
+                "<i class='bx bxs-book-bookmark' style='vertical-align:-2px;"
+                "margin-right:6px;'></i>Sources: Expert Market Analysis "
+                "+ Screener.in Quarterly PDFs"
+                if not _insight_is_legacy
+                else "<i class='bx bxs-book-bookmark' style='vertical-align:-2px;"
+                     "margin-right:6px;'></i>Sources: archived expert-opinion "
+                     "+ screener summary"
+            )
+            st.markdown(
+                f"<div class='tw-snap-card' style='padding:22px 26px;"
+                f"min-height:auto;margin-top:12px;margin-bottom:14px;"
+                f"border-left-width:4px;'>"
+                f"<div style='color:#74e504;font-weight:700;font-size:14px;"
+                f"letter-spacing:0.08em;text-transform:uppercase;"
+                f"margin-bottom:4px;'>"
+                f"<i class='bx bx-brain' style='color:#74e504;margin-right:6px;"
+                f"vertical-align:-2px;font-size:1.15em;'></i>"
+                f"Unified Investment Insight</div>"
+                f"<div style='color:inherit;opacity:0.65;font-size:12px;"
+                f"font-weight:500;margin-bottom:18px;'>{_subtitle}</div>"
+                f"<div style='color:inherit;font-size:15px;line-height:1.7;"
+                f"white-space:pre-wrap;'>{_safe_body}</div>"
+                f"<div style='color:inherit;opacity:0.6;font-size:12px;"
+                f"margin-top:18px;padding-top:12px;"
+                f"border-top:1px solid rgba(128,128,128,0.22);'>{_footer}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        # ══════════════════════════════════════════════
+        # FUTURE OUTLOOK & NEWS ANALYSIS
+        # Fetched in parallel with the main agent in the dashboard search block.
+        # Keyed by stock symbol so switching stocks shows the right result.
+        # ══════════════════════════════════════════════
+        _news_cache = st.session_state.get("dash_news_analysis")
+        _news_symbol = st.session_state.get("dash_news_analysis_symbol")
+        if _news_cache and _news_symbol == data.symbol:
+            st.markdown("---")
+            bx_header("Future Outlook & News Analysis", "bx-bulb", level=3)
+
+            _articles = _news_cache.get("articles") or []
+            _n_sources = len({(_a.get("source") or "").strip() or "Unknown" for _a in _articles})
+
+            if _news_cache.get("error"):
+                st.warning(f"⚠️ Could not fetch news analysis: {_news_cache.get('error')}")
+            else:
+                _od = _news_cache.get("outlook_data") or {}
+
+                # Build the main body as a single HTML string, then wrap
+                # it all in one .tw-snap-card so the whole outlook +
+                # analysis slides right with a green wash on hover — same
+                # animation as SWOT / Snapshot / every other section.
+                import html as _fut_html
+                _body_parts: list[str] = []
+
+                # ── Outlook verdict badge ────────────────────────────────
+                _verdict = _od.get("outlook", "")
+                _emoji = _od.get("outlook_emoji", "🟡")
+                if _verdict:
+                    _v_lower = _verdict.lower()
+                    if "bullish" in _v_lower:
+                        _vcolor = "#16a34a"
+                    elif "bearish" in _v_lower:
+                        _vcolor = "#dc2626"
+                    else:
+                        _vcolor = "#d97706"
+                    _body_parts.append(
+                        f"<div style='display:flex;align-items:center;"
+                        f"gap:12px;margin:4px 0 18px 0;flex-wrap:wrap;'>"
+                        f"<span style='font-size:1.6rem'>{_emoji}</span>"
+                        f"<span style='background:{_vcolor}1f;"
+                        f"border:1px solid {_vcolor}66;color:{_vcolor};"
+                        f"padding:6px 16px;border-radius:999px;"
+                        f"font-weight:700;font-size:14px;"
+                        f"letter-spacing:0.02em;'>"
+                        f"{_fut_html.escape(_verdict)}</span>"
+                        f"<span style='color:inherit;opacity:0.65;font-size:13px;'>"
+                        f"Based on {len(_articles)} "
+                        f"article{'s' if len(_articles)!=1 else ''} "
+                        f"from {_n_sources} "
+                        f"source{'s' if _n_sources!=1 else ''}</span>"
+                        f"</div>"
+                    )
+
+                _section_label_style = (
+                    "font-size:11px;color:inherit;opacity:0.65;"
+                    "text-transform:uppercase;letter-spacing:0.08em;"
+                    "font-weight:600;margin:14px 0 6px 0;"
+                )
+
+                # ── Analyst & Market View ────────────────────────────────
+                _av = (_od.get("analyst_view") or "").strip()
+                if _av:
+                    _body_parts.append(
+                        f"<div style='{_section_label_style}'>"
+                        f"Analyst &amp; Market View</div>"
+                        f"<div style='color:inherit;font-size:14px;"
+                        f"line-height:1.6;'>{_fut_html.escape(_av)}</div>"
+                    )
+
+                # ── Financial Performance ────────────────────────────────
+                _perf = (_od.get("performance") or "").strip()
+                if _perf:
+                    _body_parts.append(
+                        f"<div style='{_section_label_style}'>"
+                        f"Recent Financial Performance</div>"
+                        f"<div style='color:inherit;font-size:14px;"
+                        f"line-height:1.6;'>{_fut_html.escape(_perf)}</div>"
+                    )
+
+                # ── Growth Drivers + Risk Factors side by side ───────────
+                _drivers = _od.get("growth_drivers") or []
+                _risks = _od.get("risk_factors") or []
+                if _drivers or _risks:
+                    _bullet_style = (
+                        "padding:8px 12px;border-radius:0 6px 6px 0;"
+                        "margin-bottom:6px;font-size:13px;line-height:1.55;"
+                        "color:inherit;background:rgba(128,128,128,0.05);"
+                    )
+                    _drivers_html = ""
+                    for _d in _drivers:
+                        _drivers_html += (
+                            f"<div style='{_bullet_style}"
+                            f"border-left:3px solid #16a34a;'>"
+                            f"{_fut_html.escape(_d)}</div>"
+                        )
+                    _risks_html = ""
+                    for _r in _risks:
+                        _risks_html += (
+                            f"<div style='{_bullet_style}"
+                            f"border-left:3px solid #dc2626;'>"
+                            f"{_fut_html.escape(_r)}</div>"
+                        )
+                    _body_parts.append(
+                        f"<div style='display:grid;"
+                        f"grid-template-columns:1fr 1fr;gap:14px;"
+                        f"margin-top:14px;'>"
+                        f"<div>"
+                        f"<div style='font-size:11px;color:#16a34a;"
+                        f"text-transform:uppercase;letter-spacing:0.08em;"
+                        f"font-weight:600;margin-bottom:6px;'>"
+                        f"🟢 Growth Drivers</div>"
+                        f"{_drivers_html}"
+                        f"</div>"
+                        f"<div>"
+                        f"<div style='font-size:11px;color:#dc2626;"
+                        f"text-transform:uppercase;letter-spacing:0.08em;"
+                        f"font-weight:600;margin-bottom:6px;'>"
+                        f"🔴 Risk Factors</div>"
+                        f"{_risks_html}"
+                        f"</div>"
+                        f"</div>"
+                    )
+
+                # Render the whole body as one animated .tw-snap-card.
+                if _body_parts:
+                    st.markdown(
+                        f"<div class='tw-snap-card' style='padding:20px 24px;"
+                        f"min-height:auto;margin-bottom:14px;"
+                        f"border-left-width:4px;'>"
+                        f"{''.join(_body_parts)}"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                # ── Target & Consensus row — each as its own animated card ──
+                _target = (_od.get("target_price") or "").strip()
+                _consensus = (_od.get("consensus") or "").strip()
+                if (_target and _target.lower() != "not available") or \
+                   (_consensus and _consensus.lower() != "not available"):
+                    _tc1, _tc2 = st.columns(2)
+                    _metric_card_style = (
+                        "padding:14px 18px;min-height:auto;margin-bottom:12px;"
+                    )
+                    _metric_label_style = (
+                        "font-size:11px;opacity:0.65;letter-spacing:0.04em;"
+                        "text-transform:uppercase;font-weight:500;"
+                        "margin-bottom:6px;color:inherit;"
+                    )
+                    _metric_value_style = (
+                        "font-size:1.15rem;font-weight:700;color:inherit;"
+                        "line-height:1.2;"
+                    )
+                    if _target and _target.lower() != "not available":
+                        with _tc1:
+                            st.markdown(
+                                f"<div class='tw-snap-card' style='{_metric_card_style}'>"
+                                f"<div style='{_metric_label_style}'>"
+                                f"🎯 Analyst Price Target</div>"
+                                f"<div style='{_metric_value_style}'>"
+                                f"{_fut_html.escape(_target)}</div>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+                    if _consensus and _consensus.lower() != "not available":
+                        with _tc2:
+                            st.markdown(
+                                f"<div class='tw-snap-card' style='{_metric_card_style}'>"
+                                f"<div style='{_metric_label_style}'>"
+                                f"📊 Analyst Consensus</div>"
+                                f"<div style='{_metric_value_style}'>"
+                                f"{_fut_html.escape(_consensus)}</div>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                # ── Fallback: if outlook_data is empty, show raw text ────
+                if not _od:
+                    _analysis_text = (_news_cache.get("analysis") or "").strip()
+                    if _analysis_text:
+                        st.caption(
+                            f"Based on {len(_articles)} article{'s' if len(_articles)!=1 else ''} "
+                            f"from {_n_sources} source{'s' if _n_sources!=1 else ''}"
+                        )
+                        st.markdown(_analysis_text)
+
+                # ── Full report (collapsible) ────────────────────────────
+                _analysis_text = (_news_cache.get("analysis") or "").strip()
+                _tavily_summary = (_news_cache.get("tavily_summary") or "").strip()
+                if _analysis_text or _tavily_summary:
+                    with st.expander("📝 View full detailed report", expanded=False):
+                        if _analysis_text:
+                            st.markdown(_analysis_text)
+                        if _tavily_summary:
+                            st.markdown("---")
+                            st.info(_tavily_summary)
+
+                # ── Source articles (collapsible) ────────────────────────
+                if _articles:
+                    with st.expander(f"📚 Source Articles ({len(_articles)})", expanded=False):
+                        for _i, _a in enumerate(_articles, 1):
+                            _title = (_a.get("title") or "Untitled").strip()
+                            _src = _a.get("source", "Unknown")
+                            _snippet = (_a.get("snippet") or "").strip()
+                            _url = _a.get("url")
+                            st.markdown(f"**{_i}. {_title[:100]}**")
+                            _meta = f"*{_src}*"
+                            if _url:
+                                _meta += f"  ·  [Read ↗]({_url})"
+                            st.caption(_meta)
+                            if _snippet:
+                                st.markdown(f"> {_snippet[:200]}")
+                            if _i < len(_articles):
+                                st.markdown("---")
+
+                # ── Refresh button ───────────────────────────────────────
+                if st.button("🔄 Refresh News Analysis", key="dash_refresh_news"):
+                    st.session_state.dash_news_analysis = None
+                    st.session_state.dash_news_analysis_symbol = None
+                    try:
+                        with st.spinner("🔍 Re-fetching future outlook & news..."):
+                            from tools import StockTools as _RefreshTools
+                            _refreshed = _RefreshTools.get_stock_news_analysis(data.name, max_articles=5)
+                            if _refreshed and not _refreshed.get("error"):
+                                _refreshed["outlook_data"] = _distill_outlook(_refreshed, data.name)
+                                st.session_state.dash_news_analysis = _refreshed
+                                st.session_state.dash_news_analysis_symbol = data.symbol
+                    except Exception as _re:
+                        st.error(f"❌ Refresh failed: {_re}")
+                    st.rerun()
+
+        # ══════════════════════════════════════════════
+        # FII & DII INSTITUTIONAL SENTIMENT
+        # Quarterly shareholding analysis from screener.in.
+        # Auto-runs once per symbol; cached in session state so switching
+        # stocks or reruns don't re-fetch. Placed below Future Outlook
+        # per client request.
+        # ══════════════════════════════════════════════
+        _fii_symbol_dash = data.symbol
+        _fii_cache_key_dash = f"fii_dii_{_fii_symbol_dash}"
+
+        st.markdown("---")
+        bx_header("FII & DII Institutional Sentiment", "bxs-bank", level=3)
+        st.caption("Track Foreign & Domestic Institutional buying/selling activity")
+
+        _run_fii_dash = st.button("🔄 Refresh FII/DII", key="dash_run_fii_dii")
+        _auto_run_fii_dash = _fii_cache_key_dash not in st.session_state
+
+        if _run_fii_dash or _auto_run_fii_dash:
+            _cached_fii_v = None
+            _cached_dii_v = None
+            if data.market_data:
+                _cached_fii_v = data.market_data.fii_holding
+                _cached_dii_v = data.market_data.dii_holding
+                if _cached_fii_v is not None and _cached_fii_v < 1:
+                    _cached_fii_v *= 100
+                if _cached_dii_v is not None and _cached_dii_v < 1:
+                    _cached_dii_v *= 100
+            with st.spinner("Fetching FII/DII shareholding pattern..."):
+                try:
+                    from utils.fii_dii_analyzer import (
+                        get_fii_dii_sentiment as _compute_fii_dii_dash,
+                        persist_fii_dii_analysis as _persist_fii_dii_dash,
+                    )
+                    _fii_result_dash = _compute_fii_dii_dash(
+                        symbol=_fii_symbol_dash,
+                        company_name=data.name,
+                        cached_fii=float(_cached_fii_v) if _cached_fii_v is not None else None,
+                        cached_dii=float(_cached_dii_v) if _cached_dii_v is not None else None,
+                    )
+                    st.session_state[_fii_cache_key_dash] = _fii_result_dash
+                    # Persist to DB so FinRobot can read it back as context
+                    _persist_fii_dii_dash(_fii_symbol_dash, _fii_result_dash)
+                except Exception as _fii_err_dash:
+                    st.error(f"FII/DII analysis failed: {_fii_err_dash}")
+
+        _fii_result_dash = st.session_state.get(_fii_cache_key_dash)
+        if _fii_result_dash:
+            _rec_colors_dash = {
+                "green":   ("#e8f5e9", "#2e7d32"),
+                "#4caf50": ("#f1f8e9", "#33691e"),
+                "gray":    ("#f5f5f5", "#424242"),
+                "orange":  ("#fff3e0", "#e65100"),
+                "red":     ("#ffebee", "#c62828"),
+            }
+            _bg_dash, _fg_dash = _rec_colors_dash.get(
+                _fii_result_dash.recommendation_color, ("#f5f5f5", "#424242")
+            )
+            st.markdown(
+                f"<div style='background:{_bg_dash}; border-left:5px solid {_fg_dash}; "
+                f"padding:14px 18px; border-radius:6px; margin:12px 0;'>"
+                f"<div style='font-size:1.2em; font-weight:700; color:{_fg_dash};'>"
+                f"{_fii_result_dash.recommendation}</div>"
+                f"<div style='color:{_fg_dash}; margin-top:4px;'>"
+                f"Institutional Score: {_fii_result_dash.institutional_sentiment_score:.1f}/100 "
+                f"- {_fii_result_dash.sentiment_label}</div></div>",
+                unsafe_allow_html=True,
+            )
+
+            _m1, _m2, _m3, _m4 = st.columns(4)
+            with _m1:
+                _fii_delta_dash = (
+                    f"{_fii_result_dash.fii_change_1q:+.2f}pp"
+                    if _fii_result_dash.fii_change_1q is not None else None
+                )
+                st.metric(
+                    "FII Holding",
+                    f"{_fii_result_dash.current_fii_pct:.2f}%",
+                    delta=_fii_delta_dash,
+                    delta_color="normal",
+                )
+            with _m2:
+                _dii_delta_dash = (
+                    f"{_fii_result_dash.dii_change_1q:+.2f}pp"
+                    if _fii_result_dash.dii_change_1q is not None else None
+                )
+                st.metric(
+                    "DII Holding",
+                    f"{_fii_result_dash.current_dii_pct:.2f}%",
+                    delta=_dii_delta_dash,
+                    delta_color="normal",
+                )
+            with _m3:
+                st.metric(
+                    "Total Institutional",
+                    f"{_fii_result_dash.current_total_institutional:.2f}%",
+                )
+            with _m4:
+                st.metric(
+                    "Inst. Score",
+                    f"{_fii_result_dash.institutional_sentiment_score:.1f}/100",
+                )
+
+            def _trend_badge_dash(trend):
+                colors = {
+                    "Strongly Increasing": ("++", "green"),
+                    "Increasing": ("+", "#4caf50"),
+                    "Stable": ("=", "gray"),
+                    "Decreasing": ("-", "orange"),
+                    "Strongly Decreasing": ("--", "red"),
+                }
+                arrow, color = colors.get(trend, ("=", "gray"))
+                return f"<span style='color:{color}; font-weight:600;'>{arrow} {trend}</span>"
+
+            _t1, _t2 = st.columns(2)
+            with _t1:
+                st.markdown(
+                    f"**FII Trend:** {_trend_badge_dash(_fii_result_dash.fii_trend)}",
+                    unsafe_allow_html=True,
+                )
+                if _fii_result_dash.fii_change_4q is not None:
+                    st.caption(f"4-quarter FII change: {_fii_result_dash.fii_change_4q:+.2f}pp")
+            with _t2:
+                st.markdown(
+                    f"**DII Trend:** {_trend_badge_dash(_fii_result_dash.dii_trend)}",
+                    unsafe_allow_html=True,
+                )
+                if _fii_result_dash.dii_change_4q is not None:
+                    st.caption(f"4-quarter DII change: {_fii_result_dash.dii_change_4q:+.2f}pp")
+
+            if len(_fii_result_dash.quarterly_history) >= 2:
+                st.subheader("Quarterly Shareholding Trend")
+                _quarters = [h.quarter for h in _fii_result_dash.quarterly_history]
+                _fii_vals = [h.fii_pct for h in _fii_result_dash.quarterly_history]
+                _dii_vals = [h.dii_pct for h in _fii_result_dash.quarterly_history]
+                _total_vals = [round(f + d, 2) for f, d in zip(_fii_vals, _dii_vals)]
+
+                _fig_dash = go.Figure()
+                _fig_dash.add_trace(go.Scatter(
+                    x=_quarters, y=_fii_vals, mode="lines+markers", name="FII %",
+                    line=dict(color="#1976d2", width=2.5), marker=dict(size=7),
+                    hovertemplate="Quarter: %{x}<br>FII: %{y:.2f}%<extra></extra>",
+                ))
+                _fig_dash.add_trace(go.Scatter(
+                    x=_quarters, y=_dii_vals, mode="lines+markers", name="DII %",
+                    line=dict(color="#388e3c", width=2.5), marker=dict(size=7),
+                    hovertemplate="Quarter: %{x}<br>DII: %{y:.2f}%<extra></extra>",
+                ))
+                _fig_dash.add_trace(go.Scatter(
+                    x=_quarters, y=_total_vals, mode="lines", name="Total Inst. %",
+                    line=dict(color="#f57c00", width=2, dash="dot"),
+                    hovertemplate="Quarter: %{x}<br>Total: %{y:.2f}%<extra></extra>",
+                ))
+                _fig_dash.update_layout(
+                    xaxis_title="Quarter",
+                    yaxis_title="Holding (%)",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    height=320,
+                    margin=dict(t=20, b=20, l=10, r=10),
+                    hovermode="x unified",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                )
+                _fig_dash.update_yaxes(gridcolor="rgba(128,128,128,0.15)")
+                st.plotly_chart(_fig_dash, use_container_width=True)
+
+            if _fii_result_dash.reasoning:
+                st.subheader("Analysis")
+                for _reason_dash in _fii_result_dash.reasoning:
+                    st.info(f"  {_reason_dash}")
+
+            with st.expander("What is FII & DII? How to read this?"):
+                st.markdown("""
+**FII - Foreign Institutional Investors**: Foreign funds, hedge funds, FPIs investing from abroad.
+Rising FII % means foreign money flowing INTO this stock.
+
+**DII - Domestic Institutional Investors**: Indian mutual funds, insurance companies (LIC), pension funds.
+Rising DII % means domestic institutions are accumulating.
+
+| Situation | What It Means |
+|-----------|--------------|
+| FII + DII both up | Strong bullish signal |
+| FII up + DII down | Moderate bullish (foreign buying) |
+| FII down + DII up | Could be contrarian opportunity |
+| FII + DII both down | Bearish signal, avoid |
+
+*FII/DII data updates quarterly. Source: screener.in shareholding pattern.*
+                """)
+
+            st.caption(
+                f"Data source: {_fii_result_dash.data_source.replace('_', '.')} | "
+                f"Freshness: {_fii_result_dash.data_freshness} | "
+                f"Analyzed: {_fii_result_dash.timestamp.strftime('%d %b %Y %H:%M UTC')}"
+            )
+
+        # ── Deferred background-task kickoff ─────────────────────────
+        # Fire the TradingView trade-ideas scraper AFTER every dashboard
+        # section (Header → Chart → Snapshot → Overview → Financials →
+        # Market Data → Performance → SWOT → Future Outlook → FII/DII)
+        # has already rendered. Running it earlier raced with the
+        # dashboard's own yfinance / screener enrichment and frequently
+        # returned an empty result that got cached as success. Kickoff
+        # is idempotent — duplicate calls for the same stock are
+        # suppressed by `_should_start` in utils/background_tasks.py.
+        try:
+            from utils.background_tasks import kickoff_dashboard_bg_tasks
+            _bg_clean_symbol = data.symbol.split(".")[0]
+            _bg_exchange = "BSE" if data.symbol.endswith(".BO") else "NSE"
+            kickoff_dashboard_bg_tasks(
+                stock_name=data.name,
+                stock_symbol=data.symbol,
+                clean_symbol=_bg_clean_symbol,
+                exchange=_bg_exchange,
+            )
+        except Exception as _bg_err:
+            print(f"⚠️ Background task kickoff failed: {_bg_err}")
+
+    elif not st.session_state.dash_is_loading and not st.session_state.dash_variants:
+        # ── Welcome / hero state — shown until the user runs their first search ──
+        # Uses SOLID colors (not color-mix / custom properties) inside the HTML
+        # so the hero renders consistently in Streamlit's iframe on both themes.
+        # Card layout uses st.columns for reliable cross-theme / cross-browser
+        # rendering instead of CSS grid inside a markdown block.
+        _hero_text_dark = _tw_theme_base == "dark"
+        _hero_text_color = "#ffffff" if _hero_text_dark else "#0b1a05"
+        _hero_sub_color = "#f3fff0" if _hero_text_dark else "#14290a"
+
+        st.markdown(
+            f"""
+            <div style="
+                background: linear-gradient(135deg, #74e504 0%, #5bb300 100%);
+                border-radius: 14px;
+                padding: 2.25rem 1.75rem;
+                text-align: center;
+                margin: 1rem 0 1.25rem 0;
+                box-shadow: 0 8px 24px -10px rgba(116, 229, 4, 0.45);
+            ">
+                <div style="
+                    font-size: 2rem; font-weight: 800;
+                    color: {_hero_text_color};
+                    margin-bottom: 0.4rem; letter-spacing: -0.01em;
+                    line-height: 1.15;
+                ">
+                    <i class='bx bx-bar-chart-alt-2' style='color:{_hero_text_color};margin-right:10px;vertical-align:-3px;'></i>AI-Powered Stock Dashboard
+                </div>
+                <div style="
+                    font-size: 1rem; font-weight: 500;
+                    color: {_hero_sub_color};
+                    max-width: 640px; margin: 0 auto; line-height: 1.5;
+                ">
+                    Real-time financials, technicals, sentiment &amp; expert
+                    analysis — all in one view.
+                </div>
+            </div>
+
+            <div style="
+                background: #E1FDC6;
+                border: 1px solid #9EF04D;
+                border-left: 4px solid #74e504;
+                border-radius: 10px;
+                padding: 1rem 1.2rem;
+                margin: 0 0 1.5rem 0;
+                display: flex; align-items: center; gap: 0.75rem;
+                box-shadow: 0 2px 10px rgba(116, 229, 4, 0.18);
+            ">
+                <i class='bx bxs-info-circle' style='color:#2E590E;font-size:1.5rem;flex-shrink:0;'></i>
+                <div style="
+                    color: #2E590E;
+                    font-weight: 600; font-size: 0.95rem; line-height: 1.55;
+                ">
+                    Hi! Type a stock name or ticker in the search bar above and I'll
+                    pull together a full analysis — fundamentals, holdings, news
+                    sentiment, and a Buy/Hold/Sell view.
+                </div>
+            </div>
+
+            <div style="
+                display: flex; flex-wrap: wrap; gap: 8px;
+                justify-content: center; margin-bottom: 1.75rem;
+            ">
+                <span style="background:{'#1e2b0c' if _hero_text_dark else '#E1FDC6'};
+                    border:1.5px solid #74e504;
+                    color:{'#ffffff' if _hero_text_dark else '#2E590E'};
+                    padding:6px 14px;border-radius:999px;
+                    font-size:12px;font-weight:700;letter-spacing:0.02em;">
+                    Try <code style="color:{'#9EF04D' if _hero_text_dark else '#2E590E'};background:transparent;font-weight:800;">TCS</code>
+                </span>
+                <span style="background:{'#1e2b0c' if _hero_text_dark else '#E1FDC6'};
+                    border:1.5px solid #74e504;
+                    color:{'#ffffff' if _hero_text_dark else '#2E590E'};
+                    padding:6px 14px;border-radius:999px;
+                    font-size:12px;font-weight:700;letter-spacing:0.02em;">
+                    Try <code style="color:{'#9EF04D' if _hero_text_dark else '#2E590E'};background:transparent;font-weight:800;">Reliance</code>
+                </span>
+                <span style="background:{'#1e2b0c' if _hero_text_dark else '#E1FDC6'};
+                    border:1.5px solid #74e504;
+                    color:{'#ffffff' if _hero_text_dark else '#2E590E'};
+                    padding:6px 14px;border-radius:999px;
+                    font-size:12px;font-weight:700;letter-spacing:0.02em;">
+                    Try <code style="color:{'#9EF04D' if _hero_text_dark else '#2E590E'};background:transparent;font-weight:800;">INFY.NS</code>
+                </span>
+                <span style="background:transparent;border:1px dashed {'#3a3a3a' if _hero_text_dark else '#c8ccd1'};
+                    color:{'#8a8a8a' if _hero_text_dark else '#656d76'};padding:6px 14px;border-radius:999px;
+                    font-size:12px;font-weight:500;">
+                    …or paste any NSE / BSE ticker
+                </span>
+            </div>
+
+            <div style="color:{'#8a8a8a' if _hero_text_dark else '#656d76'};font-size:11px;
+                letter-spacing:0.08em;text-transform:uppercase;font-weight:600;
+                margin-bottom:0.5rem;">
+                What you'll get
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # Feature cards — use st.columns so Streamlit handles responsive layout
+        # instead of relying on CSS grid inside a markdown block (which can
+        # collapse to a single column in light theme / certain viewports).
+        _feat_card_bg = "#1a1a1a" if _hero_text_dark else "#f6f8fa"
+        _feat_card_border = "#2a2a2a" if _hero_text_dark else "#d8dee4"
+        _feat_title_color = "#ffffff" if _hero_text_dark else "#1f2328"
+        _feat_body_color = "#a0a0a0" if _hero_text_dark else "#57606a"
+
+        def _feat_card(icon_cls: str, title: str, body: str) -> str:
+            """icon_cls is a Boxicons class name, e.g. 'bx-line-chart'."""
+            return (
+                f'<div style="background:{_feat_card_bg};border:1px solid {_feat_card_border};'
+                f'border-radius:10px;padding:16px 18px;height:100%;">'
+                f'<div style="color:{_feat_title_color};font-weight:700;font-size:13px;'
+                f'margin-bottom:6px;">'
+                f'<i class="bx {icon_cls}" style="color:#74e504;margin-right:8px;'
+                f'vertical-align:-2px;font-size:1.1em;"></i>{title}</div>'
+                f'<div style="color:{_feat_body_color};font-size:12.5px;line-height:1.55;">'
+                f'{body}</div></div>'
+            )
+
+        _f1, _f2, _f3, _f4 = st.columns(4)
+        _f1.markdown(
+            _feat_card(
+                "bx-line-chart", "Live Market Data",
+                "Price, 52W range, volume, beta, market cap, and holdings breakdown.",
+            ),
+            unsafe_allow_html=True,
+        )
+        _f2.markdown(
+            _feat_card(
+                "bxs-dollar-circle", "Deep Financials",
+                "Income statement, balance sheet, cash flow, valuation ratios, margins.",
+            ),
+            unsafe_allow_html=True,
+        )
+        _f3.markdown(
+            _feat_card(
+                "bx-target-lock", "SWOT &amp; News",
+                "AI-summarised strengths / risks plus latest headlines from top sources.",
+            ),
+            unsafe_allow_html=True,
+        )
+        _f4.markdown(
+            _feat_card(
+                "bx-bulb", "Expert Outlook",
+                "LLM-generated thesis, forward sentiment, and quarterly-report highlights.",
+            ),
+            unsafe_allow_html=True,
+        )
 
 
 elif view_option == "⚡ Bulk Stock Analyzer":
     # Bulk Stock Analyzer - Full-featured version matching bulk_stock_dashboard.py
-    st.markdown("### 🔍 Bulk Stock Analyzer")
+    bx_header("Bulk Stock Analyzer", "bx-search-alt-2", level=3)
     st.markdown("Find stocks that have fallen ≥25% from their 52-week high")
     
     # Import required modules
@@ -4915,7 +7640,7 @@ elif view_option == "⚡ Bulk Stock Analyzer":
         results = st.session_state.bulk_results
         
         st.markdown("---")
-        st.markdown("## 📈 Summary")
+        bx_header("Summary", "bx-line-chart", level=2)
         
         col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
@@ -5171,12 +7896,17 @@ elif view_option == "⚡ Bulk Stock Analyzer":
         
         ### Features:
         
-        - ✅ Concurrent processing for fast results
-        - ✅ Automatic retry on failures
-        - ✅ Detailed visualizations
-        - ✅ Export to CSV/JSON
-        - ✅ Individual stock charts
         """)
+
+        st.markdown("""
+        <ul style='list-style:none;padding-left:0;margin:0;'>
+          <li style='margin:4px 0;'><i class='bx bxs-check-circle' style='color:#22c55e;margin-right:8px;vertical-align:-2px;'></i>Concurrent processing for fast results</li>
+          <li style='margin:4px 0;'><i class='bx bxs-check-circle' style='color:#22c55e;margin-right:8px;vertical-align:-2px;'></i>Automatic retry on failures</li>
+          <li style='margin:4px 0;'><i class='bx bxs-check-circle' style='color:#22c55e;margin-right:8px;vertical-align:-2px;'></i>Detailed visualizations</li>
+          <li style='margin:4px 0;'><i class='bx bxs-check-circle' style='color:#22c55e;margin-right:8px;vertical-align:-2px;'></i>Export to CSV/JSON</li>
+          <li style='margin:4px 0;'><i class='bx bxs-check-circle' style='color:#22c55e;margin-right:8px;vertical-align:-2px;'></i>Individual stock charts</li>
+        </ul>
+        """, unsafe_allow_html=True)
 
 elif view_option == "🖊️ Drawing Generator":
     # Drawing Generator — calls api_chat_drawing.py  POST /api/v1/drawing/chat/
@@ -5225,7 +7955,7 @@ elif view_option == "🖊️ Drawing Generator":
 
     st.markdown("---")
     # ── What to generate ─────────────────────────────────────────────────────
-    st.markdown("#### 📋 Select Analysis Tasks")
+    bx_header("Select Analysis Tasks", "bx-list-ul", level=4)
     st.info(
         "🤖 **AI-Powered Detection**: your selections are converted into a natural-language "
         "message and sent to the Chat Drawing API. The LLM understands context and generates "
@@ -5325,7 +8055,7 @@ elif view_option == "🖊️ Drawing Generator":
                             )
 
                         # Statistics
-                        st.markdown("#### 📊 Generation Statistics")
+                        bx_header("Generation Statistics", "bx-stats", level=4)
                         counts = {"zones": 0, "patterns": 0, "indicators": 0, "levels": 0}
                         _pattern_kw = [
                             "engulfing", "doji", "hammer", "star", "shooting",
@@ -5411,7 +8141,7 @@ elif view_option == "🖊️ Drawing Generator":
                         📋 Copy JSON
                     </button>
                     <div id="copyStatus" style="margin-top:5px;font-size:12px;color:#10b981;display:none;">
-                        ✅ Copied!
+                        <i class='bx bxs-check-circle' style='vertical-align:-2px;margin-right:4px;'></i>Copied!
                     </div>
                 </div>
                 <script>
@@ -5472,7 +8202,7 @@ elif view_option == "🖊️ Drawing Generator":
 
 elif view_option == "⚙️ System Info":
     # System Info
-    st.subheader("🔧 System Information")
+    bx_header("System Information", "bx-cog")
     st.info("**Pydantic AI Agent**: Using Google Gemini with 4-key rotation")
     st.info("**Tools**: Stock validation, Q&A, scenario analysis, summaries")
     st.info("**Data Sources**: Yahoo Finance + Tavily web search (screener.in only)")

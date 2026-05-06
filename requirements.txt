@@ -1,6 +1,8 @@
 # Core framework
 streamlit
 streamlit-autorefresh
+fastapi
+uvicorn
 
 # AI / LLM
 pydantic-ai
@@ -20,6 +22,11 @@ yfinance
 pandas
 numpy
 plotly
+# TA-Lib provides candlestick pattern recognition (CDL*) and indicators used by
+# analysis_evaluator/talib_analyzer.py. Wheel install: `pip install TA-Lib`.
+# On Windows, install the C library via `pip install TA-Lib-Precompiled` if the
+# native build fails.
+TA-Lib
 
 # PDF handling
 PyPDF2
@@ -32,6 +39,7 @@ python-pptx
 
 # Web scraping
 requests
+charset_normalizer
 httpx
 beautifulsoup4
 lxml
@@ -40,6 +48,7 @@ playwright
 # Database
 psycopg2-binary
 SQLAlchemy
+alembic
 peewee
 
 # Utilities
@@ -49,6 +58,3 @@ pydantic-settings
 python-dateutil
 pytz
 
-# FinBERT sentiment (ProsusAI/finbert — ~440MB model, ~2GB RAM when loaded)
-transformers>=4.36.0
-torch>=2.0.0
