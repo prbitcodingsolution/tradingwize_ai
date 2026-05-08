@@ -1074,6 +1074,20 @@ _YEARS_ALIASES.update({
     "10 years above": "10 Year Above",
     "10 years+": "10 Year Above",
     "10+": "10 Year Above",
+    # Numeric `value` from the frontend dropdown — kept in lock-step with the
+    # frontend's year_of_experience options list so either label or value is
+    # accepted on the wire. Note: there is intentionally no "5 Year to 6 Year"
+    # bracket — the frontend skips from value 5 (4→5) to value 6 (6→7).
+    "1": "6 Month to 1 Year",
+    "2": "1 Year to 2 Year",
+    "3": "2 Year to 3 Year",
+    "4": "3 Year to 4 Year",
+    "5": "4 Year to 5 Year",
+    "6": "6 Year to 7 Year",
+    "7": "7 Year to 8 Year",
+    "8": "8 Year to 9 Year",
+    "9": "9 Year to 10 Year",
+    "10": "10 Year Above",
 })
 
 
