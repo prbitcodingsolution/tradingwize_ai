@@ -4,8 +4,23 @@ Simple script to help you get a new API token
 
 import requests
 import json
+import sys
+from pathlib import Path
 
-API_BASE_URL = "http://192.168.0.126:8000"
+from dotenv import load_dotenv
+load_dotenv()  # Pick up `.env` so LMS_BASE_URL is visible to get_lms_base_url().
+
+# Make project-level utils importable when this script is run directly
+# (`python get_new_token.py`) — without this `from utils...` would fail.
+_PROJECT_ROOT = str(Path(__file__).resolve().parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from utils.base_url import get_lms_base_url
+
+# Reads LMS_BASE_URL (or legacy API_BASE_URL / DRAWING_EXPLAINER_BASE_URL)
+# from `.env` — change the URL there once instead of editing this file.
+API_BASE_URL = get_lms_base_url()
 
 print("\n" + "="*70)
 print("🔐 Get New API Token")

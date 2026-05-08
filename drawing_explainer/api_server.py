@@ -49,8 +49,13 @@ from drawing_explainer.explainer import (
 )
 from drawing_explainer.llm_explainer import (
     ALLOWED_ANALYSIS_TYPES,
+    ASSESTS,
     FRAMEWORK_NAMES,
+    TRADING_STYLES,
+    USER_LEVELS,
+    YEARS_OF_EXPERIENCE,
     normalize_analysis_type,
+    normalize_user_profile,
 )
 
 logger = logging.getLogger(__name__)
@@ -133,6 +138,46 @@ class ExplainRequest(BaseModel):
         ),
     )
 
+    # ── Student profile (optional) — tailors explanation depth/terminology ──
+    trading_style: Optional[str] = Field(
+        None,
+        description=(
+            "Student's trading style. Accepted values (case-insensitive): "
+            f"{', '.join(repr(t) for t in TRADING_STYLES)}. "
+            "Empty / omitted → no tailoring on this axis."
+        ),
+    )
+    user_level: Optional[str] = Field(
+        None,
+        description=(
+            "Student's experience level. Accepted values (case-insensitive, "
+            "matches UI label spelling): "
+            f"{', '.join(repr(t) for t in USER_LEVELS)}. "
+            "Beginner → simpler language with jargon defined inline; "
+            "advance → terse direct critique with institutional terminology."
+        ),
+    )
+    assests: Optional[str] = Field(
+        None,
+        description=(
+            "Asset class the student trades. Accepted values "
+            "(case-insensitive, matches UI label spelling): "
+            f"{', '.join(repr(t) for t in ASSESTS)}. "
+            "Drives terminology (pips for Forex, points/% for Stocks, "
+            "contract specs for Comodity, etc.). Empty / omitted → no "
+            "asset-specific framing."
+        ),
+    )
+    year_of_experience: Optional[str] = Field(
+        None,
+        description=(
+            "Student's years of trading experience. Accepted values: "
+            f"{', '.join(repr(t) for t in YEARS_OF_EXPERIENCE)}. "
+            "Calibrates tone: early-stage → discipline + journaling focus; "
+            "veteran → blunt execution-flaw critique."
+        ),
+    )
+
 
 class ExplainFromSessionRequest(BaseModel):
     session: Dict[str, Any] = Field(..., description="Raw session JSON (chartData.json shape).")
@@ -165,6 +210,24 @@ class ExplainFromSessionRequest(BaseModel):
             "`\"VSA\"`, `\"Patterns\"`, `\"Price Action\"`. Omit / null → "
             "existing generic explanation."
         ),
+    )
+
+    # ── Student profile (optional) — tailors explanation depth/terminology ──
+    trading_style: Optional[str] = Field(
+        None,
+        description=f"One of: {', '.join(repr(t) for t in TRADING_STYLES)}.",
+    )
+    user_level: Optional[str] = Field(
+        None,
+        description=f"One of: {', '.join(repr(t) for t in USER_LEVELS)}.",
+    )
+    assests: Optional[str] = Field(
+        None,
+        description=f"One of: {', '.join(repr(t) for t in ASSESTS)}.",
+    )
+    year_of_experience: Optional[str] = Field(
+        None,
+        description=f"One of: {', '.join(repr(t) for t in YEARS_OF_EXPERIENCE)}.",
     )
 
 
@@ -215,6 +278,22 @@ def _validate_analysis_type(raw: Optional[str]) -> Optional[str]:
     """Uppercase + validate. None / empty → None. Unknown → HTTP 400."""
     try:
         return normalize_analysis_type(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _build_user_profile(req) -> Dict[str, Optional[str]]:
+    """Collect the four optional profile fields off the request, normalise them
+    in one pass, and return a 4-key dict (values may be None). Unknown values
+    raise HTTP 400 with the canonical list — same UX as `analysis_type`."""
+    raw = {
+        "trading_style": getattr(req, "trading_style", None),
+        "user_level": getattr(req, "user_level", None),
+        "assests": getattr(req, "assests", None),
+        "year_of_experience": getattr(req, "year_of_experience", None),
+    }
+    try:
+        return normalize_user_profile(raw)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -290,6 +369,7 @@ def explain_endpoint(req: ExplainRequest) -> Dict[str, Any]:
     answer_ids_clean = _clean_id_list(req.answer_id)
     date_clean = _normalize_date(req.date)
     analysis_type_clean = _validate_analysis_type(req.analysis_type)
+    user_profile_clean = _build_user_profile(req)
 
     if chapter_id_clean and answer_ids_clean:
         raise HTTPException(
@@ -312,6 +392,7 @@ def explain_endpoint(req: ExplainRequest) -> Dict[str, Any]:
                     verify_ssl=req.verify_ssl,
                     max_workers=req.max_workers,
                     analysis_type=analysis_type_clean,
+                    user_profile=user_profile_clean,
                 )
             else:
                 result = explain_from_multiple_answers(
@@ -321,6 +402,7 @@ def explain_endpoint(req: ExplainRequest) -> Dict[str, Any]:
                     verify_ssl=req.verify_ssl,
                     max_workers=req.max_workers,
                     analysis_type=analysis_type_clean,
+                    user_profile=user_profile_clean,
                 )
             return _attach_framework_echo(result, analysis_type_clean)
 
@@ -343,6 +425,7 @@ def explain_endpoint(req: ExplainRequest) -> Dict[str, Any]:
             max_questions=req.max_questions,
             max_workers=req.max_workers,
             analysis_type=analysis_type_clean,
+            user_profile=user_profile_clean,
         )
         return _attach_framework_echo(result, analysis_type_clean)
     except HTTPException:
@@ -382,6 +465,7 @@ def explain_from_session_endpoint(req: ExplainFromSessionRequest) -> Dict[str, A
     against real price action.
     """
     analysis_type_clean = _validate_analysis_type(req.analysis_type)
+    user_profile_clean = _build_user_profile(req)
     try:
         result = explain_from_session(
             req.session,
@@ -392,6 +476,7 @@ def explain_from_session_endpoint(req: ExplainFromSessionRequest) -> Dict[str, A
             verify_ssl=req.verify_ssl,
             fetch_candles_for_grading=req.fetch_candles_for_grading,
             analysis_type=analysis_type_clean,
+            user_profile=user_profile_clean,
         )
         return _attach_framework_echo(result, analysis_type_clean)
     except requests.ConnectionError:

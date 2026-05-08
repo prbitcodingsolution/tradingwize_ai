@@ -1,59 +1,60 @@
-"""Render the structured analysis into a markdown string the frontend can drop
-straight into a markdown renderer (e.g. react-markdown).
+"""Render the per-question card produced by `explain_question` into the
+7-section markdown layout the frontend expects.
 
-We expose two entry points:
+Card schema (top-level keys on the question dict):
 
-    format_question(q)         — markdown for ONE question card
-    format_session(result)     — markdown for the WHOLE session report
-                                  (session summary + every question)
+    overall_score, strengths, mistake, market_did, better_approach,
+    psychology_note, key_lesson, next_focus
 
-Both are defensive: any missing field is silently skipped rather than raising,
-so a partial / parse-recovered LLM response still renders something useful.
+Plus the always-present chart context: question_no, pair, timeframe.
+
+Two entry points:
+
+    format_question(q)         — markdown for ONE card
+    format_session(result)     — header + every card stacked
+
+The verbose multi-section format (session_summary, pattern_analysis,
+mistakes[], drawing_accuracy, etc.) was removed — see
+`ai_explanation_format_task.md` for the deprecation list.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
+# Use the shared schema so the section list lives in ONE place; if a future
+# change adds/renames a card field we update only `llm_explainer._SECTION_KEYS`
+# and both the prompt's empty-card defaults and this renderer follow.
+from .llm_explainer import _SECTION_KEYS
 
 
-# ───────────────────────── small helpers ─────────────────────────
-
-def _g(d: Optional[Dict[str, Any]], *path: str, default: Any = None) -> Any:
-    """Safe nested-dict access: `_g(d, 'a', 'b')` → `d['a']['b']` or default."""
-    cur: Any = d or {}
-    for key in path:
-        if not isinstance(cur, dict):
-            return default
-        cur = cur.get(key)
-        if cur is None:
-            return default
-    return cur
-
-
-def _bullets(items: Any) -> List[str]:
-    """Turn an arbitrary list into stripped, non-empty markdown bullet lines."""
-    if not isinstance(items, list):
-        return []
-    out = []
-    for it in items:
-        if isinstance(it, str) and it.strip():
-            out.append(f"- {it.strip()}")
-    return out
-
-
-def _fmt_price(v: Any) -> str:
-    if v is None:
-        return "—"
+def _fmt_score(raw: Any) -> str:
+    """Score formatter — always one decimal so the UI gets `7.0/10` not `7/10`."""
+    if raw is None or raw == "":
+        return "?"
     try:
-        return f"{float(v):g}"
+        return f"{float(raw):.1f}"
     except (TypeError, ValueError):
-        return str(v)
+        return str(raw)
 
 
-# ───────────────────────── per-question ──────────────────────────
+def _section_text(value: Any) -> str:
+    """Coerce a card field to a clean single-line string. The schema asks the
+    LLM for plain text but a stray bullet / list can sneak in — flatten
+    whatever we got into a single paragraph so the card layout stays clean."""
+    if value is None:
+        return "—"
+    if isinstance(value, list):
+        bits = [str(v).strip() for v in value if isinstance(v, (str, int, float)) and str(v).strip()]
+        return " ".join(bits) or "—"
+    s = str(value).strip()
+    return s or "—"
+
+
+# ───────────────────────── per-question card ─────────────────────
 
 def format_question(q: Dict[str, Any]) -> str:
-    """Render one question's analysis as markdown."""
+    """Render one trade as the 7-section card."""
     if not isinstance(q, dict):
         return ""
 
@@ -71,144 +72,15 @@ def format_question(q: Dict[str, Any]) -> str:
 
     parts: List[str] = []
 
-    pair = q.get("pair", "")
-    tf = q.get("timeframe", "")
+    pair = q.get("pair") or ""
+    tf = q.get("timeframe") or ""
     qno = q.get("question_no", "?")
-    parts.append(f"## 📈 Question {qno}: {pair} · {tf}")
+    parts.append(f"## 📈 Question {qno}: {pair} · {tf}".rstrip(" ·"))
 
-    # Higher-timeframe bias + liquidity-sweep status — anchors every other
-    # piece of feedback. Render only when the LLM populated them.
-    context_bits: List[str] = []
-    htf = q.get("htf_bias")
-    if isinstance(htf, str) and htf.strip():
-        context_bits.append(f"**HTF bias**: {htf.strip()}")
-    sweep = q.get("liquidity_swept_before_entry")
-    if isinstance(sweep, dict) and sweep.get("status"):
-        context_bits.append(f"**Liquidity swept before entry**: {sweep['status']}")
-    elif isinstance(sweep, str) and sweep.strip():
-        context_bits.append(f"**Liquidity swept before entry**: {sweep.strip()}")
-    if context_bits:
-        parts.append(" · ".join(context_bits))
-    if isinstance(sweep, dict) and sweep.get("note"):
-        parts.append(f"> {sweep['note']}")
+    parts.append(f"\n**Overall Score:** {_fmt_score(q.get('overall_score'))}/10")
 
-    score = q.get("score") or {}
-    if score:
-        parts.append(
-            f"**Score** — Overall **{score.get('overall', '?')}/10**  ·  "
-            f"Pattern {score.get('pattern_recognition', '?')}/10  ·  "
-            f"Execution {score.get('execution', '?')}/10  ·  "
-            f"Risk Mgmt {score.get('risk_management', '?')}/10  ·  "
-            f"Drawing Accuracy {score.get('drawing_accuracy', '?')}/10"
-        )
-
-    # Confluence breakdown — five-axis quality of the setup, framework-agnostic.
-    cs = q.get("confluence_score") or {}
-    if isinstance(cs, dict) and cs:
-        parts.append(
-            f"\n**🧩 Confluence** — Structure {cs.get('structure', '?')}/10  ·  "
-            f"Liquidity {cs.get('liquidity', '?')}/10  ·  "
-            f"Risk {cs.get('risk', '?')}/10  ·  "
-            f"Entry Timing {cs.get('entry_timing', '?')}/10  ·  "
-            f"Confirmation {cs.get('confirmation', '?')}/10"
-        )
-
-    # Drawing accuracy: ground-truth check against the actual candles.
-    da = q.get("drawing_accuracy") or {}
-    if da:
-        anchored = da.get("well_anchored")
-        total = da.get("total_drawings")
-        breakdown = ""
-        if anchored is not None and total is not None:
-            breakdown = f" · {anchored}/{total} drawings well-anchored"
-        parts.append(
-            f"\n**🎯 Drawing accuracy**: {da.get('score', '?')}/10{breakdown}"
-        )
-        if da.get("explanation"):
-            parts.append(f"> {da['explanation']}")
-
-    # ── pattern analysis ──
-    pa = q.get("pattern_analysis") or {}
-    if pa:
-        parts.append("\n### 🎯 Pattern Analysis")
-        parts.append(
-            f"- **Identified pattern**: {pa.get('identified_pattern', '—')}  "
-            f"(confidence: *{pa.get('pattern_confidence', '—')}*)"
-        )
-        parts.append(f"- **Trend direction**: {pa.get('trend_direction', '—')}")
-        tools = pa.get("drawing_tools_used") or []
-        if tools:
-            parts.append(f"- **Drawing tools used**: {', '.join(str(t) for t in tools)}")
-
-        markers = pa.get("entry_exit_markers") or {}
-        if any(markers.get(k) is not None for k in ("entry", "stop_loss", "take_profit")):
-            parts.append(
-                f"- **Levels** — Entry: `{_fmt_price(markers.get('entry'))}`  ·  "
-                f"SL: `{_fmt_price(markers.get('stop_loss'))}`  ·  "
-                f"TP: `{_fmt_price(markers.get('take_profit'))}`"
-            )
-
-        levels = pa.get("key_levels") or []
-        if isinstance(levels, list) and levels:
-            parts.append("- **Key levels**:")
-            for lv in levels:
-                if isinstance(lv, dict):
-                    role = lv.get("role", "level")
-                    price = _fmt_price(lv.get("price"))
-                    label = lv.get("label", "")
-                    parts.append(f"  - *{role}* · `{price}` — {label}")
-
-        if pa.get("summary"):
-            parts.append(f"\n> {pa['summary']}")
-
-    # ── potential higher-probability setup ──
-    bs = q.get("best_setup") or {}
-    if bs:
-        title = bs.get("title") or "One possible execution model"
-        parts.append(f"\n### ✨ Potential Higher-Probability Setup — {title}")
-        if bs.get("description"):
-            parts.append(f"**One possible execution model:** {bs['description']}")
-        if bs.get("rationale"):
-            parts.append(f"\n**Why it can fit the current structure:** {bs['rationale']}")
-
-    # ── mistakes ──
-    mistakes = q.get("mistakes") or []
-    if isinstance(mistakes, list) and mistakes:
-        parts.append("\n### ❌ Mistakes")
-        for i, m in enumerate(mistakes, 1):
-            if not isinstance(m, dict):
-                continue
-            mtype = m.get("type", "mistake").replace("_", " ").title()
-            parts.append(f"\n**{i}. {mtype}**")
-            if m.get("what"):
-                parts.append(f"- *What:* {m['what']}")
-            if m.get("why_wrong"):
-                parts.append(f"- *Why it's wrong:* {m['why_wrong']}")
-            if m.get("correct_approach"):
-                parts.append(f"- *Correct approach:* {m['correct_approach']}")
-
-    # ── personalized coaching ──
-    ps = q.get("personalized_strategy") or {}
-    if ps:
-        parts.append("\n### 🎓 Personalized Coaching")
-        if ps.get("feedback"):
-            parts.append(f"**Feedback:** {ps['feedback']}")
-        if ps.get("correct_approach"):
-            parts.append(f"\n**Correct approach next time:** {ps['correct_approach']}")
-        if ps.get("concept_lesson"):
-            parts.append(f"\n**Concept lesson:** {ps['concept_lesson']}")
-
-        steps = ps.get("actionable_steps") or []
-        if isinstance(steps, list) and steps:
-            parts.append("\n**Action steps:**")
-            for i, s in enumerate(steps, 1):
-                if isinstance(s, str) and s.strip():
-                    # Strip a "1." or "1)" prefix if the model already numbered.
-                    text = s.strip().lstrip("0123456789.)-: \t")
-                    parts.append(f"{i}. {text}")
-
-        if ps.get("encouragement"):
-            parts.append(f"\n> 💪 {ps['encouragement']}")
+    for key, label in _SECTION_KEYS:
+        parts.append(f"\n**{label}** {_section_text(q.get(key))}")
 
     if q.get("_truncated"):
         parts.append(
@@ -221,106 +93,31 @@ def format_question(q: Dict[str, Any]) -> str:
 # ───────────────────────── session-level ─────────────────────────
 
 def format_session(result: Dict[str, Any]) -> str:
-    """Render the whole report (session summary + every question) as markdown."""
+    """Render the whole session — metadata header + every question card.
+
+    The verbose session-level coaching summary (strengths/weaknesses/
+    recurring-mistakes/study-plan/closing-note) was deprecated in favour of
+    the per-question card; we no longer emit any of those blocks here.
+    """
     if not isinstance(result, dict):
         return ""
 
     parts: List[str] = ["# 📊 Trading Session Analysis"]
 
     sess = result.get("session") or {}
-    if sess:
-        meta_bits = []
-        if sess.get("submit_date"):
-            meta_bits.append(f"**Date**: {sess['submit_date']}")
-        if sess.get("win") is not None and sess.get("loss") is not None:
-            meta_bits.append(f"**W/L**: {sess['win']} / {sess['loss']}")
-        if sess.get("win_loss_ratio"):
-            meta_bits.append(f"**Win-rate**: {sess['win_loss_ratio']}")
-        if sess.get("total_points") is not None:
-            meta_bits.append(f"**Points**: {sess['total_points']}")
-        if sess.get("total_questions") is not None:
-            meta_bits.append(f"**Questions**: {sess['total_questions']}")
-        if meta_bits:
-            parts.append(" · ".join(meta_bits))
-
-    summary = result.get("session_summary") or {}
-    if summary.get("_error"):
-        parts.append(f"\n> ⚠️ Session summary failed: {summary['_error']}")
-    elif summary:
-        score = summary.get("session_score") or {}
-        if score:
-            parts.append(
-                f"\n**Session score** — Overall **{score.get('overall', '?')}/10**  ·  "
-                f"Pattern {score.get('pattern_recognition', '?')}/10  ·  "
-                f"Execution {score.get('execution', '?')}/10  ·  "
-                f"Risk Mgmt {score.get('risk_management', '?')}/10  ·  "
-                f"Drawing Accuracy {score.get('drawing_accuracy', '?')}/10"
-            )
-
-        if summary.get("headline"):
-            parts.append(f"\n> {summary['headline']}")
-
-        strengths = _bullets(summary.get("strengths"))
-        if strengths:
-            parts.append("\n### ✅ Strengths")
-            parts.extend(strengths)
-
-        weaknesses = _bullets(summary.get("weaknesses"))
-        if weaknesses:
-            parts.append("\n### ⚠️ Weaknesses")
-            parts.extend(weaknesses)
-
-        recurring = summary.get("recurring_mistakes") or []
-        if isinstance(recurring, list) and recurring:
-            parts.append("\n### 🔁 Recurring Mistakes")
-            for i, rm in enumerate(recurring, 1):
-                if not isinstance(rm, dict):
-                    continue
-                pattern = rm.get("pattern", "")
-                freq = rm.get("frequency", "")
-                fix = rm.get("fix", "")
-                line = f"{i}. **{pattern}**"
-                if freq:
-                    line += f" *({freq})*"
-                parts.append(line)
-                if fix:
-                    parts.append(f"   - *Fix:* {fix}")
-
-        best = summary.get("best_question") or {}
-        worst = summary.get("worst_question") or {}
-        if best or worst:
-            parts.append("\n### 🏆 Best & Worst")
-            if best:
-                parts.append(
-                    f"- **Best — Q{best.get('question_no', '?')}**: {best.get('reason', '')}"
-                )
-            if worst:
-                parts.append(
-                    f"- **Worst — Q{worst.get('question_no', '?')}**: {worst.get('reason', '')}"
-                )
-
-        plan = summary.get("study_plan") or []
-        if isinstance(plan, list) and plan:
-            parts.append("\n### 📚 Study Plan")
-            for i, item in enumerate(plan, 1):
-                if isinstance(item, dict):
-                    drill = item.get("drill", "")
-                    why = item.get("why", "")
-                    how_long = item.get("how_long", "")
-                    line = f"{i}. **{drill}**"
-                    suffix_bits = []
-                    if how_long:
-                        suffix_bits.append(f"*{how_long}*")
-                    if why:
-                        suffix_bits.append(why)
-                    if suffix_bits:
-                        line += " — " + " · ".join(suffix_bits)
-                    parts.append(line)
-                elif isinstance(item, str):
-                    parts.append(f"{i}. {item}")
-
-        if summary.get("closing_note"):
-            parts.append(f"\n### 💬 Closing Note\n\n> {summary['closing_note']}")
+    meta_bits: List[str] = []
+    if sess.get("submit_date"):
+        meta_bits.append(f"**Date**: {sess['submit_date']}")
+    if sess.get("win") is not None and sess.get("loss") is not None:
+        meta_bits.append(f"**W/L**: {sess['win']} / {sess['loss']}")
+    if sess.get("win_loss_ratio"):
+        meta_bits.append(f"**Win-rate**: {sess['win_loss_ratio']}")
+    if sess.get("total_points") is not None:
+        meta_bits.append(f"**Points**: {sess['total_points']}")
+    if sess.get("total_questions") is not None:
+        meta_bits.append(f"**Questions**: {sess['total_questions']}")
+    if meta_bits:
+        parts.append(" · ".join(meta_bits))
 
     questions = result.get("questions") or []
     if isinstance(questions, list) and questions:
@@ -329,6 +126,6 @@ def format_session(result: Dict[str, Any]) -> str:
             md = format_question(q)
             if md:
                 parts.append(md)
-                parts.append("")  # blank line between questions
+                parts.append("")  # blank line between cards
 
     return "\n".join(parts).rstrip() + "\n"

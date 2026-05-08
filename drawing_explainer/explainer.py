@@ -192,10 +192,16 @@ def _question_has_actionable_data(q: Dict[str, Any]) -> bool:
 def _build_no_data_response(compact: Dict[str, Any]) -> Dict[str, Any]:
     """Friendly response for when none of the fetched questions have any
     drawings or chart metadata — typically `single-result` payloads that
-    carry only the trade decision, not the TradingView drawings JSON."""
+    carry only the trade decision, not the TradingView drawings JSON.
+
+    Now reports per-`requested_answer_id` info so the caller can see WHICH
+    of the requested ids resolved to which compacted question, and detect
+    when the LMS returned the same wrapper for multiple ids (a known LMS
+    quirk — see the de-duplication note in `explain_from_multiple_answers`)."""
     questions = compact.get("questions") or []
     question_summaries = [
         {
+            "requested_answer_id": q.get("requested_answer_id"),
             "id": q.get("id"),
             "question_no": q.get("question_no"),
             "user_drawings": (q.get("drawing_counts") or {}).get("user", 0),
@@ -203,14 +209,38 @@ def _build_no_data_response(compact: Dict[str, Any]) -> Dict[str, Any]:
         }
         for q in questions
     ]
-    message = (
-        "No data found for the mentioned ID."
-        if not questions
-        else "No data found for the mentioned ID(s) — "
-             "the LMS returned the trade record(s) but no drawings JSON or chart "
-             "metadata. Use `chapter_id` + `date` instead of `answer_id` if you "
-             "need TradingView drawings."
-    )
+
+    # If multiple distinct requested_answer_ids resolved to the SAME
+    # underlying question (same id + same question_no), surface that — it's
+    # the symptom of the LMS returning a chapter-wide wrapper for any
+    # answer_id within the chapter, with no per-trade differentiation.
+    fingerprints = {(q.get("id"), q.get("question_no")) for q in questions}
+    requested_ids = [s.get("requested_answer_id") for s in question_summaries]
+    requested_unique = [a for a in requested_ids if a is not None]
+    duplicate_warning: Optional[str] = None
+    if len(requested_unique) >= 2 and len(fingerprints) == 1:
+        duplicate_warning = (
+            f"All {len(requested_unique)} requested answer_id(s) "
+            f"({requested_unique}) resolved to the same underlying record "
+            f"(id={questions[0].get('id')}, question_no={questions[0].get('question_no')}). "
+            "The LMS likely returned the chapter-wide wrapper without "
+            "differentiating by answer_id. Use `chapter_id` + `date` to fetch "
+            "all drawings, or check whether each answer_id corresponds to a "
+            "distinct trade in the LMS."
+        )
+
+    if not questions:
+        message = "No data found for the mentioned ID."
+    else:
+        message = (
+            "No data found for the mentioned ID(s) — the LMS returned the "
+            "trade record(s) but no drawings JSON or chart metadata. Use "
+            "`chapter_id` + `date` instead of `answer_id` if you need "
+            "TradingView drawings."
+        )
+        if duplicate_warning:
+            message += " " + duplicate_warning
+
     return {
         "success": False,
         "message": message,
@@ -233,6 +263,7 @@ def explain_from_session(
     verify_ssl: bool = False,
     fetch_candles_for_grading: bool = True,
     analysis_type: Optional[str] = None,
+    user_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run the explainer against an already-loaded session JSON.
 
@@ -246,6 +277,11 @@ def explain_from_session(
     `"Price Action"`, case-insensitive) selects a framework-specific lens
     for the LLM prompt. None / missing / empty falls back to the existing
     generic explanation.
+
+    `user_profile` is an optional dict with `trading_style`, `user_level`,
+    `assests`, `year_of_experience` keys. When supplied, the LLM tailors
+    explanation depth, terminology, and trade-management focus to that
+    profile. Empty / missing fields are simply omitted.
 
     Returns a `{success: false, message, ...}` shape (no LLM call) when no
     question has any drawings or chart metadata to evaluate.
@@ -281,7 +317,12 @@ def explain_from_session(
         )
         return _build_no_data_response(compact)
 
-    result = explain_all(compact, max_workers=max_workers, analysis_type=analysis_type)
+    result = explain_all(
+        compact,
+        max_workers=max_workers,
+        analysis_type=analysis_type,
+        user_profile=user_profile,
+    )
     return _attach_explanations(result)
 
 
@@ -301,6 +342,7 @@ def explain_from_api(
     max_workers: Optional[int] = None,
     fetch_candles_for_grading: bool = True,
     analysis_type: Optional[str] = None,
+    user_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Fetch the session from the LMS endpoint, also fetch candles per
     question, then explain everything."""
@@ -325,6 +367,7 @@ def explain_from_api(
         verify_ssl=verify_ssl,
         fetch_candles_for_grading=fetch_candles_for_grading,
         analysis_type=analysis_type,
+        user_profile=user_profile,
     )
 
 
@@ -419,9 +462,22 @@ def _pick_drawing_field(
     return None
 
 
-def _normalize_single_result_question(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_single_result_question(
+    payload: Dict[str, Any],
+    *,
+    answer_id: Optional[Union[int, str]] = None,
+) -> Dict[str, Any]:
     """Normalise a single-result payload into the question shape used by
-    `compact_question`. Mutates a shallow copy and returns it."""
+    `compact_question`. Mutates a shallow copy and returns it.
+
+    `answer_id` (the trade id originally requested) is used to pick the
+    correct `learning_user_answer` entry when that field is a LIST of
+    multiple attempts on the same question. Without this, picking `lua[0]`
+    every time meant two `answer_id`s that share a wrapper response (the
+    LMS sometimes returns the chapter-wide payload for any answer_id within
+    that chapter) would collapse to the same compacted question, producing
+    duplicate cards and a "no data" error.
+    """
     out: Dict[str, Any] = dict(payload)
 
     # Copy non-drawing field aliases (only when the destination is missing,
@@ -435,13 +491,38 @@ def _normalize_single_result_question(payload: Dict[str, Any]) -> Dict[str, Any]
                 out[dst] = val
 
     # `learning_user_answer` is an array on single-result; chartData uses a
-    # singular `user_answer` object. Take the first entry.
+    # singular `user_answer` object. Pick the entry whose `id` matches the
+    # requested `answer_id` so two answer_ids that share a wrapper produce
+    # different compacted questions. Falls back to [0] when no match (legacy
+    # behaviour, with a log line so the operator can see the ambiguity).
+    matched: Optional[Dict[str, Any]] = None
     if not isinstance(out.get("user_answer"), dict):
         lua = out.get("learning_user_answer")
-        if isinstance(lua, list) and lua and isinstance(lua[0], dict):
-            out["user_answer"] = lua[0]
+        if isinstance(lua, list) and lua:
+            if answer_id is not None:
+                requested = str(answer_id)
+                for entry in lua:
+                    if isinstance(entry, dict) and str(entry.get("id")) == requested:
+                        matched = entry
+                        break
+            if matched is None and isinstance(lua[0], dict):
+                if answer_id is not None:
+                    available_ids = [
+                        e.get("id") for e in lua if isinstance(e, dict)
+                    ]
+                    logger.info(
+                        "single-result: requested answer_id=%s, no matching "
+                        "entry in learning_user_answer (available=%s); "
+                        "defaulting to first entry. The LMS may not "
+                        "differentiate this answer_id from others in the "
+                        "same chapter wrapper.",
+                        answer_id, available_ids,
+                    )
+                matched = lua[0]
         elif isinstance(lua, dict):
-            out["user_answer"] = lua
+            matched = lua
+        if matched is not None:
+            out["user_answer"] = matched
 
     # Promote question-level metadata that may be embedded inside the
     # user_answer dict (single-result tends to nest pair/timeframe there).
@@ -454,14 +535,13 @@ def _normalize_single_result_question(payload: Dict[str, Any]) -> Dict[str, Any]
     # different names depending on the endpoint (chartData uses
     # `*_analysis_json` at the question root; single-result has been seen
     # to use `your_analysis` / `right_analysis` at the top, and sometimes
-    # to nest the drawing inside `learning_user_answer[0]`). Try each
-    # known alias at the top level, then inside the user_answer dict.
-    lua_list = payload.get("learning_user_answer")
+    # to nest the drawing inside the matched `learning_user_answer` entry).
+    # CRITICAL: when learning_user_answer is a list, we ONLY look inside
+    # the matched entry — not the whole list — so two answer_ids sharing a
+    # wrapper don't cross-contaminate drawings between trades.
     nested_candidates: List[Dict[str, Any]] = []
-    if isinstance(lua_list, list):
-        nested_candidates.extend(x for x in lua_list if isinstance(x, dict))
-    elif isinstance(lua_list, dict):
-        nested_candidates.append(lua_list)
+    if isinstance(matched, dict):
+        nested_candidates.append(matched)
     if isinstance(ua, dict) and ua not in nested_candidates:
         nested_candidates.append(ua)
 
@@ -471,6 +551,13 @@ def _normalize_single_result_question(payload: Dict[str, Any]) -> Dict[str, Any]
         picked = _pick_drawing_field(payload, *nested_candidates, names=source_names)
         if picked is not None:
             out[dst] = picked
+
+    # Stamp the requested answer_id onto the normalized question so the
+    # compactor + `_build_no_data_response` can show which id produced this
+    # entry (helps diagnose multi-answer flows where the LMS returns the
+    # same wrapper for several ids).
+    if answer_id is not None:
+        out.setdefault("requested_answer_id", answer_id)
 
     # Last-resort fallback: the LMS sometimes uses an unexpected field name
     # (e.g. `answer_json`, `submission_json`). Recursively scan the payload
@@ -489,7 +576,11 @@ def _normalize_single_result_question(payload: Dict[str, Any]) -> Dict[str, Any]
     return out
 
 
-def _single_to_session_shape(payload: Any) -> Dict[str, Any]:
+def _single_to_session_shape(
+    payload: Any,
+    *,
+    answer_id: Optional[Union[int, str]] = None,
+) -> Dict[str, Any]:
     """Normalise a `single-result` response into the session shape that
     `compact_session` expects (`{questions: [...]}` + optional metadata).
 
@@ -501,6 +592,10 @@ def _single_to_session_shape(payload: Any) -> Dict[str, Any]:
     Single-result uses different field names than chartData; in cases (2) and
     (3) we run the question through `_normalize_single_result_question` so
     `question_no`/`user_answer`/`answer_analysis_json` end up populated.
+
+    `answer_id` is threaded through so when `learning_user_answer` is a list
+    of multiple attempts, we can pick the matching entry by id rather than
+    always defaulting to `[0]`.
     """
     if not isinstance(payload, dict):
         return {"questions": []}
@@ -513,34 +608,39 @@ def _single_to_session_shape(payload: Any) -> Dict[str, Any]:
         if isinstance(inner, dict):
             if isinstance(inner.get("questions"), list):
                 return inner
-            return _wrap_single_question(_normalize_single_result_question(inner), payload)
+            return _wrap_single_question(
+                _normalize_single_result_question(inner, answer_id=answer_id),
+                payload,
+            )
         if isinstance(inner, list) and inner and isinstance(inner[0], dict):
             return {
                 "questions": [
-                    _normalize_single_result_question(q) for q in inner if isinstance(q, dict)
+                    _normalize_single_result_question(q, answer_id=answer_id)
+                    for q in inner if isinstance(q, dict)
                 ]
             }
 
-    normalized = _normalize_single_result_question(payload)
+    normalized = _normalize_single_result_question(payload, answer_id=answer_id)
     has_answer = _is_tradingview_drawing_json(normalized.get("answer_analysis_json"))
     has_correction = _is_tradingview_drawing_json(normalized.get("correction_analysis_json"))
     has_mentor = _is_tradingview_drawing_json(normalized.get("mentor_analysis_json"))
     logger.info(
-        "single-result keys=%s; user_answer_present=%s; "
+        "single-result for answer_id=%s: keys=%s; user_answer_present=%s; "
         "drawings: answer=%s correction=%s mentor=%s",
-        sorted(payload.keys()),
+        answer_id, sorted(payload.keys()),
         isinstance(normalized.get("user_answer"), dict),
         has_answer, has_correction, has_mentor,
     )
     if not (has_answer or has_correction or has_mentor):
         logger.warning(
-            "single-result for answer_id=%s contained no TradingView drawing JSON "
-            "in any known field (`answer_analysis_json`, `your_analysis`, "
-            "`mentor_analysis_json`, `correction_analysis_json`, `right_analysis`) "
-            "at the top level OR inside `learning_user_answer[]`, and a recursive "
-            "scan also turned up nothing. The LMS may not embed drawings on this "
-            "endpoint for this trade — use `chapter_id`+`date` instead.",
-            payload.get("id"),
+            "single-result for answer_id=%s (wrapper id=%s) contained no "
+            "TradingView drawing JSON in any known field (`answer_analysis_json`, "
+            "`your_analysis`, `mentor_analysis_json`, `correction_analysis_json`, "
+            "`right_analysis`) at the top level OR inside the matched "
+            "`learning_user_answer` entry, and a recursive scan also turned up "
+            "nothing. The LMS may not embed drawings on this endpoint for this "
+            "trade — use `chapter_id`+`date` instead.",
+            answer_id, payload.get("id"),
         )
     return _wrap_single_question(normalized, payload)
 
@@ -573,6 +673,7 @@ def explain_from_multiple_answers(
     max_workers: Optional[int] = None,
     fetch_candles_for_grading: bool = True,
     analysis_type: Optional[str] = None,
+    user_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Fetch MULTIPLE trades via `/api/v1/learning/single-result/` in parallel,
     merge them into a single session, and run the explainer pipeline once.
@@ -618,9 +719,16 @@ def explain_from_multiple_answers(
         if exc is not None or payload is None:
             fetch_errors.append({"answer_id": aid, "error": str(exc) if exc else "no payload"})
             continue
-        session_shape = _single_to_session_shape(payload)
+        # Thread answer_id so each call picks the correct learning_user_answer
+        # entry — without this two ids that share a wrapper produce duplicate
+        # questions (the bug that caused "No data found" on legitimate inputs).
+        session_shape = _single_to_session_shape(payload, answer_id=aid)
         for q in session_shape.get("questions") or []:
             if isinstance(q, dict):
+                # Stamp the requested id onto every question we extract from
+                # this payload (the normalizer already does it for the matched
+                # entry, but `data`/`result` wrapper paths skip that step).
+                q.setdefault("requested_answer_id", aid)
                 questions.append(q)
 
     if not questions:
@@ -652,6 +760,7 @@ def explain_from_multiple_answers(
         verify_ssl=verify_ssl,
         fetch_candles_for_grading=fetch_candles_for_grading,
         analysis_type=analysis_type,
+        user_profile=user_profile,
     )
     if fetch_errors:
         result["fetch_errors"] = fetch_errors
@@ -667,6 +776,7 @@ def explain_from_single_answer(
     max_workers: Optional[int] = None,
     fetch_candles_for_grading: bool = True,
     analysis_type: Optional[str] = None,
+    user_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Fetch ONE trade via `/api/v1/learning/single-result/` and run the
     same explainer pipeline against just that trade."""
@@ -676,7 +786,7 @@ def explain_from_single_answer(
         bearer_token=bearer_token,
         verify_ssl=verify_ssl,
     )
-    session_json = _single_to_session_shape(payload)
+    session_json = _single_to_session_shape(payload, answer_id=answer_id)
     return explain_from_session(
         session_json,
         max_questions=None,
@@ -686,4 +796,5 @@ def explain_from_single_answer(
         verify_ssl=verify_ssl,
         fetch_candles_for_grading=fetch_candles_for_grading,
         analysis_type=analysis_type,
+        user_profile=user_profile,
     )

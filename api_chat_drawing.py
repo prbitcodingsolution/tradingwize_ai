@@ -19,6 +19,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'drawing_instruction'))
 
 from drawing_instruction.chat_drawing_agent import ChatDrawingAgent
+from utils.base_url import get_lms_base_url
 
 # Configure logging
 logging.basicConfig(
@@ -460,7 +461,7 @@ async def generate_from_chat(request: ChatDrawingRequest):
                         "step_4": "Restart the API server (python api_chat_drawing.py)"
                     },
                     "current_token_status": "expired",
-                    "api_endpoint": os.getenv("API_BASE_URL", "http://192.168.0.126:8000")
+                    "api_endpoint": get_lms_base_url()
                 }
             )
         
@@ -567,11 +568,18 @@ if __name__ == "__main__":
     
     # Check if token is configured
     api_token = os.getenv("API_BEARER_TOKEN", "")
-    api_base_url = os.getenv("API_BASE_URL", "")
-    
-    if not api_base_url:
-        print("\n⚠️  WARNING: API_BASE_URL not configured in .env file")
-        print("   Add: API_BASE_URL=http://192.168.0.126:8000")
+    # `get_lms_base_url()` reads LMS_BASE_URL / API_BASE_URL /
+    # DRAWING_EXPLAINER_BASE_URL — we only warn when none of them are set.
+    explicitly_configured = any(
+        os.getenv(name) for name in
+        ("LMS_BASE_URL", "API_BASE_URL", "DRAWING_EXPLAINER_BASE_URL")
+    )
+    api_base_url = get_lms_base_url()
+
+    if not explicitly_configured:
+        print("\n⚠️  WARNING: LMS_BASE_URL not configured in .env file (using local-dev fallback)")
+        print(f"   Current value: {api_base_url}")
+        print("   Add: LMS_BASE_URL=https://staging.tradingwize.com  (or your server URL)")
     
     if not api_token:
         print("\n⚠️  WARNING: API_BEARER_TOKEN not configured in .env file")

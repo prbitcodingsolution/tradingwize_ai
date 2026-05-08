@@ -23,6 +23,7 @@ import os
 import sys
 from typing import Any, Dict
 
+from utils.base_url import get_lms_base_url
 from .explainer import explain_from_api, explain_from_session
 
 
@@ -40,7 +41,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--is-challenge-only", action="store_true")
     p.add_argument(
         "--base-url",
-        default=os.getenv("DRAWING_EXPLAINER_BASE_URL", "http://192.168.0.122:8000"),
+        # Reads LMS_BASE_URL / API_BASE_URL / DRAWING_EXPLAINER_BASE_URL in
+        # that order; the user changes it once in `.env` for everywhere.
+        default=get_lms_base_url(),
     )
     p.add_argument("--bearer", default=os.getenv("DRAWING_EXPLAINER_BEARER_TOKEN"))
     p.add_argument("--verify-ssl", action="store_true")

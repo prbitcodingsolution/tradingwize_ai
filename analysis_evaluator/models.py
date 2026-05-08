@@ -3,6 +3,8 @@
 from typing import List, Optional, Tuple, Dict, Any, Literal
 from pydantic import BaseModel, Field
 
+from utils.base_url import get_lms_base_url
+
 
 # ─────────────────────────  Inputs  ──────────────────────────
 
@@ -63,7 +65,10 @@ class ManualAnalyzeRequest(BaseModel):
 
 class UpstreamAnalyzeRequest(BaseModel):
     """Auto-fetch mode — server pulls both candles and drawings from the LMS."""
-    base_url: str = Field(default="http://192.168.0.122:8000")
+    # `default_factory` re-evaluates each request, so changing LMS_BASE_URL in
+    # `.env` and restarting the process is enough — no code edit needed when
+    # switching between local-dev and staging/production.
+    base_url: str = Field(default_factory=get_lms_base_url)
     bearer_token: Optional[str] = None
     csrf_token: Optional[str] = None
 

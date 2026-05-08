@@ -7,8 +7,19 @@ import logging
 from openai import OpenAI
 import os
 import json
+import sys
 from dotenv import load_dotenv
+from pathlib import Path
 from typing import Dict, List, Optional
+
+# Ensure the project root is importable so `utils.base_url` resolves whether
+# this module is loaded as `drawing_instruction.chat_drawing_agent` or run
+# from inside the `drawing_instruction/` folder.
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from utils.base_url import get_lms_base_url
 
 load_dotenv()
 
@@ -332,9 +343,10 @@ IMPORTANT: Return ONLY valid JSON, no other text."""
             resolved_symbol = resolve_symbol(symbol, market=market)
             logger.info(f"🔍 Resolved symbol: {symbol} -> {resolved_symbol}")
             
-            # Prepare API config
+            # Prepare API config — base_url resolves from LMS_BASE_URL (or
+            # legacy aliases) so changing the URL in `.env` propagates here.
             api_config = {
-                'base_url': os.getenv('API_BASE_URL', 'http://192.168.0.126:8000'),
+                'base_url': get_lms_base_url(),
                 'from_date': start_date,
                 'to_date': end_date,
                 'market': market,

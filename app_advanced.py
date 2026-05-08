@@ -4763,7 +4763,10 @@ elif view_option == "📈 Data Dashboard":
                 if _ohlc_df is None or _ohlc_df.empty:
                     try:
                         import os as _os
-                        _api_base = _os.getenv("API_BASE_URL")
+                        # `get_lms_base_url()` reads LMS_BASE_URL / API_BASE_URL /
+                        # DRAWING_EXPLAINER_BASE_URL — single env-var source of truth.
+                        from utils.base_url import get_lms_base_url as _get_lms_base_url
+                        _api_base = _get_lms_base_url()
                         _api_token = _os.getenv("API_BEARER_TOKEN")
                         _csrf = _os.getenv("API_CSRF_TOKEN")
                         if _api_base and _api_token:
@@ -4780,7 +4783,7 @@ elif view_option == "📈 Data Dashboard":
                             if _ohlc_df is not None and not _ohlc_df.empty:
                                 print(f"✅ OHLC from mentor API: {len(_ohlc_df)} candles for {data.symbol}")
                         else:
-                            print("⚠️ Mentor API env vars missing (API_BASE_URL / API_BEARER_TOKEN)")
+                            print("⚠️ Mentor API token missing (API_BEARER_TOKEN) — set it in .env")
                     except Exception as _api_err:
                         print(f"⚠️ Mentor API OHLC fetch failed: {_api_err}")
 

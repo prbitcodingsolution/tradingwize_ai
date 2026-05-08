@@ -16,18 +16,19 @@ Both require `Authorization: Bearer <token>`.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, Optional, Union
 
 import requests
 
+from utils.base_url import get_lms_base_url
+
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_BASE_URL = os.getenv(
-    "DRAWING_EXPLAINER_BASE_URL",
-    "http://192.168.0.122:8000",
-)
+# Canonical resolution: reads `LMS_BASE_URL` first, then legacy
+# `API_BASE_URL` / `DRAWING_EXPLAINER_BASE_URL`, then a local-dev fallback.
+# Change the URL in ONE place — `.env` — to switch between local and server.
+DEFAULT_BASE_URL = get_lms_base_url()
 
 
 def _headers(bearer_token: Optional[str]) -> Dict[str, str]:
