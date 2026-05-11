@@ -1,10 +1,10 @@
 """Render the per-question card produced by `explain_question` into the
-7-section markdown layout the frontend expects.
+mentor-style markdown layout the frontend expects.
 
 Card schema (top-level keys on the question dict):
 
-    overall_score, strengths, mistake, market_did, better_approach,
-    psychology_note, key_lesson, next_focus
+    overall_score, market_analysis, mentor_note,
+    student_review: { did_well, mistake, improve }
 
 Plus the always-present chart context: question_no, pair, timeframe.
 
@@ -12,10 +12,6 @@ Two entry points:
 
     format_question(q)         — markdown for ONE card
     format_session(result)     — header + every card stacked
-
-The verbose multi-section format (session_summary, pattern_analysis,
-mistakes[], drawing_accuracy, etc.) was removed — see
-`ai_explanation_format_task.md` for the deprecation list.
 """
 
 from __future__ import annotations
@@ -24,8 +20,9 @@ from typing import Any, Dict, List
 
 # Use the shared schema so the section list lives in ONE place; if a future
 # change adds/renames a card field we update only `llm_explainer._SECTION_KEYS`
-# and both the prompt's empty-card defaults and this renderer follow.
-from .llm_explainer import _SECTION_KEYS
+# / `_STUDENT_REVIEW_KEYS` and both the prompt's empty-card defaults and this
+# renderer follow.
+from .llm_explainer import _SECTION_KEYS, _STUDENT_REVIEW_KEYS
 
 
 def _fmt_score(raw: Any) -> str:
@@ -54,7 +51,7 @@ def _section_text(value: Any) -> str:
 # ───────────────────────── per-question card ─────────────────────
 
 def format_question(q: Dict[str, Any]) -> str:
-    """Render one trade as the 7-section card."""
+    """Render one trade as the mentor-style card."""
     if not isinstance(q, dict):
         return ""
 
@@ -77,10 +74,17 @@ def format_question(q: Dict[str, Any]) -> str:
     qno = q.get("question_no", "?")
     parts.append(f"## 📈 Question {qno}: {pair} · {tf}".rstrip(" ·"))
 
-    parts.append(f"\n**Overall Score:** {_fmt_score(q.get('overall_score'))}/10")
+    market_analysis = next((label for key, label in _SECTION_KEYS if key == "market_analysis"), "Market Analysis")
+    mentor_note_label = next((label for key, label in _SECTION_KEYS if key == "mentor_note"), "Mentor Note")
 
-    for key, label in _SECTION_KEYS:
-        parts.append(f"\n**{label}** {_section_text(q.get(key))}")
+    parts.append(f"\n**{market_analysis}**\n{_section_text(q.get('market_analysis'))}")
+
+    sr = q.get("student_review") if isinstance(q.get("student_review"), dict) else {}
+    parts.append("\n**Student Review 👨‍🎓**")
+    for key, label in _STUDENT_REVIEW_KEYS:
+        parts.append(f"- **{label}:** {_section_text(sr.get(key))}")
+
+    parts.append(f"\n**{mentor_note_label}**\n{_section_text(q.get('mentor_note'))}")
 
     if q.get("_truncated"):
         parts.append(
@@ -110,12 +114,6 @@ def format_session(result: Dict[str, Any]) -> str:
         meta_bits.append(f"**Date**: {sess['submit_date']}")
     if sess.get("win") is not None and sess.get("loss") is not None:
         meta_bits.append(f"**W/L**: {sess['win']} / {sess['loss']}")
-    if sess.get("win_loss_ratio"):
-        meta_bits.append(f"**Win-rate**: {sess['win_loss_ratio']}")
-    if sess.get("total_points") is not None:
-        meta_bits.append(f"**Points**: {sess['total_points']}")
-    if sess.get("total_questions") is not None:
-        meta_bits.append(f"**Questions**: {sess['total_questions']}")
     if meta_bits:
         parts.append(" · ".join(meta_bits))
 

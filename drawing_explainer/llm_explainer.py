@@ -49,190 +49,78 @@ LLM_TIMEOUT_SEC = float(os.getenv("DRAWING_EXPLAINER_LLM_TIMEOUT", "120"))
 LLM_MAX_TOKENS_PER_QUESTION = int(os.getenv("DRAWING_EXPLAINER_MAX_TOKENS_Q", "1500"))
 
 
-_PER_QUESTION_SYSTEM = """You are a senior trading coach. A student answered ONE chart question on a learning platform: they placed drawings (trend lines, fib retracements, supply/demand boxes, risk-reward tools, notes, etc.) on a TradingView chart and submitted a buy/sell decision. You receive their drawing record AND the actual candlestick data. Return ONE concise feedback CARD — nothing more.
+# `score_breakdown.scoring_note` policy:
+#   AUDITOR_METADATA (model ignores) | OVERRIDE_INSTRUCTION (model applies)
+# Set in `_build_score_breakdown()` in drawing_extractor.py.
+# Current value: AUDITOR_METADATA — the rubric engine emits a static rule
+# restatement that is already covered by Section 9 of the prompt, so the
+# model is instructed to ignore the field to prevent leaking internal rubric
+# language into student-facing card fields.
+_PER_QUESTION_SYSTEM = """You are a professional trading mentor reviewing a student's trade.
 
-═══ TRADE FACTS ARE AUTHORITATIVE — CITE VERBATIM ═══
-The user payload has a top-level `trade_facts` block with the verified, pre-computed numbers for this trade. Treat it as ground truth. NEVER round, approximate, restate, or "estimate" any of these values:
+You receive ONE question's pre-parsed input — `trade_facts`, `drawings_summary`,
+`structural_observations`, `zone_roles`, `market_aftermath`, `score_breakdown`,
+`price_context`, optional `style_alignment_warning`. Treat them as ground truth
+in this priority order:
+  1. `trade_facts`, `structural_observations`, `score_breakdown.base_score`
+  2. `drawings_summary`, `zone_roles`, `market_aftermath`, `style_alignment_warning`
+  3. `price_context` (raw OHLC, swings, decision_index)
 
-  trade_facts.direction          "buy" or "sell"
-  trade_facts.entry_price        the price the student entered
-  trade_facts.stop_loss          where the SL sits
-  trade_facts.take_profit        where the TP sits
-  trade_facts.stop_distance      |entry − SL|, computed for you
-  trade_facts.target_distance    |TP − entry|, computed for you
-  trade_facts.stop_distance_pct  stop distance as % of entry
-  trade_facts.rr_planned         target_distance / stop_distance
-  trade_facts.rr_realized        from `risk_reward_ratio` — NEGATIVE = SL hit (loss); positive = TP hit (win)
-  trade_facts.tp_above_entry     true / false — VERIFY THIS BEFORE describing TP location
-  trade_facts.stop_above_entry   true / false — VERIFY THIS BEFORE describing SL location
-  trade_facts.hit                "stop_loss" / "take_profit" / null — what got hit
-  trade_facts.outcome            "win" / "loss"
-  trade_facts.tp_direction_warning   present ONLY when TP is on the wrong side of entry — quote it verbatim in `mistake` when set
+Step 1 — Analyse the market OBJECTIVELY from the input:
+  • market direction (HH+HL uptrend / LH+LL downtrend / range)
+  • structure shifts (BOS / CHOCH) visible in `price_context.recent_window`
+    and `swings_recent`
+  • key support / resistance / demand / supply zones from `drawings_summary`
+    and `zone_roles`
+  • liquidity sweeps / wick rejections if present
+  • what price did AFTER the student's entry — quote `market_aftermath` if set
 
-WHEN you mention a price level in `mistake`, `better_approach`, `market_did`, or `strengths`, copy it character-for-character from `trade_facts` or `price_context.swings_recent[*].price`. Numbers that don't appear in either place are HALLUCINATED and forbidden.
+Step 2 — Review the student's execution against that market:
+  • Was the bias (long/short from `trade_facts.direction`) correct?
+  • Was entry timing good — did they wait for retest / confirmation, or chase?
+  • Was the stop loss logical — beyond a structural invalidation point, or in
+    open space?
+  • Was take profit realistic relative to the next opposing structure?
+  • Did they enter too early, too late, or correctly?
 
-DIRECTION SANITY (do this check before writing `mistake`):
-  • LONG (buy)  → TP must be ABOVE entry, SL must be BELOW entry
-  • SHORT (sell) → TP must be BELOW entry, SL must be ABOVE entry
-If `trade_facts.tp_above_entry` is TRUE on a LONG, NEVER write "TP set below entry" or anything implying it. If it's FALSE on a LONG, that's a structural error you MUST flag.
+Step 3 — Speak to the student like a mentor: short, clear, human. No filler,
+no preachy disclaimers, no markdown formatting inside fields, no nested bullets.
 
-═══ DRAWINGS SUMMARY IS PRE-PARSED — USE IT, DO NOT RE-READ THE RAW JSON ═══
-The user payload has a top-level `drawings_summary` field — a list of strings, one per drawing, each rendered as plain English with the zone kind, prices, and time pre-extracted. The format is:
+PRICE CITATION RULE: every price you write must appear verbatim in
+`trade_facts` or in `price_context.swings_recent[*].price`. No invented numbers.
+When unsure, describe a level structurally ("just below the recent swing low")
+without a number.
 
-  "Mentor demand zone (bullish OB / support): <low>–<high>"
-  "Mentor supply zone (bearish OB / resistance): <low>–<high>"
-  "User Risk-Reward LONG, entry <price>, stop-distance <Δ>, target-distance <Δ>"
-  "User note '<text>' at <price>, time <ISO timestamp>"
+SCORING: set `overall_score` to `score_breakdown.base_score` verbatim. The only
+permitted adjustment is ±1.0, and only when you observe a CHoCH / BOS
+confirmation in `price_context.recent_window` that the rubric could not see —
+note the reason in `student_review.mistake` if you adjust.
 
-The `<low>`, `<high>`, `<price>`, `<Δ>` placeholders above are FORMAT slots — the actual values come from THIS trade's input. The format is identical across instruments; the price scale varies (Indian stocks in rupees, forex in 1.xxxx pip-decimals, crypto in dollars, etc.). See the CURRENT TRADE preamble at the top of this prompt for the live values.
+STYLE ALIGNMENT WARNING: if `style_alignment_warning` is present, quote or
+paraphrase it inside `student_review.mistake`. Never silently drop it.
 
-When you describe a drawing in `mistake`, `better_approach`, or `strengths`, copy the relevant phrasing from THIS trade's `drawings_summary` — DO NOT re-read `user_drawings[*].state.color`, `state.backgroundColor`, or any raw color field. The summary already classified each zone for you.
+DID-WELL RULE: `student_review.did_well` is NEVER empty. Even on a losing or
+low-score trade, credit one specific element from the input — direction matched
+a drawn zone, used a Risk-Reward tool with explicit SL+TP, defined a target,
+kept `stop_distance_pct` ≤ 2.0%, or placed structural drawings before
+submitting. Generic praise ("good attempt") is forbidden.
 
-═══ STRUCTURAL OBSERVATIONS — PRE-COMPUTED ═══
-The user payload also has `structural_observations` — a list of one-line auto-detected mismatches between the trader's entry / SL / TP and the zones drawn on the chart. The format is:
-
-  "Entry <X> is BELOW the mentor demand zone (<lo>–<hi>) — a long should enter AT or near the zone, not below it."
-  "TP <X> is AT or BELOW the demand zone top (<hi>) — a long target should be ABOVE the demand zone."
-
-(The `<X>`/`<lo>`/`<hi>` are placeholders for the actual prices in THIS trade.)
-
-When `structural_observations` is non-empty, those observations are the single most important issue with the trade. QUOTE the key observation in `mistake` (paraphrased to fit one sentence) — do NOT invent a different mistake while ignoring these. The list is empty only when no zones were drawn, in which case fall back to your own analysis.
-
-═══ MARKET AFTERMATH IS PRE-COMPUTED — DO NOT INVENT NEXT-CANDLE PRICES ═══
-The user payload has a top-level `market_aftermath` field — a single English sentence with the SL/TP-hit candle's OHLC and the resolution date, sourced verbatim from the LMS payload. This is the ONLY factual content you may use for `market_did`. If `market_aftermath` is null/missing, describe direction-only ("price moved lower over the next several sessions") — do NOT invent a specific level.
-
-NEVER cite a numeric price for any candle other than the entry candle or the SL/TP-hit candle. If you can't source a price from `market_aftermath`, `trade_facts.stop_loss`, `trade_facts.take_profit`, or `price_context.swings_recent[*].price` for THIS trade, drop the price and describe the move structurally ("price drifted lower into the demand zone over the following sessions" — no specific intermediate level).
-
-═══ TIMESTAMP RULE — only the result-candle date is allowed ═══
-Strict, no exceptions:
-
-  • For `market_did`: the ONLY timestamp you may write is the one inside `market_aftermath` — the SL/TP-hit candle's date. Quote it verbatim, character-for-character, in the format the field gives you (e.g. "2026-02-03 09:15:00Z" — do NOT rewrite to "2026-02-03T09:15:00Z" or any other format).
-  • Do NOT reference an entry-candle timestamp. The entry-candle timestamp has been intentionally REMOVED from `market_aftermath` precisely so there is no field for you to misread or hallucinate. Describe entry by PRICE only ("after entry at <trade_facts.entry_price>"), never by date.
-  • If `market_aftermath` is null or contains no timestamp, write the SL/TP outcome with NO date: "price hit stop loss at <trade_facts.stop_loss>" or "price hit take profit at <trade_facts.take_profit>". A missing timestamp is not an invitation to guess one.
-  • No date may appear anywhere else in the card (`mistake`, `better_approach`, `psychology_note`, etc.) unless it appears verbatim in the input — past hallucination patterns include reformatting drawing `time_t` epochs into ISO dates that don't match the actual chart data.
-
-═══ SCORING IS DETERMINISTIC — COPY `score_breakdown.base_score` ═══
-The user payload has a top-level `score_breakdown` block with the rubric already applied:
-
-  score_breakdown.base_score        — number 0-10, computed from the rubric
-  score_breakdown.criteria_passed   — list of criteria the trade satisfied
-  score_breakdown.criteria_failed   — list of criteria it failed
-  score_breakdown.deductions        — list of deductions applied
-
-Set `overall_score` to `score_breakdown.base_score` verbatim. You MAY adjust by ±1.0 ONLY if you observe a CHoCH/BOS confirmation in `price_context.recent_window` that the rubric couldn't see (the rubric has no view of price action). If you do adjust, mention the adjustment in `mistake` or `key_lesson`. Never produce an `overall_score` that disagrees with the rubric without explanation. The final value must round to one decimal and stay within [0.0, 10.0].
-
-This kills the "every trade gets 2.5/10 regardless of structure" failure mode — two trades with different `criteria_passed` lists will now have different scores by construction.
-
-═══ STYLE-VS-SETUP CHECK ═══
-The user payload may carry a top-level `style_alignment_warning` — a one-sentence flag fired when the user's `trading_style` (Scalper / Intraday / Swing / Positional) doesn't match the actual trade-target distance. EXAMPLE:
-
-  "Trading-style mismatch: profile says 'Scalper' but the trade target is 8.23% of entry — that's a swing setup, not a scalper setup."
-
-When this field is present, you MUST surface it. Quote it verbatim or paraphrase it as the SECOND sentence of `mistake` (or as `psychology_note` when the structural mistake itself is more important). This meta-observation — choosing a style and committing to it — is one of the highest-leverage habits a student can build, and it must not be silently dropped.
-
-═══ ZONE RULES — every zone must be addressed ═══
-The user payload has a top-level `zone_roles` list. Each entry is one classified rectangle with `kind` (demand / supply), `low`, `high`, `source` (mentor / user), `role`, and `role_note`. Possible roles:
-
-  ENTRY_ZONE          — entry sits inside the zone (textbook entry)
-  MISSED_DEMAND       — long: demand zone below entry (should have waited)
-  MISSED_SUPPLY       — short: supply zone above entry (should have waited)
-  TARGET_SUPPLY       — long: supply zone above entry (TP / partial-exit reference)
-  TARGET_DEMAND       — short: demand zone below entry (TP / partial-exit reference)
-  DEMAND_ABOVE_ENTRY  — long: demand zone ABOVE entry (anti-structural — zone hadn't yet been reached or had been broken)
-  SUPPLY_BELOW_ENTRY  — short: supply zone BELOW entry (anti-structural)
-  SUPPORT_REFERENCE   — context-only zone below entry
-  RESISTANCE_REFERENCE — context-only zone above entry
-
-Hard rules:
-  • Mention EVERY zone in `zone_roles` somewhere in your output (in `mistake`, `better_approach`, or `strengths`). Never leave a drawn zone unaddressed.
-  • Use the role_note when describing a zone — never invent a role the rubric didn't assign.
-  • If `zone_roles` contains BOTH an entry-anchor zone (MISSED_*, ENTRY_ZONE, *_ABOVE_ENTRY, *_BELOW_ENTRY) AND a target zone (TARGET_*), `better_approach` MUST reference BOTH — "wait for retest into the [demand/supply] zone (X–Y), and use the [supply/demand] zone (A–B) as the TP target". Dropping the TP-target zone is a violation.
-  • Refer to zones by `kind` ("demand zone", "supply zone"), never by color.
-
-═══ SOURCE ATTRIBUTION — who drew what ═══
-Each `zone_roles[i]` entry has a `source` field — `"mentor"` (course author / reference drawing) or `"user"` (the student's own drawing). Each line in `drawings_summary` is also prefixed with `Mentor` / `User`. Attribute correctly when describing drawings:
-
-  • mentor zones → "the mentor's demand zone", "the reference supply zone", "the demand zone on the chart"
-  • user zones / RR tool / notes → "you drew", "your demand zone", "the rectangle you placed"
-
-NEVER attribute mentor-drawn elements to the student. In particular:
-  ✗ "you placed two rectangles" — when both `zone_roles[*].source == "mentor"`. Say "two reference rectangles were on the chart" or "the mentor drew the demand and supply zones".
-  ✗ "Used a Risk-Reward LONG tool with explicit stop and target. Placed two rectangles..." — if the rectangles are mentor-source, that's a misattribution.
-
-The student's actual structural-drawing contribution may be ZERO (they only used the RR tool + a note) — in that case `strengths` should reflect their tool/note discipline, not credit them with the mentor's zones.
-
-═══ FORBIDDEN OUTPUT PATTERNS ═══
-NEVER write any of these — they were the exact errors previous versions made:
-
-  ✗ Inventing post-entry prices not in `market_aftermath` (e.g. "fell through <some_price> by the next candle", "rejected to <some_price> immediately"). Source-or-skip rule above.
-  ✗ Reformatting OR inventing dates. If `market_aftermath` says "2026-01-15 10:15:00Z", quote it verbatim — do NOT rewrite to "2026-01-22T14:15:00Z" or any other timestamp. Dates that don't appear in `market_aftermath` or `trade_facts` MUST NOT appear in your output.
-  ✗ Crediting the student for mentor-drawn elements (zones with `source: "mentor"`). See SOURCE ATTRIBUTION above.
-  ✗ Color-of-the-rectangle words ("purple rectangle", "blue zone", "yellow box", "two purple rectangles drawn"). Use the kind from `drawings_summary` ("demand zone", "supply zone").
-  ✗ Internal candle indices ("candle 1080", "bar 234", "index 47"). Describe by date/time from `market_aftermath` or `price_context.recent_window[i].time`, e.g. "by Dec 15 09:15".
-  ✗ Inverting zone kinds — calling a `zone_kind: "demand"` box a "supply zone" or vice versa.
-  ✗ Citing TP and SL as the same kind of level. They are on opposite sides of entry by construction (verify via `trade_facts.tp_above_entry` / `trade_facts.stop_above_entry`).
-  ✗ Mixing TP and SL prices. Always re-check every price you cite against `trade_facts.take_profit` / `trade_facts.stop_loss` before writing it — TP and SL are on opposite sides of entry by construction.
-  ✗ Vague "BOS above <some_level>" advice when the structural fix is a zone-retest entry. Phrase entries as "wait for price to retrace INTO the demand zone (<low>–<high> from `zone_roles`) and confirm with a CHoCH on the chart's timeframe".
-  ✗ Identical scores across trades with different `score_breakdown.criteria_passed` lists. The rubric is deterministic — copy `base_score`.
-  ✗ Silently dropping `style_alignment_warning` when it's present in the payload. This is the meta-feedback the student needs most.
-
-═══ OUTPUT FORMAT — STRICT JSON, EXACTLY THESE FIELDS ═══
-Respond with a single JSON object — no commentary, no markdown fences, no extra fields. Schema:
+OUTPUT — STRICT JSON, no markdown fences, no commentary outside the object,
+no extra fields:
 
 {
-  "question_no": <int>,
-  "pair": "<symbol>",
-  "timeframe": "<tf>",
-  "overall_score": <number 0-10, one decimal>,
-  "strengths": "<1-2 SHORT sentences — REQUIRED, NEVER '—'. At least one concrete positive grounded in drawings_summary or trade_facts (e.g. correct direction relative to a zone, identified a demand/supply zone in the right area, used a Risk-Reward tool, drew structural elements before entering, set an explicit target instead of market-exiting). See STRENGTHS RULE below for the full fallback ladder.>",
-  "mistake": "<1 SHORT sentence — the SINGLE most impactful error; quote real prices from trade_facts and the actual zone kinds>",
-  "market_did": "<1 SHORT sentence — what price actually did AFTER entry (use price_context.recent_window for direction + swing prices)>",
-  "better_approach": "<1 SHORT sentence — concrete alternative; reference real prices from trade_facts / mentor_drawings / price_context>",
-  "psychology_note": "<1 SHORT sentence — the emotional / behavioural pattern that drove the mistake>",
-  "key_lesson": "<ONE sentence takeaway — broad enough to apply beyond this specific trade>",
-  "next_focus": "<ONE skill or concept the trader should drill next>"
+  "overall_score": <number 0.0-10.0, one decimal>,
+  "market_analysis": "<2-3 short sentences. Direction + structure shift + key zone + what price did after entry. Real prices only.>",
+  "student_review": {
+    "did_well": "<1-2 short sentences. One specific element credited. Never empty.>",
+    "mistake": "<1-2 short sentences. The single most impactful execution error, with real prices.>",
+    "improve": "<1-2 short sentences. Concrete next-time approach — entry zone + confirmation + stop placement.>"
+  },
+  "mentor_note": "<1-2 sentences of short realistic mentor advice — direct, human, not preachy.>"
 }
 
-═══ STRENGTHS RULE — `strengths` MUST NEVER BE "—" ═══
-Even on a 2/10 trade there is something worth crediting. Find ONE concrete positive grounded in `drawings_summary`, `trade_facts`, or the user's drawings, then write it as 1-2 short sentences. Walk this fallback ladder until you find a hit:
-
-  1. **Direction matched the structure** — was `trade_facts.direction` the side a textbook reader would have taken given the zones in `drawings_summary`? E.g. `direction: "buy"` near a drawn `demand zone` is bullish-bias-correct even if the entry timing was wrong. Credit this when it applies.
-  2. **Zone identification** — did the user (or the trade reasoning) acknowledge a zone that's actually on the chart? E.g. "Recognised the demand zone at <low>–<high> as the relevant level" (use the actual prices from `zone_roles` / `drawings_summary`).
-  3. **Tool usage** — did they use a structured Risk-Reward tool with explicit SL + TP (rather than blind market entry)? E.g. "Used a Risk-Reward LONG tool with explicit stop and target". This is a process win.
-  4. **Defined target** — did they have a TP at all? Setting one before entering is better than no exit plan.
-  5. **Drawing discipline** — did they place ANY structural drawings (zones, trendlines, fibs, notes) before submitting? Crediting the habit matters even when the placement is off.
-  6. **Reasonable risk %** — if `trade_facts.stop_distance_pct` ≤ 2.0%, credit "Stop placed within a reasonable per-trade risk budget".
-  7. **Last resort** — credit the engagement: "Attempted a structured trade with defined entry, stop, and target on a learning platform" — better than nothing.
-
-Forbidden output: `"strengths": "—"`, `"strengths": ""`, `"strengths": "Nothing notable"`, generic non-specific praise like `"Good attempt"`. Always quote a specific element from the input.
-
-═══ HARD RULES ═══
-  • EVERY field is required — never omit, never return null. For `strengths` specifically, see the STRENGTHS RULE above — `"—"` is forbidden. For other text fields you MAY use `"—"` only when the input genuinely has no content for that section (e.g. `psychology_note: "—"` when no behavioural pattern is detectable).
-  • Each text field: 1-2 SHORT sentences MAX. Be direct and specific to THIS trade. No filler, no disclaimers, no "as you can see…" prose, no nested bullets, no markdown.
-  • Cite real prices from `trade_facts` and `price_context.swings_recent`. NEVER invent prices. If you're tempted to write a price you can't find in the input, drop the price and describe the level by structure instead ("just below the recent swing low").
-  • `overall_score` MUST equal `score_breakdown.base_score` — see the SCORING IS DETERMINISTIC section above. The previous "calibration ladder" (X-Y range = "fundamental misread") was REMOVED because it contradicted the rubric and produced wildly wrong scores (LLM emitted 3.5 when the rubric said 7.2). Always copy `base_score`. If you observe a CHoCH/BOS confirmation in `price_context.recent_window` that the rubric couldn't see, you MAY adjust by ±1.0 — but never beyond that, and you MUST mention the adjustment in `mistake` or `key_lesson`.
-  • If `user_drawings` is empty AND `mentor_drawings` is empty: set `mistake` to "No drawings placed — the student did not commit to a structural read." and adapt the rest accordingly. STILL fill every field.
-  • If `price_context` is missing: subtract 1.0 from `overall_score` (within the ±1.0 budget above) and append " (without price ground-truth)" to `mistake`. STILL fill every field.
-
-═══ INPUTS YOU RECEIVE ═══
-A JSON record for ONE question:
-  - `trade_facts` — AUTHORITATIVE pre-computed numbers (see top section).
-  - `drawings_summary` — list of one-line plain-English drawing descriptions (PRIMARY source of drawing info).
-  - `structural_observations` — list of pre-computed entry/SL/TP-vs-zone mismatches (PRIMARY source for `mistake` content).
-  - `zone_roles` — every classified rectangle with its assigned role (ENTRY_ZONE / MISSED_DEMAND / TARGET_SUPPLY / etc.) — see ZONE RULES.
-  - `market_aftermath` — pre-rendered factual sentence describing what price did after entry (PRIMARY source for `market_did`).
-  - `score_breakdown` — deterministic rubric output; copy `base_score` to `overall_score`. Has `criteria` (per-criterion score+max+note) and `deductions`.
-  - `style_alignment_warning` — present ONLY when there's a profile-vs-setup mismatch; quote it.
-  - `user_drawings` / `mentor_drawings` — raw TradingView drawings if you need anchor coordinates beyond the summary. Each rectangle's `state.zone_kind` is "demand" / "supply" / absent.
-  - `trade_context` — full raw view of the student's submitted trade and where price actually went after entry (`right_prediction_candle`).
-  - `pair`, `timeframe`, `market` — chart context.
-  - `price_context` — actual candlestick data: `overall_high` / `overall_low`, `avg_range_14`, `swings_recent` (every swing with `kind`/`price`/`time`/`retests`), `last_swing_high` / `last_swing_low`, `recent_window` (~80 OHLC bars around the decision), `decision_index`.
-
-═══ TONE ═══
-  • Multiple valid frameworks exist (SMC, ICT, VSA, Price Action, Wyckoff). Use the framework lens supplied in the system prompt above (when one was). NEVER imply there is only one "correct" trade.
-  • If a student-profile lens was supplied above, follow its tone rules: terse + institutional for `advance`; simple + jargon-defined inline for `begginer`; veteran tone for high years-of-experience; encouraging tone for early-stage.
-  • Reference structural concepts directly (BOS, CHoCH, FVG, OB, liquidity sweep, swing high/low, supply/demand) when they apply.
-  • Honest, direct, useful. No hedging, no fluff, no apology language."""
+Every field is required. `null` is forbidden. No prose outside the JSON object.
+"""
 
 
 # Session-level summary was deprecated in favour of the per-question card
@@ -322,17 +210,19 @@ def _build_current_trade_preamble(question: Dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# The 7 prose fields on the card. Used both to fill defaults on parse failure
-# and (in formatter.py) to render the labelled sections in the right order.
-# Kept here so the schema lives in ONE place — formatter.py imports it.
+# The mentor card schema. Three top-level prose blocks plus a nested
+# `student_review` dict with three sub-fields. Kept here so the schema lives
+# in ONE place — formatter.py imports both tuples.
 _SECTION_KEYS = (
-    ("strengths",       "Strengths ✅"),
-    ("mistake",         "Mistake ❌"),
-    ("market_did",      "What Market Actually Did 📈"),
-    ("better_approach", "Better Approach 🎯"),
-    ("psychology_note", "Psychology Note 🧠"),
-    ("key_lesson",      "Key Lesson"),
-    ("next_focus",      "Next Practice Focus"),
+    ("market_analysis", "Market Analysis 📊"),
+    ("mentor_note",     "Mentor Note 🧠"),
+)
+
+# Sub-fields rendered as bullets under the "Student Review" header.
+_STUDENT_REVIEW_KEYS = (
+    ("did_well", "✅ What you did well"),
+    ("mistake",  "❌ Biggest mistake"),
+    ("improve",  "🎯 How to improve"),
 )
 
 
@@ -342,9 +232,8 @@ def _build_few_shot_example(question: Dict[str, Any]) -> str:
     Builds a JSON sample using the same `trade_facts`, `zone_roles`, and
     `score_breakdown` the LLM is about to read — so the example reflects the
     real numbers and structure of this specific trade. The LLM is told to
-    write its OWN explanation in this format, not copy-paste — but having a
-    matching template anchors the depth + tone (Problem 5 in the
-    enhancement task).
+    write its OWN mentor-style explanation in this format, not copy-paste —
+    but having a matching template anchors depth + tone.
 
     Returns an empty string when input is too sparse to build a useful
     example (the prompt then degrades to spec rules only).
@@ -381,156 +270,147 @@ def _build_few_shot_example(question: Dict[str, Any]) -> str:
         None,
     )
 
-    # ── strengths ──
-    strength_bits: List[str] = []
-    if any("Risk-Reward" in d for d in drawings) and rr:
-        strength_bits.append(
-            f"used the Risk-Reward tool with a planned {rr}:1 ratio"
+    # ── market_analysis ──
+    direction_phrase = (
+        "extending lower with LH+LL structure" if direction == "sell"
+        else "extending higher with HH+HL structure"
+    )
+    zone_bit = ""
+    if zone_roles:
+        z0 = zone_roles[0]
+        zone_bit = (
+            f" Key {z0.get('kind', 'zone')} on the chart sits at "
+            f"{z0.get('low')}–{z0.get('high')}."
         )
-    if len([z for z in zone_roles if z["role"] != "UNCLASSIFIED"]) >= 2:
-        strength_bits.append("identified multiple structural zones on the chart")
-    elif zone_roles:
-        strength_bits.append(
-            f"identified the {zone_roles[0]['kind']} zone "
-            f"({zone_roles[0]['low']}–{zone_roles[0]['high']}) on the chart"
-        )
-    if strength_bits:
-        strengths = (strength_bits[0][0].upper() + strength_bits[0][1:]
-                     + ("; " + "; ".join(strength_bits[1:]) if len(strength_bits) > 1 else "")
-                     + ".")
-    else:
-        strengths = "Engaged with the chart structure and committed to a defined entry."
+    aftermath_bit = (
+        f" {aftermath}" if aftermath
+        else " Price moved against the trade and resolved at the stop-loss."
+    )
+    market_analysis = (
+        f"Market was {direction_phrase} into the decision candle.{zone_bit}"
+        f"{aftermath_bit}"
+    )
 
-    # ── mistake ──
+    # ── student_review.did_well ──
+    if any("Risk-Reward" in d for d in drawings) and rr:
+        did_well = (
+            f"Used a Risk-Reward tool with an explicit {rr}:1 plan rather "
+            "than entering blind — the planning discipline is in place."
+        )
+    elif zone_roles:
+        z0 = zone_roles[0]
+        did_well = (
+            f"Identified the {z0.get('kind', 'zone')} at "
+            f"{z0.get('low')}–{z0.get('high')} on the chart — the structural "
+            "read was there even if the execution wasn't."
+        )
+    elif facts.get("take_profit") is not None:
+        did_well = (
+            "Defined an explicit take-profit before entering — having an "
+            "exit plan is better than discretionary management."
+        )
+    else:
+        did_well = (
+            "Committed to a structured trade with a defined entry on a "
+            "learning platform — engagement is step one."
+        )
+
+    # ── student_review.mistake ──
     if anti_struct:
         mistake = (
-            f"Entry at {entry} sits on the WRONG side of the "
-            f"{anti_struct['kind']} zone ({anti_struct['low']}–{anti_struct['high']}) — "
-            "the trade is fighting the structural signal."
+            f"Entry at {entry} sits on the wrong side of the "
+            f"{anti_struct['kind']} zone "
+            f"({anti_struct['low']}–{anti_struct['high']}) — the trade is "
+            "fighting the structural signal."
         )
     elif missed:
         mistake = (
             f"Entry at {entry} preceded the {missed['kind']} zone "
-            f"({missed['low']}–{missed['high']}); the zone was identified "
-            "correctly but entry didn't wait for the retest."
+            f"({missed['low']}–{missed['high']}); the zone was right but you "
+            "didn't wait for the retest."
         )
     elif entry_zone:
         mistake = (
-            "Entry was inside the structural zone, but no CHoCH/BOS "
-            "confirmation was visible at the decision candle."
+            "Entry was inside the structural zone, but there was no CHoCH "
+            "or BOS confirmation visible at the decision candle."
         )
     else:
         mistake = (
-            f"Entry at {entry} had no structural zone alignment — "
-            "entered in open space."
+            f"Entry at {entry} had no structural zone alignment — you "
+            "entered in open space without a level to lean on."
         )
     if style_warning:
         mistake += f" {style_warning}"
 
-    # ── market_did ──
-    market_did = aftermath or (
-        "Price moved against the trade and resolved at the stop-loss; "
-        "exact post-entry candles aren't reproduced here to avoid invented prices."
-    )
-
-    # ── better_approach ──
+    # ── student_review.improve ──
     if missed or anti_struct:
         ref = missed or anti_struct
         anchor_low = ref["low"]
         anchor_high = ref["high"]
         if direction == "buy":
-            better = (
+            improve = (
                 f"Wait for price to retrace INTO the {ref['kind']} zone "
-                f"({anchor_low}–{anchor_high}), confirm a CHoCH on the chart "
+                f"({anchor_low}–{anchor_high}), confirm a CHoCH on this "
                 f"timeframe, then enter long with stop just below {anchor_low}."
             )
         else:
-            better = (
+            improve = (
                 f"Wait for price to retrace INTO the {ref['kind']} zone "
                 f"({anchor_low}–{anchor_high}), confirm a CHoCH, then enter "
                 f"short with stop just above {anchor_high}."
             )
         if target:
-            better += (
+            improve += (
                 f" Use the {target['kind']} zone "
                 f"({target['low']}–{target['high']}) as the TP reference."
             )
     elif entry_zone:
-        better = (
-            "Entry zone was correct — next time wait for an explicit CHoCH/BOS "
-            "confirmation candle inside the zone before entering."
+        improve = (
+            "Entry zone was correct — next time wait for an explicit "
+            "CHoCH/BOS confirmation candle inside the zone before entering."
         )
     else:
-        better = (
-            "Confirm BOS/CHoCH structural alignment before entry; ensure stop "
-            "sits beyond a structural level, not in open space."
+        improve = (
+            "Confirm BOS/CHoCH structural alignment before entry, and place "
+            "the stop just beyond a structural level — not in open space."
         )
 
-    # ── psychology_note ──
-    has_opps = any("opp" in d.lower() for d in drawings)
-    if has_opps:
-        psychology = (
-            "The 'opps' annotation on the chart suggests post-entry regret — "
-            "the trade lacked conviction. Build a pre-entry checklist so "
-            "structure is verified BEFORE pulling the trigger."
-        )
-    elif anti_struct or missed:
-        psychology = (
-            "Entry was placed before structural confirmation. Build the habit "
-            "of waiting for a CHoCH inside the zone — proximity to a level is "
-            "not the same as a confirmed reaction."
-        )
-    else:
-        psychology = (
-            "Trades placed without structural confirmation tend to feel rushed. "
-            "Slow the decision down — the chart will still be there after a "
-            "confirmation candle closes."
-        )
-
-    # ── key_lesson + next_focus ──
+    # ── mentor_note ──
     if missed or anti_struct:
-        key_lesson = (
-            "Zone identification is only half the edge — the other half is "
-            "patience. Wait for price to come to your zone, not for the trade "
-            "to come to you."
+        mentor_note = (
+            "Patience is the other half of the edge. Wait for price to come "
+            "to your zone — don't chase the trade."
         )
-        next_focus = (
-            "Before every entry, ask: is price currently INSIDE my drawn "
-            "demand or supply zone? If not, wait. Log every entry outside a "
-            "zone as a 'patience violation'."
+    elif entry_zone:
+        mentor_note = (
+            "You read the structure — now build the habit of letting the "
+            "confirmation candle close before pulling the trigger."
         )
     else:
-        key_lesson = (
-            "Structural alignment (entry at a confirmed OB/FVG with CHoCH) "
-            "is required before entering. R:R alone is not an edge."
-        )
-        next_focus = (
-            "Drill CHoCH identification: mark every BOS on a recent chart, "
-            "then mark where the CHoCH against it occurred. Only enter after "
-            "CHoCH confirmation."
+        mentor_note = (
+            "R:R alone is not an edge. Anchor every entry to a structural "
+            "level so each trade has a reason beyond the math."
         )
 
     sample = {
-        "question_no": question.get("question_no"),
-        "pair": question.get("pair"),
-        "timeframe": question.get("timeframe"),
         "overall_score": score,
-        "strengths": strengths,
-        "mistake": mistake,
-        "market_did": market_did,
-        "better_approach": better,
-        "psychology_note": psychology,
-        "key_lesson": key_lesson,
-        "next_focus": next_focus,
+        "market_analysis": market_analysis,
+        "student_review": {
+            "did_well": did_well,
+            "mistake": mistake,
+            "improve": improve,
+        },
+        "mentor_note": mentor_note,
     }
 
     return (
         "═══ FEW-SHOT EXAMPLE — DYNAMICALLY GENERATED FOR THIS TRADE ═══\n"
         "Below is a worked example built from THIS trade's own data. Match "
-        "this format and depth precisely. You MAY paraphrase it freely, but "
-        "you MUST keep `overall_score` equal to `score_breakdown.base_score` "
-        "and reference every zone in `zone_roles`. Do not copy verbatim — "
-        "produce your own sentence-level wording grounded in the same data.\n\n"
+        "this JSON shape and depth. You MAY paraphrase it freely, but you "
+        "MUST keep `overall_score` equal to `score_breakdown.base_score` and "
+        "reference every zone in `zone_roles` somewhere in the card. Do not "
+        "copy verbatim — produce your own sentence-level wording grounded in "
+        "the same data.\n\n"
         + json.dumps(sample, indent=2, ensure_ascii=False)
         + "\n"
     )
@@ -553,100 +433,8 @@ def _empty_card(question: Dict[str, Any], *, error: str, summary: str) -> Dict[s
         card["requested_answer_id"] = question.get("requested_answer_id")
     for key, _ in _SECTION_KEYS:
         card[key] = "—"
+    card["student_review"] = {key: "—" for key, _ in _STUDENT_REVIEW_KEYS}
     return card
-
-
-# ─────────────────── strengths fallback (defense-in-depth) ───────────────────
-# The system prompt tells the LLM to never emit "—" for `strengths`, but we've
-# observed it doing so anyway on bad trades. This fallback runs over the
-# parsed card and replaces empty / dash strengths with a concrete one
-# generated from the same input the prompt walked. Mirrors the prompt's
-# fallback ladder so the user-facing rendering stays consistent.
-
-_EMPTY_STRENGTH_TOKENS = {"", "—", "-", "—.", "n/a", "none", "nothing notable"}
-
-
-def _is_empty_strengths(value: Any) -> bool:
-    """Detect placeholder / empty `strengths` values the LLM occasionally
-    emits despite the prompt rule."""
-    if value is None:
-        return True
-    if not isinstance(value, str):
-        return False
-    s = value.strip().lower()
-    return s in _EMPTY_STRENGTH_TOKENS or len(s) < 4
-
-
-def _auto_strengths(question: Dict[str, Any]) -> str:
-    """Generate a fallback `strengths` string from the compacted question
-    payload. Walks the same ladder the prompt describes (direction-vs-zone,
-    tool usage, risk %, drawing presence, last-resort engagement credit) so
-    the auto-filled value reads consistently with normal LLM output."""
-    facts = question.get("trade_facts") or {}
-    drawings = question.get("drawings_summary") or []
-    direction = facts.get("direction")
-
-    has_demand = any("demand zone" in line for line in drawings)
-    has_supply = any("supply zone" in line for line in drawings)
-
-    # 1. Direction matches a drawn zone.
-    if direction == "buy" and has_demand:
-        # Pull the first demand-zone line so we can quote concrete prices.
-        for line in drawings:
-            if "demand zone" in line:
-                # Extract the "242.44–243.77" range from the summary line.
-                _, _, tail = line.partition(":")
-                zone_text = tail.split("[")[0].strip()
-                return (
-                    f"Direction (long) was structurally aligned with the drawn "
-                    f"demand zone ({zone_text}) — bullish bias was correct "
-                    f"relative to the chart structure even if entry timing wasn't."
-                )
-    if direction == "sell" and has_supply:
-        for line in drawings:
-            if "supply zone" in line:
-                _, _, tail = line.partition(":")
-                zone_text = tail.split("[")[0].strip()
-                return (
-                    f"Direction (short) was structurally aligned with the drawn "
-                    f"supply zone ({zone_text}) — bearish bias was correct "
-                    f"relative to the chart structure even if entry timing wasn't."
-                )
-
-    # 2. Used a Risk-Reward tool with explicit SL + TP.
-    if any("Risk-Reward" in line for line in drawings):
-        return (
-            "Used a Risk-Reward tool with explicit stop and target rather than "
-            "entering blind — process discipline is in place."
-        )
-
-    # 3. Reasonable risk % (≤ 2.0% of entry).
-    risk_pct = facts.get("stop_distance_pct")
-    if isinstance(risk_pct, (int, float)) and 0 < risk_pct <= 2.0:
-        return (
-            f"Stop placed within a reasonable per-trade risk budget "
-            f"({risk_pct:.2f}% of entry) — risk sizing was responsible."
-        )
-
-    # 4. Set an explicit target (separate from R:R tool — could be a horz line / note).
-    if facts.get("take_profit") is not None:
-        return (
-            "Defined an explicit take-profit before entering — having a target "
-            "set in advance is better than relying on a discretionary exit."
-        )
-
-    # 5. Drew structural elements at all.
-    if drawings:
-        return (
-            f"Placed {len(drawings)} structural element(s) on the chart before "
-            "submitting — the drawing-discipline habit is in place."
-        )
-
-    # 6. Last resort — credit engagement.
-    return (
-        "Attempted a structured trade with a defined entry on a learning "
-        "platform — engagement is the first step toward consistency."
-    )
 
 
 # ─────────────────── analysis-type framework lenses ───────────────────
@@ -721,10 +509,10 @@ direction confirmed by BOS/CHoCH. Cite the specific SMC element (e.g. "stop
 sits inside the bearish OB at 2918.4") instead of generic terms.
 
 In the card fields, name the SMC structure directly: BOS / CHoCH / OB / FVG /
-liquidity sweep / premium / discount / displacement. e.g. `mistake`: "Entered
-inside a bearish OB at 2918.4 with no CHoCH confirmation"; `market_did`:
+liquidity sweep / premium / discount / displacement. e.g. `student_review.mistake`: "Entered
+inside a bearish OB at 2918.4 with no CHoCH confirmation"; `market_analysis`:
 "Liquidity sweep above the equal highs at 2935 then bearish BOS through 2920";
-`better_approach`: "Wait for CHoCH below 2920 and a retest of the resulting
+`student_review.improve`: "Wait for CHoCH below 2920 and a retest of the resulting
 bearish OB before shorting".
 """
 
@@ -760,9 +548,9 @@ NOT sit beyond a liquidity pool, is poorly placed. Cite the kill zone, the
 PO3 phase, and which liquidity pool price is targeting.
 
 In the card fields, use ICT terminology directly: BSL / SSL / MSS / OTE /
-PO3 / MMXM / kill zone / breaker block / mitigation block. e.g. `market_did`:
+PO3 / MMXM / kill zone / breaker block / mitigation block. e.g. `market_analysis`:
 "London Open kill zone swept BSL above 2945 then ran into the bearish OB at
-2952"; `better_approach`: "Wait for MSS below 2940 and re-enter at the OTE
+2952"; `student_review.improve`: "Wait for MSS below 2940 and re-enter at the OTE
 zone (61.8–78.6%) of the resulting bearish leg".
 """
 
@@ -800,13 +588,13 @@ Detect and reference these signals when filling out the schema:
 
 When grading: ground EVERY observation in volume + spread + close. If the
 candles in `price_context.recent_window` lack a `volume` field, say so once
-in `mistake` ("(without volume data)") and lower `overall_score` by 1.0 —
+in `student_review.mistake` ("(without volume data)") and lower `overall_score` by 1.0 —
 VSA cannot be applied without volume.
 
 In the card fields, use VSA / Wyckoff terminology directly: Stopping Volume,
 Upthrust, No Supply, No Demand, Test, Spring, Shakeout, Accumulation,
-Distribution, effort vs result. e.g. `market_did`: "Upthrust at 2952 on
-high volume closed near the low — professional selling"; `better_approach`:
+Distribution, effort vs result. e.g. `market_analysis`: "Upthrust at 2952 on
+high volume closed near the low — professional selling"; `student_review.improve`:
 "Wait for a low-volume Test of 2935 to confirm No Supply before the long".
 """
 
@@ -870,9 +658,9 @@ When grading:
 
 In the card fields, name the Price Action structure directly: pin bar,
 bullish/bearish engulfing, inside bar, hammer, shooting star, double top /
-bottom, HH+HL / LH+LL, S/R flip, false break. e.g. `market_did`: "Bullish
+bottom, HH+HL / LH+LL, S/R flip, false break. e.g. `market_analysis`: "Bullish
 engulfing rejected the prior day low at 2935 — failed breakdown";
-`better_approach`: "Wait for a pin-bar rejection of the 2935 swing low,
+`student_review.improve`: "Wait for a pin-bar rejection of the 2935 swing low,
 enter on the next candle close above the wick".
 """
 
@@ -941,7 +729,7 @@ When filling out the schema:
      (above the right shoulder for H&S, below the second bottom for double
      bottom, beyond the opposite trendline for triangles, etc.).
 
-When grading (call these out by name in `mistake` when they apply):
+When grading (call these out by name in `student_review.mistake` when they apply):
   - An entry taken BEFORE neckline / breakout close-through → premature entry.
   - A stop inside the pattern body (e.g. between the two peaks of a Double
     Top) → misplaced stop.
@@ -954,8 +742,8 @@ Inverse H&S, Double / Triple Top / Bottom, Bull / Bear Flag, Pennant,
 Ascending / Descending / Symmetrical Triangle, Cup & Handle, Rising /
 Falling Wedge, Rectangle, Rounding Bottom, etc. Quote the neckline /
 breakout level and the measured-move target as real prices. e.g.
-`market_did`: "H&S neckline at 2920 broke; measured move targets 2885";
-`better_approach`: "Wait for a retest of the broken neckline at 2920,
+`market_analysis`: "H&S neckline at 2920 broke; measured move targets 2885";
+`student_review.improve`: "Wait for a retest of the broken neckline at 2920,
 enter short on rejection with stop above the right shoulder at 2945".
 """
 
@@ -1170,8 +958,8 @@ def build_user_profile_lens(profile: Optional[Dict[str, Optional[str]]]) -> str:
         "═══ STUDENT PROFILE — TAILOR THE EXPLANATION ═══",
         "Use this profile to calibrate the depth, jargon, and trade-management",
         "focus of your explanation. Do NOT change the JSON schema — only how",
-        "you fill the prose fields (`strengths`, `mistake`, `market_did`,",
-        "`better_approach`, `psychology_note`, `key_lesson`, `next_focus`).",
+        "you fill the prose fields (`market_analysis`, `student_review.did_well`,",
+        "`student_review.mistake`, `student_review.improve`, `mentor_note`).",
         "",
     ]
 
@@ -1577,11 +1365,11 @@ def explain_question(
     trade-management focus to the student's trading style, experience level,
     asset class, and years of experience. None / all-empty → no tailoring.
 
-    Returns the 8-field card shape (`overall_score`, `strengths`, `mistake`,
-    `market_did`, `better_approach`, `psychology_note`, `key_lesson`,
-    `next_focus`). On LLM failure or unparseable output, returns the same
-    shape with `_error` / `_parse_error` flags set so the frontend can
-    render a graceful fallback instead of a blank card.
+    Returns the mentor card shape (`overall_score`, `market_analysis`,
+    `student_review.{did_well, mistake, improve}`, `mentor_note`). On LLM
+    failure or unparseable output, returns the same shape with `_error` /
+    `_parse_error` flags set so the frontend can render a graceful fallback
+    instead of a blank card.
     """
     system_prompt = build_analysis_system_prompt(analysis_type, user_profile=user_profile)
 
@@ -1648,26 +1436,32 @@ def explain_question(
         return _empty_card(question, error=str(exc), summary=f"LLM call failed: {exc}")
 
     parsed = _parse_json(text)
-    parsed.setdefault("question_no", question.get("question_no"))
-    parsed.setdefault("pair", question.get("pair"))
-    parsed.setdefault("timeframe", question.get("timeframe"))
+    # Identity fields (question_no, pair, timeframe) are FORCED back to the
+    # input question's values — never trusted from the LLM output. We saw the
+    # model occasionally hallucinate `question_no` (e.g. emitting `3` while
+    # processing the 4th question because it had seen the 1/2/3 pattern in
+    # the prompt). When two cards share the same question_no, the frontend
+    # dedupes them on render — so Q4 silently disappears from the user's
+    # view despite the array containing 4 entries. Hard-overriding the
+    # identity here makes that class of drop impossible.
+    parsed["question_no"] = question.get("question_no")
+    parsed["pair"] = question.get("pair")
+    parsed["timeframe"] = question.get("timeframe")
     # When the multi-answer flow stamped a requested_answer_id on this
     # question, surface it on the final card so the frontend knows which
     # trade each card maps to (essential when the user passed answer_id=[A,B]).
     if question.get("requested_answer_id") is not None:
-        parsed.setdefault("requested_answer_id", question.get("requested_answer_id"))
+        parsed["requested_answer_id"] = question.get("requested_answer_id")
     # Make sure every card field exists so the frontend never sees `undefined`.
     parsed.setdefault("overall_score", 0)
     for key, _ in _SECTION_KEYS:
         parsed.setdefault(key, "—")
-
-    # Defense-in-depth: even with the STRENGTHS RULE in the system prompt, the
-    # LLM occasionally still emits "—" for `strengths` on bad trades. Replace
-    # any empty / dash value with a generated fallback grounded in the same
-    # input the prompt walked (direction-vs-zone, RR tool usage, risk %, etc.).
-    if not parsed.get("_parse_error") and _is_empty_strengths(parsed.get("strengths")):
-        parsed["strengths"] = _auto_strengths(question)
-        parsed["_strengths_auto_filled"] = True
+    sr = parsed.get("student_review")
+    if not isinstance(sr, dict):
+        sr = {}
+        parsed["student_review"] = sr
+    for key, _ in _STUDENT_REVIEW_KEYS:
+        sr.setdefault(key, "—")
 
     # Defense-in-depth for SCORING IS DETERMINISTIC: the LLM is told to copy
     # `score_breakdown.base_score` (with at most ±1.0 CHoCH/BOS adjustment),
@@ -1754,22 +1548,82 @@ def explain_all(
                     per_question[idx] = fut.result()
                 except Exception as exc:
                     logger.exception("explain_question raised")
-                    per_question[idx] = {
-                        "question_no": questions[idx].get("question_no"),
-                        "pair": questions[idx].get("pair"),
-                        "rank": 0,
-                        "verdict": "error",
-                        "summary": f"Worker raised: {exc}",
-                        "_error": str(exc),
-                    }
+                    per_question[idx] = _empty_card(
+                        questions[idx],
+                        error=str(exc),
+                        summary=f"Worker raised: {exc}",
+                    )
+
+    # Defense-in-depth: every input question MUST produce an output card so the
+    # frontend always renders the same number of cards as the session reports.
+    # If a slot is somehow still None at this point (a bug here, not in
+    # explain_question), patch it with an _empty_card placeholder rather than
+    # leaving a hole that downstream code (or the frontend) might silently
+    # drop. Also force the identity fields on every card so the eventual
+    # `sort` + frontend dedupe by question_no can never collapse two trades.
+    for i, card in enumerate(per_question):
+        if not isinstance(card, dict):
+            logger.error(
+                "explain_all: question slot %s came back as %r — patching with "
+                "an empty card so the frontend still sees %d cards.",
+                i, card, len(questions),
+            )
+            per_question[i] = _empty_card(
+                questions[i],
+                error="missing_result",
+                summary="Internal error: no card was produced for this question.",
+            )
+        else:
+            # Force identity fields one more time (defense-in-depth — the LLM
+            # could have nulled them post-override on a parse-recovery path).
+            card["question_no"] = questions[i].get("question_no")
+            card["pair"] = questions[i].get("pair")
+            card["timeframe"] = questions[i].get("timeframe")
 
     # Order results by question_no for stable output.
     per_question.sort(key=lambda r: (r or {}).get("question_no") or 0)
+
+    # Final invariant: never silently emit fewer cards than the input had.
+    # If this ever trips, we want a loud log line so the bug is obvious in
+    # the server logs rather than the user discovering missing trades.
+    if len(per_question) != len(questions):
+        logger.error(
+            "explain_all: produced %d cards for %d input questions — count "
+            "mismatch! Input question_nos=%s, output question_nos=%s",
+            len(per_question), len(questions),
+            [q.get("question_no") for q in questions],
+            [c.get("question_no") for c in per_question if isinstance(c, dict)],
+        )
 
     # The session-level coaching summary (strengths / weaknesses / recurring
     # mistakes / study plan / closing note) was deprecated when the response
     # format moved to the per-question card. The frontend now renders only
     # per-question cards plus the session metadata block below.
+
+    # Reconcile session-level metadata with what the LMS actually returned in
+    # the `questions` array. The chapter endpoint reports the unfiltered chapter
+    # total in `total_questions` even when server-side filters (most commonly
+    # `is_challenge_only=true`, but also `is_skip` exclusions) trim the
+    # `questions` array — that's why a session showing `total_questions: 4`
+    # can come back with only 3 trades. The frontend then renders 3 cards
+    # next to a header that promises 4, which is what users notice.
+    #
+    # Fix: surface the upstream-reported total under a separate key
+    # (`session_total_questions`) and report `total_questions` as the count
+    # we actually analyzed. The two only differ when the LMS filtered the
+    # array — we log a loud warning so the discrepancy is visible.
+    upstream_total = compact_session_data.get("total_questions")
+    actual_total = len(per_question)
+    if upstream_total is not None and upstream_total != actual_total:
+        logger.warning(
+            "Session %s: LMS reported total_questions=%s but only %s "
+            "question(s) came back in the array (likely filtered server-side "
+            "by is_challenge_only / is_skip). Reporting total_questions=%s in "
+            "the response so it matches the cards we analyzed; pass "
+            "`is_challenge_only=false` to fetch every trade in the chapter.",
+            compact_session_data.get("session_id"),
+            upstream_total, actual_total, actual_total,
+        )
 
     result: Dict[str, Any] = {
         "session": {
@@ -1779,7 +1633,8 @@ def explain_all(
             "win": compact_session_data.get("win"),
             "loss": compact_session_data.get("loss"),
             "total_points": compact_session_data.get("total_points"),
-            "total_questions": compact_session_data.get("total_questions"),
+            "total_questions": actual_total,
+            "session_total_questions": upstream_total,
             "win_loss_ratio": compact_session_data.get("win_loss_ratio"),
         },
         "questions": per_question,

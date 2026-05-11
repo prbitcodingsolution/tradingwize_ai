@@ -42,11 +42,21 @@ def _attach_explanations(result: Dict[str, Any]) -> Dict[str, Any]:
 
       - `result["questions"][i]["explanation"]` — markdown for ONE question
       - `result["explanation"]`                 — markdown for the WHOLE report
+
+    `question_no` is stripped from every question AFTER the markdown is
+    rendered: the formatter still uses it to build the "Question N" header,
+    but the frontend doesn't want the raw key on the JSON card (it confuses
+    the rendering layer that derives ordering from array position instead).
+    Array order already matches `question_no` because `explain_all` sorted
+    by it, so removing the key is information-preserving.
     """
     for q in result.get("questions") or []:
         if isinstance(q, dict):
             q["explanation"] = format_question(q)
     result["explanation"] = format_session(result)
+    for q in result.get("questions") or []:
+        if isinstance(q, dict):
+            q.pop("question_no", None)
     return result
 
 
@@ -203,7 +213,6 @@ def _build_no_data_response(compact: Dict[str, Any]) -> Dict[str, Any]:
         {
             "requested_answer_id": q.get("requested_answer_id"),
             "id": q.get("id"),
-            "question_no": q.get("question_no"),
             "user_drawings": (q.get("drawing_counts") or {}).get("user", 0),
             "has_chart_metadata": bool(q.get("pair") and q.get("timeframe")),
         }
@@ -345,7 +354,17 @@ def explain_from_api(
     user_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Fetch the session from the LMS endpoint, also fetch candles per
-    question, then explain everything."""
+    question, then explain everything.
+
+    Auto-recovery for partial chapters: when the upstream session reports a
+    higher `total_questions` than the `questions` array contains, that means
+    the LMS filtered some trades server-side — almost always because of
+    `is_challenge_only=true` (practice trades excluded). When we detect that
+    mismatch we refetch once with `is_challenge_only=false` to pull in the
+    missing trades, then run the explainer on the complete chapter so the
+    frontend gets one explanation per trade rather than mysteriously missing
+    cards.
+    """
     session_json = fetch_drawing_session(
         category=category,
         sub_category=sub_category,
@@ -358,6 +377,45 @@ def explain_from_api(
         bearer_token=bearer_token,
         verify_ssl=verify_ssl,
     )
+
+    if is_challenge_only:
+        upstream_total = session_json.get("total_questions")
+        returned = session_json.get("questions") or []
+        if (
+            isinstance(upstream_total, int)
+            and upstream_total > len(returned)
+            and len(returned) >= 0
+        ):
+            logger.info(
+                "Chapter %s: LMS returned %d/%d questions with "
+                "is_challenge_only=true — refetching without the filter so the "
+                "explainer can produce one card per trade.",
+                chapter_id, len(returned), upstream_total,
+            )
+            try:
+                full_session = fetch_drawing_session(
+                    category=category,
+                    sub_category=sub_category,
+                    type=type,
+                    date=date,
+                    chapter_id=chapter_id,
+                    user_type=user_type,
+                    is_challenge_only=False,
+                    base_url=base_url,
+                    bearer_token=bearer_token,
+                    verify_ssl=verify_ssl,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Chapter %s: refetch without is_challenge_only failed (%s). "
+                    "Falling back to the original %d-question session.",
+                    chapter_id, exc, len(returned),
+                )
+            else:
+                full_returned = full_session.get("questions") or []
+                if len(full_returned) > len(returned):
+                    session_json = full_session
+
     return explain_from_session(
         session_json,
         max_questions=max_questions,
