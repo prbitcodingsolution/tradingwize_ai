@@ -50,11 +50,35 @@ logger = logging.getLogger("main_api")
 # Each module already defines a `FastAPI()` instance named `app`. We absorb
 # their routes (minus `/` and `/health`, which the unified app provides) into
 # this one app so a single uvicorn process serves all of them.
+#
+# Imports are wrapped so the app can still boot in slim environments (e.g.
+# Vercel serverless) where heavy optional deps (TA-Lib, cv2, langchain) are
+# not installed — the corresponding sub-service is simply skipped.
 
-from drawing_explainer import api_server as drawing_explainer_app  # noqa: E402
-from analysis_evaluator import api_server as analysis_evaluator_app  # noqa: E402
-import api_chat_drawing as chat_drawing_app  # noqa: E402
-import api_news_summary as news_summary_app  # noqa: E402
+drawing_explainer_app = None
+analysis_evaluator_app = None
+chat_drawing_app = None
+news_summary_app = None
+
+try:
+    from drawing_explainer import api_server as drawing_explainer_app  # noqa: E402
+except Exception as _e:
+    logger.warning("drawing_explainer disabled: %s", _e)
+
+try:
+    from analysis_evaluator import api_server as analysis_evaluator_app  # noqa: E402
+except Exception as _e:
+    logger.warning("analysis_evaluator disabled: %s", _e)
+
+try:
+    import api_chat_drawing as chat_drawing_app  # noqa: E402
+except Exception as _e:
+    logger.warning("chat_drawing disabled: %s", _e)
+
+try:
+    import api_news_summary as news_summary_app  # noqa: E402
+except Exception as _e:
+    logger.warning("news_summary disabled: %s", _e)
 
 
 # ─── build the unified app ─────────────────────────────────────────────────
@@ -89,10 +113,12 @@ _OVERRIDE_PATHS = {
 }
 
 _SERVICES: List[Dict[str, Any]] = [
-    {"name": "drawing_explainer",   "module": drawing_explainer_app,   "tag": "drawing_explainer"},
-    {"name": "analysis_evaluator",  "module": analysis_evaluator_app,  "tag": "analysis_evaluator"},
-    {"name": "chat_drawing",        "module": chat_drawing_app,        "tag": "chat_drawing"},
-    {"name": "news_summary",        "module": news_summary_app,        "tag": "news_summary"},
+    svc for svc in [
+        {"name": "drawing_explainer",   "module": drawing_explainer_app,   "tag": "drawing_explainer"},
+        {"name": "analysis_evaluator",  "module": analysis_evaluator_app,  "tag": "analysis_evaluator"},
+        {"name": "chat_drawing",        "module": chat_drawing_app,        "tag": "chat_drawing"},
+        {"name": "news_summary",        "module": news_summary_app,        "tag": "news_summary"},
+    ] if svc["module"] is not None
 ]
 
 

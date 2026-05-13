@@ -1,0 +1,76 @@
+# Vercel deploys main.py as a slim FastAPI serverless function via api/index.py.
+# Sub-apps (drawing_explainer, analysis_evaluator, api_chat_drawing,
+# api_news_summary) are wrapped in try/except in main.py and not needed on
+# Vercel — exclude their source plus all generated/downloaded content so the
+# function bundle stays under Vercel's 245 MB limit.
+
+# Generated/downloaded content (largest offenders)
+downloads/
+video_eng/
+video_hindi/
+data/
+charting_library/
+pdf_summaries/
+PPT_json/
+backup-all/
+static/
+generated_ai_scripts/
+*.pdf
+
+# Large root JSON dumps
+reddit_api_response_*.json
+smc_json_*.json
+indian_stocks_list*.txt
+stock_list_sample.txt
+
+# Sub-app source (kept out of Vercel; main.py skips them on import error)
+drawing_explainer/
+drawing_instruction/
+analysis_evaluator/
+api_chat_drawing.py
+api_news_summary.py
+api_drawing_instructions.py
+agent1.py
+app_advanced.py
+mcp_agent.py
+mcp_config.json
+mcp_scanner_agent_tradingview.py
+finrobot/
+feature_tutor/
+utils/
+database_utility/
+alembic/
+alembic.ini
+test/
+tools.py
+models.py
+get_new_token.py
+api_logger.py
+
+# Python / venv / caches
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local dev / docs / git / etc.
+.git/
+.devcontainer/
+.vscode/
+.claude/
+README.md
+CLAUDE.md
+requirements1.txt
+requirements1.macos.txt
+requirements-full.txt
+pyproject.toml
+.python-version
+
+# OS junk
+.DS_Store
+Thumbs.db
