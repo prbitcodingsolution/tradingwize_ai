@@ -75,3 +75,5 @@ logs/
 # Cached API responses
 reddit_api_response_*.json
 smc_json_*_test.json
+.vercel
+.env*.local
