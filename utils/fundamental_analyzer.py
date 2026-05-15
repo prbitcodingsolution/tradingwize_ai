@@ -1145,8 +1145,7 @@ def _fetch_political(symbol: str, name: str, directors: DirectorBlock) -> Politi
         confidence="medium" if block.connections else "low",
         notes=(
             f"{len(block.connections)} mention(s) flagged across "
-            f"{len(queries)} search angles — best-effort from public news; "
-            "not authoritative (no ECI / electoral-bond feed)."
+            f"{len(queries)} search angles."
         ),
         sources=[r.get("url") for r in results if r.get("url")][:5],
     )
@@ -1480,9 +1479,7 @@ def _fetch_legal(symbol: str, name: str, directors: DirectorBlock) -> LegalBlock
         confidence="medium" if block.cases else "low",
         notes=(
             f"{len(block.cases)} matter(s) flagged across {len(queries)} "
-            "search angles — best-effort from news + SEBI/NSE/BSE/RBI "
-            "snippets. eCourts / SEBI PDFs are not queryable as structured "
-            "feeds; verify any flagged case against the primary filing."
+            "search angles."
         ),
         sources=[r.get("url") for r in results if r.get("url")][:5],
     )
@@ -2073,12 +2070,8 @@ def _fetch_pledge(symbol: str, name: str) -> PledgeBlock:
             available=True,
             confidence="low",
             notes=(
-                "Could not extract the headline pledge % from screener.in "
-                f"(no 'Pledged' row, no Pros/Cons mention) — but NSE has "
-                f"{nse_count} SAST/PIT pledge filing(s) on record, so "
-                "0% would be misleading. Inspect the filings below for "
-                "the authoritative transaction history; verify the "
-                "current % against the latest BSE/NSE shareholding pattern."
+                f"Headline pledge % unavailable. {nse_count} NSE SAST/PIT "
+                "filing(s) on record — see filings below."
             ),
             sources=sources,
         )

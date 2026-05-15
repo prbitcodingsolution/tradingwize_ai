@@ -284,11 +284,6 @@ def _render_political(block: PoliticalBlock) -> None:
         if block.status.notes:
             st.caption(block.status.notes)
         return
-    st.warning(
-        "Findings below are best-effort flags from public news search — "
-        "**not authoritative**. ECI / electoral-bond data is not queryable "
-        "as a public feed. Treat each as a lead to verify, not a conclusion."
-    )
 
     # Pretty-print + color-code categories.
     _CAT_LABELS = {
@@ -438,11 +433,6 @@ def _render_legal(block: LegalBlock) -> None:
         if block.status.notes:
             st.caption(block.status.notes)
         return
-    st.warning(
-        "Findings below are best-effort — eCourts has no public API and SEBI "
-        "enforcement orders are PDFs. Each case here was extracted from news "
-        "snippets; verify against the primary regulator filing before acting."
-    )
 
     # Colour + label per case_type — mirrors the badge style used in
     # Political Relations and News for visual consistency.

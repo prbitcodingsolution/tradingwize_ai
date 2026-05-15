@@ -2884,18 +2884,22 @@ Rising DII % means domestic institutions are accumulating.
                         else:
                             display_date = time_posted
 
+                    # Escape HTML in user content BEFORE building the <img>
+                    # tag — titles like `ITC: Got "Sin Taxed"` contain raw
+                    # double-quotes that close the `alt="..."` attribute
+                    # early and dump the rest of the markup as visible text.
+                    import html as _html_mod
+                    safe_title = _html_mod.escape(title, quote=True)
+                    safe_desc = _html_mod.escape(description, quote=True)
+                    safe_author = _html_mod.escape(author, quote=True)
+                    safe_image_url = _html_mod.escape(image_url, quote=True)
+
                     # Chart image or placeholder
                     has_image = image_url and 's3.tradingview.com' in image_url
                     if has_image:
-                        img_block = f'<img class="tv-card-img" src="{image_url}" alt="{title}" loading="lazy" onerror="this.parentElement.innerHTML=\'<div style=padding:40px;text-align:center;color:#9598a1>Chart unavailable</div>\'">'
+                        img_block = f'<img class="tv-card-img" src="{safe_image_url}" alt="{safe_title}" loading="lazy" onerror="this.parentElement.innerHTML=\'<div style=padding:40px;text-align:center;color:#9598a1>Chart unavailable</div>\'">'
                     else:
                         img_block = '<div style="width:100%;aspect-ratio:16/10;background:#f0f3fa;display:flex;align-items:center;justify-content:center;color:#9598a1;font-size:14px;">Chart unavailable</div>'
-
-                    # Escape HTML in user content
-                    import html as _html_mod
-                    safe_title = _html_mod.escape(title)
-                    safe_desc = _html_mod.escape(description)
-                    safe_author = _html_mod.escape(author)
 
                     cards_html += f'''
                     <a href="{idea_url}" target="_blank" style="text-decoration:none;color:inherit;">

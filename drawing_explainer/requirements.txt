@@ -1,0 +1,16 @@
+# Drawing Explainer — runtime dependencies
+# Tested on Python 3.11+ (3.11 / 3.12 / 3.13 / 3.14 all work).
+
+# HTTP server + request validation
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+
+# Outbound HTTP (LMS calls: result-screenshot-view / single-result / get-forex-data)
+requests>=2.31
+
+# LLM client — used by utils/model_config.py::guarded_llm_call against OpenRouter
+openai>=1.30
+
+# Loads OPENROUTER_API_KEY / LMS_BASE_URL / DRAWING_EXPLAINER_BEARER_TOKEN from .env
+python-dotenv>=1.0
