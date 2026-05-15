@@ -1861,15 +1861,27 @@ OUTPUT FORMAT (JSON only):
                     fut_scr = p1_pool.submit(_phase1_screener)
                     fut_tav = p1_pool.submit(_phase1_tavily)
 
+                    # Why the timeout was bumped: `_fetch_fresh_data_from_tavily`
+                    # runs 4 sequential Tavily queries (~5s each) AND a
+                    # multi-model OpenRouter fallback chain (gpt-oss-120b →
+                    # gemini-flash → ...) that easily spends 15-30s before
+                    # the first non-empty completion. With the old 30s
+                    # ceiling the future was timing out routinely and
+                    # `concurrent.futures.TimeoutError` has an EMPTY str(),
+                    # so the failure printed as "Tavily domain search failed:"
+                    # with no detail — hard to diagnose. We now use
+                    # `type(e).__name__` to always surface SOMETHING.
                     try:
-                        _p1_screener_data = fut_scr.result(timeout=30)
+                        _p1_screener_data = fut_scr.result(timeout=45)
                     except Exception as e:
-                        print(f"⚠️ Screener.in fetch failed: {e}")
+                        msg = str(e) or "no message"
+                        print(f"⚠️ Screener.in fetch failed: {type(e).__name__}: {msg}")
 
                     try:
-                        _p1_tavily_data = fut_tav.result(timeout=30)
+                        _p1_tavily_data = fut_tav.result(timeout=75)
                     except Exception as e:
-                        print(f"⚠️ Tavily domain search failed: {e}")
+                        msg = str(e) or "no message"
+                        print(f"⚠️ Tavily domain search failed: {type(e).__name__}: {msg}")
 
                 # ── PHASE 2: Build base info dict from screener.in + Tavily ──
                 print(f"\n📊 PHASE 2: Building base data from screener.in + Tavily...")

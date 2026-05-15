@@ -544,6 +544,84 @@ class StockDatabase:
             print(f"❌ Failed to get news: {e}")
             return []
 
+    def save_fundamentals(
+        self,
+        *,
+        stock_symbol: str,
+        stock_name: str,
+        payload: Dict[str, Any],
+        analysis_version: str = "v1",
+    ) -> bool:
+        """Insert a fundamental-analysis snapshot for `stock_symbol`.
+
+        Schema lives in Alembic migration 0004
+        (``stock_fundamentals`` — JSONB payload column). The renderer
+        always reads the most-recent row per symbol; old rows are kept
+        intact so we can trend changes (director churn, pledge increases,
+        new legal cases) over time without a second write path.
+        """
+        try:
+            self.cursor.execute(
+                "INSERT INTO stock_fundamentals "
+                "(stock_symbol, stock_name, payload, analysis_version) "
+                "VALUES (%s, %s, %s, %s)",
+                (stock_symbol, stock_name, Json(payload), analysis_version),
+            )
+            self.conn.commit()
+            print(f"✅ Saved fundamentals snapshot for {stock_symbol}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to save fundamentals: {e}")
+            self.conn.rollback()
+            return False
+
+    def get_fundamentals(
+        self, stock_symbol: str, max_age_hours: int = 24,
+        analysis_version: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the most recent fundamentals payload for the symbol if
+        it was written within `max_age_hours`. None when no row is fresh
+        enough or on any DB error — the analyzer treats either as a
+        cache miss and re-fetches.
+
+        When `analysis_version` is supplied, only rows produced by that
+        version of the pipeline are returned. The analyzer bumps the
+        version whenever a section's JSON shape or extraction logic
+        changes in a user-visible way, so older payloads (e.g. with the
+        pre-fix pledge=0% reading) don't get served forever from cache."""
+        try:
+            if analysis_version:
+                self.cursor.execute(
+                    "SELECT payload FROM stock_fundamentals "
+                    "WHERE stock_symbol = %s "
+                    "  AND analysis_version = %s "
+                    "  AND fetched_at > NOW() - (%s || ' hours')::interval "
+                    "ORDER BY fetched_at DESC LIMIT 1",
+                    (stock_symbol, analysis_version, str(max_age_hours)),
+                )
+            else:
+                self.cursor.execute(
+                    "SELECT payload FROM stock_fundamentals "
+                    "WHERE stock_symbol = %s "
+                    "  AND fetched_at > NOW() - (%s || ' hours')::interval "
+                    "ORDER BY fetched_at DESC LIMIT 1",
+                    (stock_symbol, str(max_age_hours)),
+                )
+            row = self.cursor.fetchone()
+            if not row or not row[0]:
+                return None
+            payload = row[0]
+            if isinstance(payload, dict):
+                return payload
+            try:
+                import json as _json
+                return _json.loads(payload)
+            except Exception:
+                return None
+        except Exception as e:
+            print(f"❌ Failed to get fundamentals: {e}")
+            return None
+
 
 def extract_tech_analysis_json(company_data) -> Dict[str, Any]:
     """

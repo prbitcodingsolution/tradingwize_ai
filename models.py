@@ -295,3 +295,208 @@ class OptionChainData(BaseModel):
     analysis: OIAnalysis
     data_source: str = "nse_api"
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ─────────────────────────────────────────────────────────
+# Enhanced fundamental analysis (see utils/fundamental_analyzer.py)
+# ─────────────────────────────────────────────────────────
+#
+# Every sub-section returns its own model wrapped in a `SectionResult` so the
+# renderer can degrade gracefully when a source is unavailable (Tavily down,
+# screener.in blocking, etc.) without breaking the whole card.
+
+
+class SectionStatus(BaseModel):
+    """Common per-section status block — every fundamental sub-analysis
+    carries one of these so the UI can show 'data not available' or a
+    confidence badge instead of an empty/blank section."""
+    available: bool = False
+    confidence: str = "low"  # "high" | "medium" | "low"
+    notes: str = ""
+    sources: List[str] = Field(default_factory=list)
+
+
+class FinancialTrendPoint(BaseModel):
+    """One year (or quarter) of headline P&L / balance-sheet metrics."""
+    period: str  # e.g. "FY21" or "Mar 2024"
+    revenue: Optional[float] = None
+    ebitda: Optional[float] = None
+    pat: Optional[float] = None  # profit after tax
+    eps: Optional[float] = None
+    debt: Optional[float] = None
+    roe: Optional[float] = None
+    roce: Optional[float] = None
+    operating_margin: Optional[float] = None
+
+
+class CorporateAction(BaseModel):
+    period: str
+    action_type: str  # dividend / split / buyback / bonus
+    detail: str
+
+
+class ShareholdingSnapshot(BaseModel):
+    quarter: str
+    promoter: Optional[float] = None
+    fii: Optional[float] = None
+    dii: Optional[float] = None
+    public: Optional[float] = None
+    government: Optional[float] = None
+
+
+class FinancialTrend(BaseModel):
+    """5-year financial trend block (item 1 in the client brief)."""
+    status: SectionStatus = Field(default_factory=SectionStatus)
+    yearly: List[FinancialTrendPoint] = Field(default_factory=list)
+    quarterly: List[FinancialTrendPoint] = Field(default_factory=list)
+    shareholding: List[ShareholdingSnapshot] = Field(default_factory=list)
+    corporate_actions: List[CorporateAction] = Field(default_factory=list)
+
+
+class DirectorProfile(BaseModel):
+    """One person on the board / promoter group (item 2)."""
+    name: str
+    designation: Optional[str] = None
+    since_year: Optional[str] = None  # year (or "since YYYY") they took the current role
+    din: Optional[str] = None
+    background: Optional[str] = None
+    other_directorships: List[str] = Field(default_factory=list)
+    source_links: List[str] = Field(default_factory=list)
+
+
+class DirectorBlock(BaseModel):
+    status: SectionStatus = Field(default_factory=SectionStatus)
+    directors: List[DirectorProfile] = Field(default_factory=list)
+
+
+class PoliticalConnection(BaseModel):
+    """Item 3 — best-effort flag, NOT authoritative."""
+    subject: str  # director name or "company"
+    finding: str
+    category: Optional[str] = None
+    # category: one of "government_ownership", "political_appointment",
+    # "donation", "affiliation", "controversy", "regulatory", "contracts",
+    # or "other" — drives badge color + grouping in the renderer.
+    confidence: str = "low"  # high|medium|low
+    source_links: List[str] = Field(default_factory=list)
+
+
+class PoliticalBlock(BaseModel):
+    status: SectionStatus = Field(default_factory=SectionStatus)
+    connections: List[PoliticalConnection] = Field(default_factory=list)
+
+
+class NewsHeadline(BaseModel):
+    """Item 4 — headline + LLM-tagged sentiment / category."""
+    title: str
+    publisher: str = ""
+    link: str = ""
+    summary: str = ""
+    published: Optional[str] = None
+    sentiment: str = "neutral"  # positive / negative / neutral
+    category: Optional[str] = None  # earnings / regulatory / governance / management / macro / other
+
+
+class NewsBlock(BaseModel):
+    status: SectionStatus = Field(default_factory=SectionStatus)
+    items: List[NewsHeadline] = Field(default_factory=list)
+    positive: int = 0
+    negative: int = 0
+    neutral: int = 0
+
+
+class LegalCase(BaseModel):
+    """Item 5 — SEBI order / SFIO / court / defaulter flag. Best-effort."""
+    subject: str  # company or director name
+    case_type: str  # SEBI / SFIO / court / wilful_defaulter / other
+    summary: str
+    published: Optional[str] = None
+    confidence: str = "low"
+    source_links: List[str] = Field(default_factory=list)
+
+
+class LegalBlock(BaseModel):
+    status: SectionStatus = Field(default_factory=SectionStatus)
+    cases: List[LegalCase] = Field(default_factory=list)
+
+
+class PromoterInvestment(BaseModel):
+    """Item 6 — a company the promoter / director has invested in."""
+    investor_name: str  # director / promoter
+    company_name: str
+    stake_percent: Optional[float] = None
+    listed: bool = False
+    ticker: Optional[str] = None
+    investment_value: Optional[str] = None
+    source_links: List[str] = Field(default_factory=list)
+
+
+class PortfolioPerformance(BaseModel):
+    """Item 7 — performance of a portfolio company (only when listed)."""
+    company_name: str
+    ticker: Optional[str] = None
+    last_price: Optional[float] = None
+    return_1y_pct: Optional[float] = None
+    return_3y_pct: Optional[float] = None
+    revenue_trend: Optional[str] = None  # "growing" / "flat" / "declining"
+    note: Optional[str] = None
+
+
+class InvestmentsBlock(BaseModel):
+    """Combined item 6 + 7."""
+    status: SectionStatus = Field(default_factory=SectionStatus)
+    investments: List[PromoterInvestment] = Field(default_factory=list)
+    performance: List[PortfolioPerformance] = Field(default_factory=list)
+
+
+class PledgePoint(BaseModel):
+    """Item 8 — one quarter's pledge snapshot."""
+    quarter: str
+    percent_pledged: Optional[float] = None
+    lender: Optional[str] = None
+
+
+class PledgeEvent(BaseModel):
+    """Item 8 — one SAST/PIT pledge filing from NSE.
+
+    Sourced from `/api/corporates-pit` so the values are authoritative
+    exchange disclosures, not text-extracted estimates. Empty for stocks
+    with no recent SAST filings (most clean large-caps).
+    """
+    acquirer: str
+    transaction_type: str  # "Pledge" / "Sell" / etc.
+    mode: str  # "Pledge Creation" / "Pledge Release" / "Pledge Invocation"
+    shares: Optional[int] = None
+    value: Optional[int] = None  # rupees
+    before_pct: Optional[float] = None
+    after_pct: Optional[float] = None
+    date: Optional[str] = None  # event date
+    intimation_date: Optional[str] = None  # filing date
+    category: Optional[str] = None  # promoter / employee / etc.
+    xbrl_url: Optional[str] = None
+
+
+class PledgeBlock(BaseModel):
+    status: SectionStatus = Field(default_factory=SectionStatus)
+    current_percent: Optional[float] = None
+    risk_level: str = "unknown"  # low / medium / high / critical / unknown
+    trend: List[PledgePoint] = Field(default_factory=list)
+    events: List[PledgeEvent] = Field(default_factory=list)  # NSE SAST/PIT history
+
+
+class FundamentalAnalysis(BaseModel):
+    """Top-level aggregator returned by
+    `utils.fundamental_analyzer.analyze_fundamentals`."""
+    symbol: str
+    stock_name: Optional[str] = None
+    analysis_version: str = "v1"
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    cached: bool = False  # True when returned from the DB cache rather than freshly fetched
+    financials: FinancialTrend = Field(default_factory=FinancialTrend)
+    directors: DirectorBlock = Field(default_factory=DirectorBlock)
+    political: PoliticalBlock = Field(default_factory=PoliticalBlock)
+    news: NewsBlock = Field(default_factory=NewsBlock)
+    legal: LegalBlock = Field(default_factory=LegalBlock)
+    investments: InvestmentsBlock = Field(default_factory=InvestmentsBlock)
+    pledge: PledgeBlock = Field(default_factory=PledgeBlock)
+    overall_notes: List[str] = Field(default_factory=list)

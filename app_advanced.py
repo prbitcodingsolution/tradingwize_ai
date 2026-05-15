@@ -1139,6 +1139,7 @@ with st.sidebar:
     view_options = [
         "📈 Data Dashboard",
         "🔬 Deep Analysis",
+        "📅 5-Year Analysis",
     ]
 
     # Add Presentation Viewer if PPT was generated
@@ -2818,6 +2819,34 @@ Rising DII % means domestic institutions are accumulating.
                             ideas_result = scrape_trade_ideas(clean_symbol, exchange, 9)
                         st.session_state[cache_key] = ideas_result
                         st.session_state.trade_ideas_stock = stock_symbol
+                        # Chain — kick off the 5-Year Analysis in the
+                        # background now that trade_ideas finished, so the
+                        # FA tab is pre-warmed by the time the user opens
+                        # it. Mirrors the chain inside `_run_trade_ideas`.
+                        try:
+                            from utils.background_tasks import (
+                                _maybe_run_fundamentals_inline,
+                            )
+                            import threading as _th
+                            try:
+                                from streamlit.runtime.scriptrunner import (
+                                    add_script_run_ctx as _add_ctx,
+                                )
+                            except Exception:
+                                from streamlit.scriptrunner import add_script_run_ctx as _add_ctx  # type: ignore
+                            _t = _th.Thread(
+                                target=_maybe_run_fundamentals_inline,
+                                args=(stock_symbol, st.session_state.get("current_stock_name")),
+                                daemon=True,
+                                name=f"bg-fundamentals-{stock_symbol}",
+                            )
+                            try:
+                                _add_ctx(_t)
+                            except Exception:
+                                pass
+                            _t.start()
+                        except Exception as _bg_err:
+                            print(f"⚠️ FA chain from legacy trade_ideas failed: {_bg_err}")
                     except Exception as e:
                         st.error(f"❌ Error fetching trade ideas: {e}")
                         ideas_result = None
@@ -7459,6 +7488,158 @@ Rising DII % means domestic institutions are accumulating.
         )
 
 
+elif view_option == "📅 5-Year Analysis":
+    # Enhanced multi-source fundamental dashboard:
+    #   • 5-year P&L / balance-sheet / shareholding trends from screener.in
+    #   • Director / promoter background (Tavily + LLM extraction)
+    #   • Political-link flags (best-effort — no public ECI API)
+    #   • Company + director news with LLM-tagged sentiment
+    #   • Legal / SEBI / SFIO mentions (best-effort — no public eCourts feed)
+    #   • Promoter cross-holdings + portfolio-company performance (yfinance)
+    #   • Quarterly promoter-pledge trend with risk badge
+    #
+    # Implementation lives in utils/fundamental_analyzer.py (data layer,
+    # parallel fan-out across 8 sub-fetchers) and utils/fundamental_renderer.py
+    # (Streamlit + plotly rendering). Persistence: stock_fundamentals
+    # JSONB table from Alembic 0004 with a 24h TTL.
+    bx_header("5-Year Analysis", "bx-calendar")
+    st.markdown(
+        "Multi-source fundamental dashboard: **5Y financials · directors · "
+        "political · news · legal · investments · pledge**. Best-effort for "
+        "items without public APIs."
+    )
+
+    _stock_symbol = None
+    _stock_name = None
+    if hasattr(st.session_state, "deps") and st.session_state.deps:
+        _stock_symbol = getattr(st.session_state.deps, "stock_symbol", None)
+        _stock_name = getattr(st.session_state.deps, "stock_name", None)
+    if not _stock_symbol:
+        _stock_symbol = st.session_state.get("current_stock")
+
+    if not _stock_symbol:
+        st.info(
+            "🔎 Load a stock from **📈 Data Dashboard** first (search a "
+            "symbol or company name), then come back to this view."
+        )
+    else:
+        # The 5-Year Analysis runs automatically in the background after
+        # the Trade Ideas scrape finishes (see `utils/background_tasks.py`
+        # — `_run_trade_ideas` chains into `_run_fundamentals` so both
+        # heavy bg tasks run sequentially per stock). The manual "Run /
+        # Refresh" button stays as an explicit override / retry.
+        from utils.background_tasks import bg_status as _bg_status
+        _fund_state_key = f"_fund_analysis::{_stock_symbol}"
+        _fund_bg = _bg_status("fundamentals", _stock_symbol)
+
+        col_a, col_b = st.columns([4, 1])
+        with col_a:
+            st.markdown(f"#### {_stock_name or _stock_symbol}  \n`{_stock_symbol}`")
+        with col_b:
+            _refresh = st.button(
+                "🔬 Run / Refresh",
+                key=f"fund_run_{_stock_symbol}",
+                use_container_width=True,
+                type="primary",
+                help=(
+                    "Force a fresh fetch even when a recent snapshot or "
+                    "background run exists. Otherwise the FA runs "
+                    "automatically after Trade Ideas finishes."
+                ),
+            )
+
+        if _refresh:
+            # Explicit refresh: drop the cached result + reset bg status
+            # so a fresh run can start. The button click itself will then
+            # trigger the inline `analyze_fundamentals` call below.
+            st.session_state.pop(_fund_state_key, None)
+            try:
+                from utils.background_tasks import reset_bg_status_for_symbol
+                reset_bg_status_for_symbol(_stock_symbol)
+            except Exception:
+                pass
+
+        _cached_fa = st.session_state.get(_fund_state_key)
+
+        # DB-cache-only peek — instant when a recent snapshot exists,
+        # never triggers a fresh Tavily/LLM fetch. Always runs unless the
+        # user explicitly clicked Refresh (so we don't hit the DB after
+        # they asked for a fresh run).
+        if _cached_fa is None and not _refresh:
+            try:
+                from utils.fundamental_analyzer import load_cached_fundamentals
+                _cached_fa = load_cached_fundamentals(_stock_symbol, max_age_hours=24)
+                if _cached_fa is not None:
+                    st.session_state[_fund_state_key] = _cached_fa
+            except Exception:
+                _cached_fa = None
+
+        if _cached_fa is None and _refresh:
+            # Manual refresh: run inline (foreground) so the user sees the
+            # spinner while they wait. The analyzer streams its detailed
+            # timestamped progress to stdout (visible in the Streamlit
+            # server console).
+            from utils.fundamental_analyzer import analyze_fundamentals
+            with st.spinner(
+                "Running 5-Year Analysis (~60–90s on first run — 8 sections "
+                "fan out in parallel; cached for 24h afterwards so repeat "
+                "visits render instantly)..."
+            ):
+                try:
+                    _cached_fa = analyze_fundamentals(
+                        _stock_symbol, _stock_name, force_refresh=True,
+                    )
+                    st.session_state[_fund_state_key] = _cached_fa
+                except Exception as _exc:
+                    st.error(f"❌ Analysis failed: {_exc}")
+                    _cached_fa = None
+
+        # ── No result yet — surface the background task's progress ──
+        if _cached_fa is None:
+            if _fund_bg == "running":
+                # Background pipeline is in flight (chained from Trade
+                # Ideas). Auto-refresh every few seconds so the section
+                # populates as soon as the bg task finishes — the user
+                # doesn't have to touch the page.
+                try:
+                    from streamlit_autorefresh import st_autorefresh
+                    st_autorefresh(
+                        interval=5000,
+                        key=f"fa_autorefresh_{_stock_symbol}",
+                        limit=60,  # 5 min × 12 = enough for a 90s+50s chain
+                    )
+                except Exception:
+                    pass
+                st.info(
+                    "⏳ **5-Year Analysis is running in the background** "
+                    "(launched automatically after Trade Ideas). This page "
+                    "auto-refreshes every 5 seconds and will populate as "
+                    "soon as the run completes — usually 60–90 seconds. "
+                    "Click 🔬 Run / Refresh above to force a fresh run "
+                    "instead."
+                )
+            elif _fund_bg == "error":
+                _err = st.session_state.get(
+                    f"_bg_fundamentals_error_{_stock_symbol}", "unknown error"
+                )
+                st.error(
+                    f"❌ Background analysis failed: {_err}\n\n"
+                    "Click 🔬 Run / Refresh above to retry."
+                )
+            else:
+                # "not_started" — either the user hasn't loaded a stock
+                # in Data Dashboard yet, or the bg chain hasn't reached
+                # this stock. The Run / Refresh button is the manual path.
+                st.info(
+                    "Load a stock from **📈 Data Dashboard** to start the "
+                    "Trade Ideas + 5-Year Analysis background chain. "
+                    "Already loaded? Click **🔬 Run / Refresh** above to "
+                    "run the analysis now."
+                )
+        else:
+            from utils.fundamental_renderer import render_fundamental_analysis
+            render_fundamental_analysis(_cached_fa)
+
 elif view_option == "⚡ Bulk Stock Analyzer":
     # Bulk Stock Analyzer - Full-featured version matching bulk_stock_dashboard.py
     bx_header("Bulk Stock Analyzer", "bx-search-alt-2", level=3)
@@ -7924,8 +8105,8 @@ elif view_option == "🖊️ Drawing Generator":
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         symbol_input = st.text_input(
-            "Stock Symbol", value="AAPL",
-            help="e.g. AAPL, RELIANCE, TCS  (exchange suffix added automatically)"
+            "Stock Symbol", value="JIO",
+            help="e.g. JIO, RELIANCE, TCS  (exchange suffix added automatically)"
         )
     with col2:
         timeframe = st.selectbox(
@@ -7949,12 +8130,8 @@ elif view_option == "🖊️ Drawing Generator":
             help="stock = NSE India  |  nasdaq/nyse = US stocks  |  forex/crypto = global"
         )
 
-    # ── Row 2: API server URL ─────────────────────────────────────────────────
-    api_url = st.text_input(
-        "Drawing API URL",
-        value="http://localhost:8000",
-        help="Base URL of the api_chat_drawing.py server  (POST /api/v1/drawing/chat/)"
-    )
+    # Drawing API URL is fixed; not exposed in the UI.
+    api_url = "http://localhost:8000"
 
     st.markdown("---")
     # ── What to generate ─────────────────────────────────────────────────────

@@ -186,8 +186,21 @@ def _run_sentiment(stock_name: str, stock_symbol: str) -> None:
         print(f"⚠️ [bg] sentiment failed for {stock_symbol}: {e}")
 
 
-def _run_trade_ideas(clean_symbol: str, exchange: str, stock_symbol: str, limit: int = 9) -> None:
+def _run_trade_ideas(
+    clean_symbol: str,
+    exchange: str,
+    stock_symbol: str,
+    limit: int = 9,
+    stock_name: Optional[str] = None,
+) -> None:
     """Run the TradingView trade-ideas scraper and cache the result.
+
+    On success, chain into `_run_fundamentals` in the same daemon thread
+    so the 5-Year Analysis tab is pre-warmed without the user needing to
+    click the manual "Run / Refresh" button. The chain runs sequentially
+    after trade_ideas finishes (per user request) — keeps API load
+    predictable and avoids competing for CPU during the active dashboard
+    render.
 
     Writes:
         st.session_state[f"trade_ideas_{clean_symbol}"]  (dict | None)
@@ -199,6 +212,7 @@ def _run_trade_ideas(clean_symbol: str, exchange: str, stock_symbol: str, limit:
     as "done" — they are surfaced as "error" so the Trade Ideas tab
     shows its retry UI instead of a permanent empty-state banner.
     """
+    chained_after = False  # whether we've kicked off the fundamentals follow-up
     try:
         from utils.tradingview_ideas_scraper import scrape_trade_ideas
         # ── Phase-3 timing: Trade Ideas (TradingView) [background task] ──
@@ -213,6 +227,14 @@ def _run_trade_ideas(clean_symbol: str, exchange: str, stock_symbol: str, limit:
             st.session_state["trade_ideas_stock"] = stock_symbol
             _set_status("trade_ideas", stock_symbol, "done")
             print(f"✅ [bg] trade_ideas done for {stock_symbol} ({len(_ideas)} ideas)")
+
+            # Chain — kick off fundamentals analysis sequentially now that
+            # trade_ideas is done. The user explicitly asked for the FA to
+            # auto-start after trade_ideas completes; doing it inline in
+            # this thread (rather than spawning another) means there's only
+            # ever one heavy bg task per stock running at a time.
+            _maybe_run_fundamentals_inline(stock_symbol, stock_name)
+            chained_after = True
             return
 
         # Empty result — treat as error so the UI offers a retry rather
@@ -225,6 +247,82 @@ def _run_trade_ideas(clean_symbol: str, exchange: str, stock_symbol: str, limit:
         st.session_state[f"_bg_trade_ideas_error_{stock_symbol}"] = str(e)
         _set_status("trade_ideas", stock_symbol, "error")
         print(f"⚠️ [bg] trade_ideas failed for {stock_symbol}: {e}")
+    finally:
+        # If trade_ideas didn't complete successfully (errored or empty),
+        # we still want the FA to run — the user is waiting for it on
+        # the 5-Year Analysis tab and shouldn't be blocked by an
+        # unrelated trade-ideas failure. Only skip when we already
+        # chained from the success branch above.
+        if not chained_after:
+            _maybe_run_fundamentals_inline(stock_symbol, stock_name)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Fundamentals (5-Year Analysis) chained from trade_ideas
+# ──────────────────────────────────────────────────────────────────
+
+def _fundamentals_state_key(stock_symbol: str) -> str:
+    """Mirrors the key used by the 5-Year Analysis view in app_advanced.py
+    so a background-cached result is picked up by the next page render
+    without an explicit lookup."""
+    return f"_fund_analysis::{stock_symbol}"
+
+
+def _run_fundamentals(stock_symbol: str, stock_name: Optional[str]) -> None:
+    """Run the 5-Year Analysis pipeline and cache the result in session
+    state. Honours the DB-level 24h TTL so we don't re-pay Tavily / LLM
+    cost when a recent snapshot already exists.
+
+    Writes:
+        st.session_state[_fund_analysis::<SYMBOL>]   (FundamentalAnalysis)
+        _bg_fundamentals_status_<SYMBOL>             ("done" | "error")
+        _bg_fundamentals_error_<SYMBOL>              (str, on error)
+    """
+    try:
+        from utils.fundamental_analyzer import analyze_fundamentals
+        # No `force_refresh`: a fresh DB snapshot (≤ 24h) returns instantly.
+        result = analyze_fundamentals(stock_symbol, stock_name)
+        st.session_state[_fundamentals_state_key(stock_symbol)] = result
+        _set_status("fundamentals", stock_symbol, "done")
+        print(f"✅ [bg] fundamentals done for {stock_symbol}")
+    except Exception as e:
+        st.session_state[f"_bg_fundamentals_error_{stock_symbol}"] = str(e)
+        _set_status("fundamentals", stock_symbol, "error")
+        print(f"⚠️ [bg] fundamentals failed for {stock_symbol}: {e}")
+
+
+def _maybe_run_fundamentals_inline(stock_symbol: str, stock_name: Optional[str]) -> None:
+    """Run fundamentals in the *current* daemon thread (no new spawn) when
+    the symbol still needs it. Called at the end of `_run_trade_ideas`
+    so the two heavy background tasks chain sequentially.
+
+    Skips when fundamentals is already running, already cached in
+    session state, OR when a fresh DB snapshot exists — the FA view's
+    on-demand cache check picks those up without us paying the network
+    cost again.
+    """
+    if not stock_symbol:
+        return
+    state_key = _fundamentals_state_key(stock_symbol)
+    if st.session_state.get(state_key) is not None:
+        return  # already cached in this session
+    if bg_status("fundamentals", stock_symbol) == "running":
+        return  # another thread is already on it
+    try:
+        from utils.fundamental_analyzer import load_cached_fundamentals
+        if load_cached_fundamentals(stock_symbol, max_age_hours=24) is not None:
+            # DB cache will satisfy the FA view directly; no need to
+            # spend a thread re-running the pipeline.
+            _set_status("fundamentals", stock_symbol, "done")
+            print(f"⏭️  [bg] fundamentals skipped for {stock_symbol} — DB snapshot ≤ 24h old")
+            return
+    except Exception:
+        # If the DB peek fails, fall through and run the analyzer; it has
+        # its own internal cache check.
+        pass
+    _set_status("fundamentals", stock_symbol, "running")
+    print(f"🚀 [bg] launching fundamentals for {stock_symbol} (chained after trade_ideas)")
+    _run_fundamentals(stock_symbol, stock_name)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -298,7 +396,9 @@ def kickoff_dashboard_bg_tasks(
                 thread_name=f"bg-sentiment-{stock_symbol}",
             )
 
-    # Trade ideas
+    # Trade ideas — chains into fundamentals on completion via
+    # `_run_trade_ideas` finally-block, so a single spawn covers both
+    # heavy background analyses.
     ti_cache_key = f"trade_ideas_{clean_symbol}"
     ti_cached = (
         ti_cache_key in st.session_state
@@ -309,13 +409,28 @@ def kickoff_dashboard_bg_tasks(
         print(f"🚀 [bg] launching trade_ideas for {stock_symbol}")
         _spawn(
             _run_trade_ideas,
-            args=(clean_symbol, exchange, stock_symbol, 9),
+            args=(clean_symbol, exchange, stock_symbol, 9, stock_name),
             thread_name=f"bg-trade-ideas-{stock_symbol}",
+        )
+    elif _should_start("fundamentals", stock_symbol, False):
+        # Trade ideas was already cached / running for this stock so the
+        # chain wouldn't fire; spawn the fundamentals follow-up directly.
+        # `_maybe_run_fundamentals_inline` no-ops if a recent DB snapshot
+        # exists, so this is cheap.
+        _set_status("fundamentals", stock_symbol, "running")
+        print(f"🚀 [bg] launching fundamentals for {stock_symbol} (trade_ideas already settled)")
+        _spawn(
+            _run_fundamentals,
+            args=(stock_symbol, stock_name),
+            thread_name=f"bg-fundamentals-{stock_symbol}",
         )
 
 
 def reset_bg_status_for_symbol(symbol: str) -> None:
     """Wipe status + cache flags for a symbol. Call on explicit refresh."""
-    for task in ("sentiment", "trade_ideas"):
+    for task in ("sentiment", "trade_ideas", "fundamentals"):
         st.session_state.pop(_status_key(task, symbol), None)
         st.session_state.pop(f"_bg_{task}_error_{symbol}", None)
+    # Also clear the in-session fundamentals payload so the next render
+    # either re-loads from DB or re-runs the analyzer.
+    st.session_state.pop(_fundamentals_state_key(symbol), None)

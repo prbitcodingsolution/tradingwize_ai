@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 #
 # Override via env if your OpenRouter slug differs (some accounts see this
 # model as `anthropic/claude-haiku-4-5` or with a date suffix).
-LLM_MODEL = os.getenv("DRAWING_EXPLAINER_MODEL", "anthropic/claude-haiku-4.5")
+LLM_MODEL = os.getenv("DRAWING_EXPLAINER_MODEL", "anthropic/claude-3-haiku")
 LLM_TIMEOUT_SEC = float(os.getenv("DRAWING_EXPLAINER_LLM_TIMEOUT", "120"))
 # Token ceiling for the per-question card. The card schema is 8 short fields
 # (~200-300 words rendered) so we don't need a huge budget; setting it well
